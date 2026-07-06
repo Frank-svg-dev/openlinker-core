@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -231,8 +232,12 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 		if err := h.PostAgentHeartbeat(heartbeatCtx); err != nil {
 			t.Fatalf("PostAgentHeartbeat error = %v", err)
 		}
-		if heartbeatRec.Code != http.StatusOK || mock.heartbeatToken != "ol_agent_secret" {
-			t.Fatalf("heartbeat code=%d token=%q", heartbeatRec.Code, mock.heartbeatToken)
+		if heartbeatRec.Code != http.StatusOK ||
+			mock.validateRuntimeTokenPlaintext != "ol_agent_secret" ||
+			mock.heartbeatToken != "" ||
+			mock.verifiedHeartbeatToken.ID == uuid.Nil {
+			t.Fatalf("heartbeat code=%d validated=%q plaintext-token=%q verified=%s",
+				heartbeatRec.Code, mock.validateRuntimeTokenPlaintext, mock.heartbeatToken, mock.verifiedHeartbeatToken.ID)
 		}
 
 		claimCtx, claimRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
@@ -243,8 +248,13 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 		if err := h.ClaimRuntimePullRun(claimCtx); err != nil {
 			t.Fatalf("ClaimRuntimePullRun error = %v", err)
 		}
-		if claimRec.Code != http.StatusOK || mock.claimToken != "ol_agent_secret" || mock.claimWait != runtimePullMaxLongPollWait {
-			t.Fatalf("claim code=%d token=%q wait=%s", claimRec.Code, mock.claimToken, mock.claimWait)
+		if claimRec.Code != http.StatusOK ||
+			mock.validateRuntimeTokenPlaintext != "ol_agent_secret" ||
+			mock.claimToken != "" ||
+			mock.verifiedClaimToken.ID == uuid.Nil ||
+			mock.claimWait != runtimePullMaxLongPollWait {
+			t.Fatalf("claim code=%d validated=%q plaintext-token=%q verified=%s wait=%s",
+				claimRec.Code, mock.validateRuntimeTokenPlaintext, mock.claimToken, mock.verifiedClaimToken.ID, mock.claimWait)
 		}
 
 		mock.claimResp = nil
@@ -674,16 +684,18 @@ type mockRuntimeService struct {
 	reportReq   *ReportRunEventRequest
 	reportResp  *RunEventResponse
 
-	claimToken string
-	claimWait  time.Duration
-	claimResp  *RuntimePullRunResponse
+	claimToken         string
+	claimWait          time.Duration
+	claimResp          *RuntimePullRunResponse
+	verifiedClaimToken db.AgentRuntimeToken
 
 	validateRuntimeTokenErr       error
 	validateRuntimeTokenPlaintext string
 	validateRuntimeTokenScopes    []string
 
-	heartbeatToken string
-	heartbeatResp  *AgentHeartbeatResponse
+	heartbeatToken         string
+	heartbeatResp          *AgentHeartbeatResponse
+	verifiedHeartbeatToken db.AgentRuntimeToken
 
 	completeToken string
 	completeRunID uuid.UUID
@@ -748,17 +760,33 @@ func (m *mockRuntimeService) ClaimRuntimePullRun(_ context.Context, token string
 	return m.claimResp, m.err
 }
 
-func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token string, scopes ...string) error {
+func (m *mockRuntimeService) ClaimRuntimePullRunForToken(_ context.Context, token db.AgentRuntimeToken, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
+	m.verifiedClaimToken = token
+	if len(opts) > 0 {
+		m.claimWait = opts[0].Wait
+	}
+	return m.claimResp, m.err
+}
+
+func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token string, scopes ...string) (db.AgentRuntimeToken, error) {
 	m.validateRuntimeTokenPlaintext = token
 	m.validateRuntimeTokenScopes = append([]string(nil), scopes...)
 	if m.validateRuntimeTokenErr != nil {
-		return m.validateRuntimeTokenErr
+		return db.AgentRuntimeToken{}, m.validateRuntimeTokenErr
 	}
-	return m.err
+	if m.err != nil {
+		return db.AgentRuntimeToken{}, m.err
+	}
+	return db.AgentRuntimeToken{ID: uuid.New(), AgentID: uuid.New(), ConnectionMode: "runtime_pull"}, nil
 }
 
 func (m *mockRuntimeService) HeartbeatAgent(_ context.Context, token string) (*AgentHeartbeatResponse, error) {
 	m.heartbeatToken = token
+	return m.heartbeatResp, m.err
+}
+
+func (m *mockRuntimeService) HeartbeatAgentForToken(_ context.Context, token db.AgentRuntimeToken) (*AgentHeartbeatResponse, error) {
+	m.verifiedHeartbeatToken = token
 	return m.heartbeatResp, m.err
 }
 

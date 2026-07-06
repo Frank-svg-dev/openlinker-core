@@ -17,6 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -40,8 +41,10 @@ type runtimeService interface {
 	ListRunMessages(context.Context, uuid.UUID, uuid.UUID) ([]RunMessageResponse, error)
 	ReportRunEvent(context.Context, uuid.UUID, string, *ReportRunEventRequest) (*RunEventResponse, error)
 	ClaimRuntimePullRun(context.Context, string, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
-	ValidateRuntimeToken(context.Context, string, ...string) error
+	ClaimRuntimePullRunForToken(context.Context, db.AgentRuntimeToken, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
+	ValidateRuntimeToken(context.Context, string, ...string) (db.AgentRuntimeToken, error)
 	HeartbeatAgent(context.Context, string) (*AgentHeartbeatResponse, error)
+	HeartbeatAgentForToken(context.Context, db.AgentRuntimeToken) (*AgentHeartbeatResponse, error)
 	CompleteRuntimePullRun(context.Context, string, uuid.UUID, *RuntimePullResultRequest) (*RunResponse, error)
 	ServeRuntimeWebSocket(http.ResponseWriter, *http.Request, string) error
 }
@@ -361,7 +364,8 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
 		}
 		return err
 	}
-	if err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull"); err != nil {
+	verifiedToken, err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull")
+	if err != nil {
 		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterEndpointTokenKey(token, "claim")); retry > 0 {
 			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
 		}
@@ -377,7 +381,7 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
 		return runtimeRateLimitError(c, retry, "runtime claim 过于频繁，请按 Retry-After 退避")
 	}
 	defer finishClaim()
-	resp, err := h.svc.ClaimRuntimePullRun(c.Request().Context(), token, RuntimePullClaimOptions{Wait: wait})
+	resp, err := h.svc.ClaimRuntimePullRunForToken(c.Request().Context(), verifiedToken, RuntimePullClaimOptions{Wait: wait})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfter.Seconds())))
@@ -420,7 +424,8 @@ func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 		}
 		return err
 	}
-	if err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull", "agent:call"); err != nil {
+	verifiedToken, err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull", "agent:call")
+	if err != nil {
 		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterEndpointTokenKey(token, "heartbeat")); retry > 0 {
 			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
 		}
@@ -429,7 +434,7 @@ func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
 	if retry := h.runtimeLimiter.allowHeartbeat(runtimeLimiterTokenKey(token)); retry > 0 {
 		return runtimeRateLimitError(c, retry, "runtime heartbeat 过于频繁，请按 Retry-After 退避")
 	}
-	resp, err := h.svc.HeartbeatAgent(c.Request().Context(), token)
+	resp, err := h.svc.HeartbeatAgentForToken(c.Request().Context(), verifiedToken)
 	if err != nil {
 		return err
 	}

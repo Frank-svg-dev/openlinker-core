@@ -1519,6 +1519,12 @@ func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string
 	if err != nil {
 		return nil, err
 	}
+	return s.ClaimRuntimePullRunForToken(ctx, token, opts...)
+}
+
+// ClaimRuntimePullRunForToken claims a queued runtime run after the handler or
+// WebSocket layer has already verified the runtime token and scope.
+func (s *Service) ClaimRuntimePullRunForToken(ctx context.Context, token db.AgentRuntimeToken, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
 	connectionMode := strings.TrimSpace(token.ConnectionMode)
 	if connectionMode == "" {
 		agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
@@ -1877,6 +1883,12 @@ func (s *Service) HeartbeatAgent(ctx context.Context, plaintextToken string) (*A
 	if err != nil {
 		return nil, err
 	}
+	return s.HeartbeatAgentForToken(ctx, token)
+}
+
+// HeartbeatAgentForToken records runtime heartbeat after token validation has
+// already happened at the endpoint boundary.
+func (s *Service) HeartbeatAgentForToken(ctx context.Context, token db.AgentRuntimeToken) (*AgentHeartbeatResponse, error) {
 	agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("Agent 不存在")
@@ -1952,9 +1964,8 @@ func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext, requiredSco
 	return s.verifyRuntimeTokenAny(ctx, plaintext, requiredScope)
 }
 
-func (s *Service) ValidateRuntimeToken(ctx context.Context, plaintext string, acceptedScopes ...string) error {
-	_, err := s.verifyRuntimeTokenAny(ctx, plaintext, acceptedScopes...)
-	return err
+func (s *Service) ValidateRuntimeToken(ctx context.Context, plaintext string, acceptedScopes ...string) (db.AgentRuntimeToken, error) {
+	return s.verifyRuntimeTokenAny(ctx, plaintext, acceptedScopes...)
 }
 
 func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, acceptedScopes ...string) (db.AgentRuntimeToken, error) {
