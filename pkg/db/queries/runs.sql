@@ -299,6 +299,71 @@ LIMIT $3 OFFSET $4;
 -- name: CountRunsByUser :one
 SELECT COUNT(*)::int AS total FROM runs WHERE user_id = $1;
 
+-- name: ListCallRecordsForUser :many
+-- 用户视角调用记录：同一个页面展示“我调用的”和“我的 Agent 被调用的”。
+-- direction:
+--   made     = 当前用户作为调用方
+--   received = 当前用户拥有的 Agent 被调用
+--   both     = 当前用户调用了自己拥有的 Agent
+SELECT r.id,
+       r.user_id,
+       r.agent_id,
+       r.status,
+       CASE WHEN r.user_id = $1 THEN r.cost_cents ELSE 0 END::int AS cost_cents,
+       CASE WHEN a.creator_id = $1 THEN r.creator_revenue_cents ELSE 0 END::int AS creator_revenue_cents,
+       r.duration_ms,
+       r.started_at,
+       r.finished_at,
+       r.source,
+       a.slug AS agent_slug,
+       a.name AS agent_name,
+       CASE
+           WHEN r.user_id = $1 AND a.creator_id = $1 THEN 'both'
+           WHEN r.user_id = $1 THEN 'made'
+           ELSE 'received'
+       END::text AS direction,
+       COALESCE(d.parent_run_id::text, '')::text AS parent_run_id,
+       COALESCE(d.caller_agent_id::text, '')::text AS caller_agent_id,
+       COALESCE(caller.slug, '')::text AS caller_agent_slug,
+       COALESCE(caller.name, '')::text AS caller_agent_name,
+       COALESCE(ctx.protocol_context_id, '')::text AS protocol_context_id,
+       COALESCE(ctx.protocol_task_id, '')::text AS protocol_task_id,
+       COALESCE(ctx.root_context_id, '')::text AS root_context_id,
+       COALESCE(ctx.parent_context_id, '')::text AS parent_context_id,
+       COALESCE(ctx.parent_task_id, '')::text AS parent_task_id,
+       COALESCE(ctx.trace_id, '')::text AS trace_id,
+       COALESCE(ctx.reference_task_ids, ARRAY[]::text[]) AS reference_task_ids,
+       COALESCE(ctx.source, '')::text AS context_source,
+       COALESCE(NULLIF(ctx.protocol_task_id, ''), r.id::text)::text AS call_id,
+       COALESCE(children.child_count, 0)::int AS child_count
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+LEFT JOIN run_delegations d ON d.child_run_id = r.id
+LEFT JOIN agents caller ON caller.id = d.caller_agent_id
+LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS child_count
+    FROM run_delegations cd
+    WHERE cd.parent_run_id = r.id
+) children ON TRUE
+WHERE (
+    ($2 = 'made' AND r.user_id = $1)
+    OR ($2 = 'received' AND a.creator_id = $1)
+    OR ($2 = 'all' AND (r.user_id = $1 OR a.creator_id = $1))
+)
+ORDER BY r.started_at DESC, r.id DESC
+LIMIT $3 OFFSET $4;
+
+-- name: CountCallRecordsForUser :one
+SELECT COUNT(*)::int AS total
+FROM runs r
+JOIN agents a ON a.id = r.agent_id
+WHERE (
+    ($2 = 'made' AND r.user_id = $1)
+    OR ($2 = 'received' AND a.creator_id = $1)
+    OR ($2 = 'all' AND (r.user_id = $1 OR a.creator_id = $1))
+);
+
 -- name: CountRunsByCreatorAgent :one
 SELECT COUNT(*)::int AS total
 FROM runs r

@@ -55,6 +55,50 @@ func TestUserDashHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
+	t.Run("list call records", func(t *testing.T) {
+		record := CallRecordItem{
+			ID:        run.ID,
+			RunID:     run.ID,
+			Direction: "received",
+			Relation:  "a2a_parent",
+			AgentID:   agentID.String(),
+			AgentSlug: "research-agent",
+			AgentName: "Research Agent",
+			TargetAgent: CallRecordAgentRef{
+				ID:   agentID.String(),
+				Slug: "research-agent",
+				Name: "Research Agent",
+			},
+			Status:     "success",
+			StartedAt:  run.StartedAt,
+			CallID:     run.ID,
+			ChildCount: 2,
+		}
+		mock := &mockUserDashService{callRecordsResp: &CallRecordListResponse{
+			Items: []CallRecordItem{record},
+			Total: 5,
+			Page:  3,
+			Size:  10,
+			View:  "received",
+		}}
+		c, rec := newDashRecorderContext(http.MethodGet, "/api/v1/call-records?view=received&page=3&size=10", "", userID.String(), nil)
+
+		if err := NewHandler(mock).ListCallRecords(c); err != nil {
+			t.Fatalf("ListCallRecords error = %v", err)
+		}
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+		}
+		if mock.callRecordsUserID != userID || mock.callRecordsView != "received" || mock.callRecordsPage != 3 || mock.callRecordsSize != 10 {
+			t.Fatalf("captured call records = user %s view %s page %d size %d", mock.callRecordsUserID, mock.callRecordsView, mock.callRecordsPage, mock.callRecordsSize)
+		}
+		var body CallRecordListResponse
+		decodeUserDashJSON(t, rec, &body)
+		if body.Total != 5 || body.View != "received" || len(body.Items) != 1 || body.Items[0].Relation != "a2a_parent" {
+			t.Fatalf("body = %#v", body)
+		}
+	})
+
 	t.Run("list creator agent runs", func(t *testing.T) {
 		mock := &mockUserDashService{creatorRunsResp: &RunListResponse{
 			Items: []RunListItem{run},
@@ -160,6 +204,12 @@ func TestUserDashHandlerValidationAndServiceErrors(t *testing.T) {
 		requireUserDashHTTPStatus(t, NewHandler(mock).ListRuns(c), http.StatusInternalServerError)
 	})
 
+	t.Run("call records service error", func(t *testing.T) {
+		mock := &mockUserDashService{callRecordsErr: httpx.Internal("call records failed")}
+		c, _ := newDashRecorderContext(http.MethodGet, "/api/v1/call-records", "", userID.String(), nil)
+		requireUserDashHTTPStatus(t, NewHandler(mock).ListCallRecords(c), http.StatusInternalServerError)
+	})
+
 	t.Run("creator agent runs service error", func(t *testing.T) {
 		mock := &mockUserDashService{creatorRunsErr: httpx.NotFound("missing")}
 		c, _ := newDashRecorderContext(
@@ -196,6 +246,7 @@ func TestUserDashRegisterAddsAPIRoutes(t *testing.T) {
 	}
 	for _, route := range []string{
 		"GET /api/v1/runs",
+		"GET /api/v1/call-records",
 		"GET /api/v1/dashboard",
 		"GET /api/v1/creator/dashboard",
 		"GET /api/v1/creator/agents/:id/runs",
@@ -212,6 +263,13 @@ type mockUserDashService struct {
 	listSize         int32
 	listUserRunsResp *RunListResponse
 	listUserRunsErr  error
+
+	callRecordsUserID uuid.UUID
+	callRecordsView   string
+	callRecordsPage   int32
+	callRecordsSize   int32
+	callRecordsResp   *CallRecordListResponse
+	callRecordsErr    error
 
 	creatorUserID   uuid.UUID
 	creatorAgentID  uuid.UUID
@@ -234,6 +292,14 @@ func (m *mockUserDashService) ListUserRuns(_ context.Context, userID uuid.UUID, 
 	m.listPage = page
 	m.listSize = size
 	return m.listUserRunsResp, m.listUserRunsErr
+}
+
+func (m *mockUserDashService) ListCallRecords(_ context.Context, userID uuid.UUID, view string, page, size int32) (*CallRecordListResponse, error) {
+	m.callRecordsUserID = userID
+	m.callRecordsView = view
+	m.callRecordsPage = page
+	m.callRecordsSize = size
+	return m.callRecordsResp, m.callRecordsErr
 }
 
 func (m *mockUserDashService) ListCreatorAgentRuns(_ context.Context, userID, agentID uuid.UUID, page, size int32) (*RunListResponse, error) {

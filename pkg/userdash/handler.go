@@ -19,6 +19,7 @@ type Handler struct {
 
 type dashboardService interface {
 	ListUserRuns(context.Context, uuid.UUID, int32, int32) (*RunListResponse, error)
+	ListCallRecords(context.Context, uuid.UUID, string, int32, int32) (*CallRecordListResponse, error)
 	ListCreatorAgentRuns(context.Context, uuid.UUID, uuid.UUID, int32, int32) (*RunListResponse, error)
 	GetUserDashboard(context.Context, uuid.UUID) (*UserDashboardResponse, error)
 	GetCreatorDashboard(context.Context, uuid.UUID) (*CreatorDashboardResponse, error)
@@ -34,6 +35,7 @@ func (h *Handler) RegisterCoreAPI(api *echo.Group, jwtMiddleware echo.Middleware
 
 func (h *Handler) registerRoutes(g *echo.Group) {
 	g.GET("/runs", h.ListRuns)
+	g.GET("/call-records", h.ListCallRecords)
 	g.GET("/dashboard", h.GetDashboard)
 	g.GET("/creator/dashboard", h.GetCreatorDashboard)
 	g.GET("/creator/agents/:id/runs", h.ListCreatorAgentRuns)
@@ -47,6 +49,20 @@ func (h *Handler) ListRuns(c echo.Context) error {
 	page := parseInt32Query(c, "page", defaultPage)
 	size := parseInt32Query(c, "size", defaultSize)
 	resp, err := h.svc.ListUserRuns(c.Request().Context(), uid, page, size)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) ListCallRecords(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	page := parseInt32Query(c, "page", defaultPage)
+	size := parseInt32Query(c, "size", defaultSize)
+	resp, err := h.svc.ListCallRecords(c.Request().Context(), uid, c.QueryParam("view"), page, size)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package userdash
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +29,8 @@ type Service struct {
 type dashboardQueries interface {
 	ListRunsByUserWithAgent(context.Context, db.ListRunsByUserWithAgentParams) ([]db.ListRunsByUserWithAgentRow, error)
 	CountRunsByUser(context.Context, uuid.UUID) (int32, error)
+	ListCallRecordsForUser(context.Context, db.ListCallRecordsForUserParams) ([]db.ListCallRecordsForUserRow, error)
+	CountCallRecordsForUser(context.Context, db.CountCallRecordsForUserParams) (int32, error)
 	GetAgentByIDForOwner(context.Context, db.GetAgentByIDForOwnerParams) (db.Agent, error)
 	ListRunsByCreatorAgentWithAgent(context.Context, db.ListRunsByCreatorAgentWithAgentParams) ([]db.ListRunsByCreatorAgentWithAgentRow, error)
 	CountRunsByCreatorAgent(context.Context, db.CountRunsByCreatorAgentParams) (int32, error)
@@ -70,6 +73,37 @@ func (s *Service) ListUserRuns(ctx context.Context, userID uuid.UUID, page, size
 		items = append(items, toRunListItem(rows[i].Run, rows[i].AgentSlug, rows[i].AgentName))
 	}
 	return &RunListResponse{Items: items, Total: total, Page: page, Size: size}, nil
+}
+
+func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view string, page, size int32) (*CallRecordListResponse, error) {
+	page, size = normalizePage(page, size)
+	view = normalizeCallRecordView(view)
+	offset := (page - 1) * size
+
+	rows, err := s.queries.ListCallRecordsForUser(ctx, db.ListCallRecordsForUserParams{
+		UserID: userID,
+		View:   view,
+		Limit:  size,
+		Offset: offset,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Msg("userdash.ListCallRecords: ListCallRecordsForUser")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	total, err := s.queries.CountCallRecordsForUser(ctx, db.CountCallRecordsForUserParams{
+		UserID: userID,
+		View:   view,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Msg("userdash.ListCallRecords: CountCallRecordsForUser")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+
+	items := make([]CallRecordItem, 0, len(rows))
+	for i := range rows {
+		items = append(items, toCallRecordItem(rows[i]))
+	}
+	return &CallRecordListResponse{Items: items, Total: total, Page: page, Size: size, View: view}, nil
 }
 
 func (s *Service) ListCreatorAgentRuns(ctx context.Context, creatorID, agentID uuid.UUID, page, size int32) (*RunListResponse, error) {
@@ -254,6 +288,15 @@ func normalizePage(page, size int32) (int32, int32) {
 	return page, size
 }
 
+func normalizeCallRecordView(view string) string {
+	switch strings.ToLower(strings.TrimSpace(view)) {
+	case "made", "received", "all":
+		return strings.ToLower(strings.TrimSpace(view))
+	default:
+		return "all"
+	}
+}
+
 func toRunListItem(r db.Run, agentSlug, agentName string) RunListItem {
 	return RunListItem{
 		ID:         r.ID.String(),
@@ -266,6 +309,87 @@ func toRunListItem(r db.Run, agentSlug, agentName string) RunListItem {
 		StartedAt:  r.StartedAt.UTC().Format(time.RFC3339),
 		Source:     r.Source,
 	}
+}
+
+func toCallRecordItem(r db.ListCallRecordsForUserRow) CallRecordItem {
+	relation := "direct"
+	if r.ParentRunID != "" {
+		relation = "a2a_child"
+	} else if r.ChildCount > 0 {
+		relation = "a2a_parent"
+	}
+
+	finishedAt := ""
+	if r.FinishedAt != nil {
+		finishedAt = r.FinishedAt.UTC().Format(time.RFC3339)
+	}
+
+	target := CallRecordAgentRef{
+		ID:   r.AgentID.String(),
+		Slug: r.AgentSlug,
+		Name: r.AgentName,
+	}
+	var caller *CallRecordAgentRef
+	if r.CallerAgentID != "" || r.CallerAgentSlug != "" || r.CallerAgentName != "" {
+		caller = &CallRecordAgentRef{
+			ID:   r.CallerAgentID,
+			Slug: r.CallerAgentSlug,
+			Name: r.CallerAgentName,
+		}
+	}
+
+	return CallRecordItem{
+		ID:                  r.ID.String(),
+		RunID:               r.ID.String(),
+		Direction:           r.Direction,
+		Relation:            relation,
+		AgentID:             r.AgentID.String(),
+		AgentSlug:           r.AgentSlug,
+		AgentName:           r.AgentName,
+		TargetAgent:         target,
+		CallerAgent:         caller,
+		Status:              r.Status,
+		CostCents:           r.CostCents,
+		CreatorRevenueCents: r.CreatorRevenueCents,
+		DurationMs:          r.DurationMs,
+		StartedAt:           r.StartedAt.UTC().Format(time.RFC3339),
+		FinishedAt:          finishedAt,
+		Source:              r.Source,
+		ParentRunID:         r.ParentRunID,
+		ChildCount:          r.ChildCount,
+		CallID:              firstNonEmpty(r.CallID, r.ProtocolTaskID, r.ID.String()),
+		A2AContext:          toCallRecordA2AContext(r),
+	}
+}
+
+func toCallRecordA2AContext(r db.ListCallRecordsForUserRow) *CallRecordA2AContext {
+	if r.ProtocolContextID == "" && r.ProtocolTaskID == "" && r.RootContextID == "" &&
+		r.ParentContextID == "" && r.ParentTaskID == "" && r.TraceID == "" &&
+		len(r.ReferenceTaskIDs) == 0 && r.ContextSource == "" {
+		return nil
+	}
+	callID := firstNonEmpty(r.CallID, r.ProtocolTaskID, r.ID.String())
+	return &CallRecordA2AContext{
+		SessionID:         firstNonEmpty(r.RootContextID, r.ProtocolContextID, r.TraceID),
+		CallID:            callID,
+		ProtocolContextID: r.ProtocolContextID,
+		ProtocolTaskID:    r.ProtocolTaskID,
+		RootContextID:     r.RootContextID,
+		ParentContextID:   r.ParentContextID,
+		ParentTaskID:      r.ParentTaskID,
+		TraceID:           r.TraceID,
+		ReferenceTaskIDs:  append([]string(nil), r.ReferenceTaskIDs...),
+		Source:            r.ContextSource,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func toAgentStatsItem(r *db.ListAgentStatsForCreatorRow) AgentStatsItem {

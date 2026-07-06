@@ -72,6 +72,73 @@ func TestUserDashServiceListRuns(t *testing.T) {
 	}
 }
 
+func TestUserDashServiceListCallRecords(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	callerID := uuid.New()
+	parentRunID := uuid.New().String()
+	started := time.Date(2026, 6, 20, 12, 30, 0, 0, time.UTC)
+	duration := int32(850)
+	rows := []db.ListCallRecordsForUserRow{
+		{
+			ID:                  uuid.New(),
+			UserID:              userID,
+			AgentID:             agentID,
+			Status:              "success",
+			CostCents:           0,
+			CreatorRevenueCents: 0,
+			DurationMs:          &duration,
+			StartedAt:           started,
+			Source:              "api",
+			AgentSlug:           "child",
+			AgentName:           "Child Agent",
+			Direction:           "made",
+			ParentRunID:         parentRunID,
+			CallerAgentID:       callerID.String(),
+			CallerAgentSlug:     "parent",
+			CallerAgentName:     "Parent Agent",
+			ProtocolContextID:   "ctx-protocol",
+			ProtocolTaskID:      "task-child",
+			RootContextID:       "ctx-root",
+			ParentContextID:     "ctx-parent",
+			ParentTaskID:        "task-parent",
+			TraceID:             "trace-1",
+			ReferenceTaskIDs:    []string{"task-parent"},
+			ContextSource:       "agent_delegation",
+			CallID:              "task-child",
+		},
+	}
+	queries := &fakeDashboardQueries{
+		callRecordRows:  rows,
+		callRecordCount: 12,
+	}
+
+	resp, err := (&Service{queries: queries}).ListCallRecords(context.Background(), userID, "made", 2, maxSize+50)
+	if err != nil {
+		t.Fatalf("ListCallRecords error = %v", err)
+	}
+	if queries.callRecordArg.UserID != userID || queries.callRecordArg.View != "made" ||
+		queries.callRecordArg.Limit != maxSize || queries.callRecordArg.Offset != maxSize {
+		t.Fatalf("ListCallRecords query arg = %#v", queries.callRecordArg)
+	}
+	if queries.callRecordCountArg.UserID != userID || queries.callRecordCountArg.View != "made" {
+		t.Fatalf("CountCallRecords query arg = %#v", queries.callRecordCountArg)
+	}
+	if resp.Total != 12 || resp.Page != 2 || resp.Size != maxSize || resp.View != "made" || len(resp.Items) != 1 {
+		t.Fatalf("ListCallRecords response = %#v", resp)
+	}
+	got := resp.Items[0]
+	if got.Relation != "a2a_child" || got.Direction != "made" || got.ParentRunID != parentRunID || got.CallID != "task-child" {
+		t.Fatalf("call record identity = %#v", got)
+	}
+	if got.CallerAgent == nil || got.CallerAgent.ID != callerID.String() || got.TargetAgent.Slug != "child" {
+		t.Fatalf("call record agents = %#v", got)
+	}
+	if got.A2AContext == nil || got.A2AContext.SessionID != "ctx-root" || got.A2AContext.ProtocolContextID != "ctx-protocol" {
+		t.Fatalf("a2a context = %#v", got.A2AContext)
+	}
+}
+
 func TestUserDashServiceDashboards(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
@@ -215,6 +282,24 @@ func TestUserDashServiceErrors(t *testing.T) {
 			want: http.StatusInternalServerError,
 		},
 		{
+			name: "call records rows",
+			call: func(s *Service) error {
+				_, err := s.ListCallRecords(context.Background(), userID, "all", 1, 20)
+				return err
+			},
+			q:    &fakeDashboardQueries{callRecordErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
+			name: "call records count",
+			call: func(s *Service) error {
+				_, err := s.ListCallRecords(context.Background(), userID, "all", 1, 20)
+				return err
+			},
+			q:    &fakeDashboardQueries{callRecordCountErr: sentinel},
+			want: http.StatusInternalServerError,
+		},
+		{
 			name: "user dashboard missing user",
 			call: func(s *Service) error {
 				_, err := s.GetUserDashboard(context.Background(), userID)
@@ -283,6 +368,13 @@ type fakeDashboardQueries struct {
 	userRunCount int32
 	countUserErr error
 
+	callRecordArg      db.ListCallRecordsForUserParams
+	callRecordRows     []db.ListCallRecordsForUserRow
+	callRecordErr      error
+	callRecordCountArg db.CountCallRecordsForUserParams
+	callRecordCount    int32
+	callRecordCountErr error
+
 	ownerArg   db.GetAgentByIDForOwnerParams
 	ownerAgent db.Agent
 	ownerErr   error
@@ -325,6 +417,16 @@ func (q *fakeDashboardQueries) ListRunsByUserWithAgent(_ context.Context, arg db
 
 func (q *fakeDashboardQueries) CountRunsByUser(context.Context, uuid.UUID) (int32, error) {
 	return q.userRunCount, q.countUserErr
+}
+
+func (q *fakeDashboardQueries) ListCallRecordsForUser(_ context.Context, arg db.ListCallRecordsForUserParams) ([]db.ListCallRecordsForUserRow, error) {
+	q.callRecordArg = arg
+	return q.callRecordRows, q.callRecordErr
+}
+
+func (q *fakeDashboardQueries) CountCallRecordsForUser(_ context.Context, arg db.CountCallRecordsForUserParams) (int32, error) {
+	q.callRecordCountArg = arg
+	return q.callRecordCount, q.callRecordCountErr
 }
 
 func (q *fakeDashboardQueries) GetAgentByIDForOwner(_ context.Context, arg db.GetAgentByIDForOwnerParams) (db.Agent, error) {

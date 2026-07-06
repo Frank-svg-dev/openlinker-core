@@ -32,6 +32,56 @@ type RunListResponse struct {
 	Size  int32         `json:"size"`
 }
 
+type CallRecordAgentRef struct {
+	ID   string `json:"id"`
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+}
+
+type CallRecordA2AContext struct {
+	SessionID         string   `json:"session_id,omitempty"`
+	CallID            string   `json:"call_id,omitempty"`
+	ProtocolContextID string   `json:"protocol_context_id,omitempty"`
+	ProtocolTaskID    string   `json:"protocol_task_id,omitempty"`
+	RootContextID     string   `json:"root_context_id,omitempty"`
+	ParentContextID   string   `json:"parent_context_id,omitempty"`
+	ParentTaskID      string   `json:"parent_task_id,omitempty"`
+	TraceID           string   `json:"trace_id,omitempty"`
+	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
+	Source            string   `json:"source,omitempty"`
+}
+
+type CallRecordItem struct {
+	ID                  string                `json:"id"`
+	RunID               string                `json:"run_id"`
+	Direction           string                `json:"direction"`
+	Relation            string                `json:"relation"`
+	AgentID             string                `json:"agent_id"`
+	AgentSlug           string                `json:"agent_slug"`
+	AgentName           string                `json:"agent_name"`
+	TargetAgent         CallRecordAgentRef    `json:"target_agent"`
+	CallerAgent         *CallRecordAgentRef   `json:"caller_agent,omitempty"`
+	Status              string                `json:"status"`
+	CostCents           int32                 `json:"cost_cents"`
+	CreatorRevenueCents int32                 `json:"creator_revenue_cents"`
+	DurationMs          *int32                `json:"duration_ms,omitempty"`
+	StartedAt           string                `json:"started_at"`
+	FinishedAt          string                `json:"finished_at,omitempty"`
+	Source              string                `json:"source,omitempty"`
+	ParentRunID         string                `json:"parent_run_id,omitempty"`
+	ChildCount          int32                 `json:"child_count"`
+	CallID              string                `json:"call_id"`
+	A2AContext          *CallRecordA2AContext `json:"a2a_context,omitempty"`
+}
+
+type CallRecordListResponse struct {
+	Items []CallRecordItem `json:"items"`
+	Total int32            `json:"total"`
+	Page  int32            `json:"page"`
+	Size  int32            `json:"size"`
+	View  string           `json:"view"`
+}
+
 type UsageStats struct {
 	ThisMonthCalls int32 `json:"this_month_calls"`
 	ThisMonthSpent int64 `json:"this_month_spent_cents"`
