@@ -80,6 +80,8 @@ type CallRecordListResponse struct {
 	Page  int32            `json:"page"`
 	Size  int32            `json:"size"`
 	View  string           `json:"view"`
+	Query string           `json:"query,omitempty"`
+	Sort  string           `json:"sort"`
 }
 
 type UsageStats struct {

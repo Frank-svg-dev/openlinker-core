@@ -19,7 +19,7 @@ type Handler struct {
 
 type dashboardService interface {
 	ListUserRuns(context.Context, uuid.UUID, int32, int32) (*RunListResponse, error)
-	ListCallRecords(context.Context, uuid.UUID, string, int32, int32) (*CallRecordListResponse, error)
+	ListCallRecords(context.Context, uuid.UUID, string, string, string, int32, int32) (*CallRecordListResponse, error)
 	ListCreatorAgentRuns(context.Context, uuid.UUID, uuid.UUID, int32, int32) (*RunListResponse, error)
 	GetUserDashboard(context.Context, uuid.UUID) (*UserDashboardResponse, error)
 	GetCreatorDashboard(context.Context, uuid.UUID) (*CreatorDashboardResponse, error)
@@ -62,7 +62,7 @@ func (h *Handler) ListCallRecords(c echo.Context) error {
 	}
 	page := parseInt32Query(c, "page", defaultPage)
 	size := parseInt32Query(c, "size", defaultSize)
-	resp, err := h.svc.ListCallRecords(c.Request().Context(), uid, c.QueryParam("view"), page, size)
+	resp, err := h.svc.ListCallRecords(c.Request().Context(), uid, c.QueryParam("view"), c.QueryParam("q"), c.QueryParam("sort"), page, size)
 	if err != nil {
 		return err
 	}

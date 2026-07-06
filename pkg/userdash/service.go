@@ -75,27 +75,32 @@ func (s *Service) ListUserRuns(ctx context.Context, userID uuid.UUID, page, size
 	return &RunListResponse{Items: items, Total: total, Page: page, Size: size}, nil
 }
 
-func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view string, page, size int32) (*CallRecordListResponse, error) {
+func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view, query, sort string, page, size int32) (*CallRecordListResponse, error) {
 	page, size = normalizePage(page, size)
 	view = normalizeCallRecordView(view)
+	query = normalizeCallRecordQuery(query)
+	sort = normalizeCallRecordSort(sort)
 	offset := (page - 1) * size
 
 	rows, err := s.queries.ListCallRecordsForUser(ctx, db.ListCallRecordsForUserParams{
 		UserID: userID,
 		View:   view,
+		Query:  query,
+		Sort:   sort,
 		Limit:  size,
 		Offset: offset,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Msg("userdash.ListCallRecords: ListCallRecordsForUser")
+		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Str("query", query).Str("sort", sort).Msg("userdash.ListCallRecords: ListCallRecordsForUser")
 		return nil, httpx.Internal("查询调用记录失败")
 	}
 	total, err := s.queries.CountCallRecordsForUser(ctx, db.CountCallRecordsForUserParams{
 		UserID: userID,
 		View:   view,
+		Query:  query,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Msg("userdash.ListCallRecords: CountCallRecordsForUser")
+		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Str("query", query).Msg("userdash.ListCallRecords: CountCallRecordsForUser")
 		return nil, httpx.Internal("查询调用记录失败")
 	}
 
@@ -103,7 +108,7 @@ func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view st
 	for i := range rows {
 		items = append(items, toCallRecordItem(rows[i]))
 	}
-	return &CallRecordListResponse{Items: items, Total: total, Page: page, Size: size, View: view}, nil
+	return &CallRecordListResponse{Items: items, Total: total, Page: page, Size: size, View: view, Query: query, Sort: sort}, nil
 }
 
 func (s *Service) ListCreatorAgentRuns(ctx context.Context, creatorID, agentID uuid.UUID, page, size int32) (*RunListResponse, error) {
@@ -294,6 +299,24 @@ func normalizeCallRecordView(view string) string {
 		return strings.ToLower(strings.TrimSpace(view))
 	default:
 		return "all"
+	}
+}
+
+func normalizeCallRecordQuery(query string) string {
+	query = strings.TrimSpace(query)
+	runes := []rune(query)
+	if len(runes) > 200 {
+		return string(runes[:200])
+	}
+	return query
+}
+
+func normalizeCallRecordSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "started_asc", "started_desc", "amount_asc", "amount_desc", "duration_asc", "duration_desc":
+		return strings.ToLower(strings.TrimSpace(sort))
+	default:
+		return "started_desc"
 	}
 }
 

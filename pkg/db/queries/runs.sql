@@ -351,8 +351,42 @@ WHERE (
     OR ($2 = 'received' AND a.creator_id = $1)
     OR ($2 = 'all' AND (r.user_id = $1 OR a.creator_id = $1))
 )
-ORDER BY r.started_at DESC, r.id DESC
-LIMIT $3 OFFSET $4;
+AND (
+    $3 = ''
+    OR r.id::text ILIKE '%' || $3 || '%'
+    OR r.agent_id::text ILIKE '%' || $3 || '%'
+    OR r.status ILIKE '%' || $3 || '%'
+    OR r.source ILIKE '%' || $3 || '%'
+    OR a.slug ILIKE '%' || $3 || '%'
+    OR a.name ILIKE '%' || $3 || '%'
+    OR COALESCE(d.parent_run_id::text, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(d.caller_agent_id::text, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(caller.slug, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(caller.name, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.protocol_context_id, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.protocol_task_id, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.root_context_id, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.parent_context_id, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.parent_task_id, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.trace_id, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(ctx.source, '') ILIKE '%' || $3 || '%'
+    OR COALESCE(NULLIF(ctx.protocol_task_id, ''), r.id::text) ILIKE '%' || $3 || '%'
+    OR array_to_string(COALESCE(ctx.reference_task_ids, ARRAY[]::text[]), ' ') ILIKE '%' || $3 || '%'
+)
+ORDER BY
+    CASE WHEN $4 = 'started_asc' THEN r.started_at END ASC,
+    CASE WHEN $4 = 'started_desc' THEN r.started_at END DESC,
+    CASE WHEN $4 = 'amount_asc' THEN
+        CASE WHEN a.creator_id = $1 AND r.user_id <> $1 THEN r.creator_revenue_cents ELSE r.cost_cents END
+    END ASC,
+    CASE WHEN $4 = 'amount_desc' THEN
+        CASE WHEN a.creator_id = $1 AND r.user_id <> $1 THEN r.creator_revenue_cents ELSE r.cost_cents END
+    END DESC,
+    CASE WHEN $4 = 'duration_asc' THEN COALESCE(r.duration_ms, 2147483647) END ASC,
+    CASE WHEN $4 = 'duration_desc' THEN COALESCE(r.duration_ms, -1) END DESC,
+    r.started_at DESC,
+    r.id DESC
+LIMIT $5 OFFSET $6;
 
 -- name: CountCallRecordsForUser :one
 SELECT COUNT(*)::int AS total
@@ -362,6 +396,43 @@ WHERE (
     ($2 = 'made' AND r.user_id = $1)
     OR ($2 = 'received' AND a.creator_id = $1)
     OR ($2 = 'all' AND (r.user_id = $1 OR a.creator_id = $1))
+)
+AND (
+    $3 = ''
+    OR r.id::text ILIKE '%' || $3 || '%'
+    OR r.agent_id::text ILIKE '%' || $3 || '%'
+    OR r.status ILIKE '%' || $3 || '%'
+    OR r.source ILIKE '%' || $3 || '%'
+    OR a.slug ILIKE '%' || $3 || '%'
+    OR a.name ILIKE '%' || $3 || '%'
+    OR EXISTS (
+        SELECT 1
+        FROM run_delegations d
+        LEFT JOIN agents caller ON caller.id = d.caller_agent_id
+        WHERE d.child_run_id = r.id
+          AND (
+              d.parent_run_id::text ILIKE '%' || $3 || '%'
+              OR d.caller_agent_id::text ILIKE '%' || $3 || '%'
+              OR COALESCE(caller.slug, '') ILIKE '%' || $3 || '%'
+              OR COALESCE(caller.name, '') ILIKE '%' || $3 || '%'
+          )
+    )
+    OR EXISTS (
+        SELECT 1
+        FROM a2a_context_mappings ctx
+        WHERE ctx.run_id = r.id
+          AND (
+              ctx.protocol_context_id ILIKE '%' || $3 || '%'
+              OR ctx.protocol_task_id ILIKE '%' || $3 || '%'
+              OR ctx.root_context_id ILIKE '%' || $3 || '%'
+              OR ctx.parent_context_id ILIKE '%' || $3 || '%'
+              OR ctx.parent_task_id ILIKE '%' || $3 || '%'
+              OR ctx.trace_id ILIKE '%' || $3 || '%'
+              OR ctx.source ILIKE '%' || $3 || '%'
+              OR COALESCE(NULLIF(ctx.protocol_task_id, ''), r.id::text) ILIKE '%' || $3 || '%'
+              OR array_to_string(ctx.reference_task_ids, ' ') ILIKE '%' || $3 || '%'
+          )
+    )
 );
 
 -- name: CountRunsByCreatorAgent :one

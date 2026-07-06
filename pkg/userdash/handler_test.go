@@ -80,8 +80,10 @@ func TestUserDashHandlerDispatchesServiceSuccess(t *testing.T) {
 			Page:  3,
 			Size:  10,
 			View:  "received",
+			Query: "ctx-root",
+			Sort:  "amount_desc",
 		}}
-		c, rec := newDashRecorderContext(http.MethodGet, "/api/v1/call-records?view=received&page=3&size=10", "", userID.String(), nil)
+		c, rec := newDashRecorderContext(http.MethodGet, "/api/v1/call-records?view=received&q=ctx-root&sort=amount_desc&page=3&size=10", "", userID.String(), nil)
 
 		if err := NewHandler(mock).ListCallRecords(c); err != nil {
 			t.Fatalf("ListCallRecords error = %v", err)
@@ -89,8 +91,8 @@ func TestUserDashHandlerDispatchesServiceSuccess(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
 		}
-		if mock.callRecordsUserID != userID || mock.callRecordsView != "received" || mock.callRecordsPage != 3 || mock.callRecordsSize != 10 {
-			t.Fatalf("captured call records = user %s view %s page %d size %d", mock.callRecordsUserID, mock.callRecordsView, mock.callRecordsPage, mock.callRecordsSize)
+		if mock.callRecordsUserID != userID || mock.callRecordsView != "received" || mock.callRecordsQuery != "ctx-root" || mock.callRecordsSort != "amount_desc" || mock.callRecordsPage != 3 || mock.callRecordsSize != 10 {
+			t.Fatalf("captured call records = user %s view %s query %s sort %s page %d size %d", mock.callRecordsUserID, mock.callRecordsView, mock.callRecordsQuery, mock.callRecordsSort, mock.callRecordsPage, mock.callRecordsSize)
 		}
 		var body CallRecordListResponse
 		decodeUserDashJSON(t, rec, &body)
@@ -266,6 +268,8 @@ type mockUserDashService struct {
 
 	callRecordsUserID uuid.UUID
 	callRecordsView   string
+	callRecordsQuery  string
+	callRecordsSort   string
 	callRecordsPage   int32
 	callRecordsSize   int32
 	callRecordsResp   *CallRecordListResponse
@@ -294,9 +298,11 @@ func (m *mockUserDashService) ListUserRuns(_ context.Context, userID uuid.UUID, 
 	return m.listUserRunsResp, m.listUserRunsErr
 }
 
-func (m *mockUserDashService) ListCallRecords(_ context.Context, userID uuid.UUID, view string, page, size int32) (*CallRecordListResponse, error) {
+func (m *mockUserDashService) ListCallRecords(_ context.Context, userID uuid.UUID, view, query, sort string, page, size int32) (*CallRecordListResponse, error) {
 	m.callRecordsUserID = userID
 	m.callRecordsView = view
+	m.callRecordsQuery = query
+	m.callRecordsSort = sort
 	m.callRecordsPage = page
 	m.callRecordsSize = size
 	return m.callRecordsResp, m.callRecordsErr
