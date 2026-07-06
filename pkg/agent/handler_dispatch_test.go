@@ -270,11 +270,14 @@ func TestRegistrationApprovalAndMetricHandlersDispatchServices(t *testing.T) {
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodGet,
-		target: "/creator/agent-tokens",
+		target: "/creator/agent-tokens?limit=5&offset=10&sort_by=name&sort_dir=asc",
 		userID: userID.String(),
 	})
 	requireNoDispatchError(t, reg.ListAgentTokens(c))
 	requireDispatchStatus(t, rec, http.StatusOK)
+	if regSvc.lastListOpts.Limit != 5 || regSvc.lastListOpts.Offset != 10 || regSvc.lastListOpts.SortBy != "name" || regSvc.lastListOpts.SortDir != "asc" {
+		t.Fatalf("list opts = %#v", regSvc.lastListOpts)
+	}
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
 		method: http.MethodDelete,
@@ -649,6 +652,7 @@ type mockRegistrationService struct {
 	calls           []string
 	lastUserID      uuid.UUID
 	lastTokenID     uuid.UUID
+	lastListOpts    ListAgentTokensOptions
 	lastRegisterReq *RegisterAgentViaTokenRequest
 }
 
@@ -665,13 +669,21 @@ func (m *mockRegistrationService) CreateAgentToken(_ context.Context, userID uui
 	return &AgentTokenResponse{ID: uuid.NewString(), Name: req.Name, Prefix: "ol_agent_test", Status: "pending_registration"}, nil
 }
 
-func (m *mockRegistrationService) ListAgentTokens(_ context.Context, userID uuid.UUID, _ *uuid.UUID) ([]AgentTokenResponse, error) {
+func (m *mockRegistrationService) ListAgentTokens(_ context.Context, userID uuid.UUID, _ *uuid.UUID, opts ListAgentTokensOptions) (*AgentTokenListResponse, error) {
 	m.record("ListAgentTokens")
 	m.lastUserID = userID
+	m.lastListOpts = opts
 	if m.err != nil {
 		return nil, m.err
 	}
-	return []AgentTokenResponse{{ID: uuid.NewString(), Name: "local", Prefix: "ol_agent_test", Status: "pending_registration"}}, nil
+	return &AgentTokenListResponse{
+		Items:   []AgentTokenResponse{{ID: uuid.NewString(), Name: "local", Prefix: "ol_agent_test", Status: "pending_registration"}},
+		Total:   1,
+		Limit:   opts.Limit,
+		Offset:  opts.Offset,
+		SortBy:  opts.SortBy,
+		SortDir: opts.SortDir,
+	}, nil
 }
 
 func (m *mockRegistrationService) RevokeAgentToken(_ context.Context, userID, tokenID uuid.UUID) error {

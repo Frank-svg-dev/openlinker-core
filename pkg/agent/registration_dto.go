@@ -11,6 +11,14 @@ type CreateAgentTokenRequest struct {
 	ExpiresInMinutes int32    `json:"expires_in_minutes" validate:"omitempty,min=5,max=1440"`
 }
 
+// ListAgentTokensOptions 控制 Agent Token 列表分页和排序。
+type ListAgentTokensOptions struct {
+	Limit   int32
+	Offset  int32
+	SortBy  string
+	SortDir string
+}
+
 // AgentTokenResponse 列表 / 创建共用响应。
 // PlaintextToken 仅创建时一次性返回，之后调用 List 仅看到 prefix。
 type AgentTokenResponse struct {
@@ -26,6 +34,17 @@ type AgentTokenResponse struct {
 	LastUsedAt     *string  `json:"last_used_at,omitempty"`
 	CreatedAt      string   `json:"created_at"`
 	PlaintextToken string   `json:"plaintext_token,omitempty"`
+}
+
+// AgentTokenListResponse Agent Token 列表响应。
+type AgentTokenListResponse struct {
+	Items   []AgentTokenResponse `json:"items"`
+	Total   int32                `json:"total"`
+	Limit   int32                `json:"limit"`
+	Offset  int32                `json:"offset"`
+	SortBy  string               `json:"sort_by"`
+	SortDir string               `json:"sort_dir"`
+	HasMore bool                 `json:"has_more"`
 }
 
 // RegisterAgentViaTokenRequest Agent 侧自注册请求体。

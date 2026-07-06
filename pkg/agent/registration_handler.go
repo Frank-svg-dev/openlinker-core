@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
@@ -20,7 +21,7 @@ type RegistrationHandler struct {
 
 type registrationService interface {
 	CreateAgentToken(context.Context, uuid.UUID, *CreateAgentTokenRequest) (*AgentTokenResponse, error)
-	ListAgentTokens(context.Context, uuid.UUID, *uuid.UUID) ([]AgentTokenResponse, error)
+	ListAgentTokens(context.Context, uuid.UUID, *uuid.UUID, ListAgentTokensOptions) (*AgentTokenListResponse, error)
 	RevokeAgentToken(context.Context, uuid.UUID, uuid.UUID) error
 	RegisterAgentViaToken(context.Context, *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error)
 }
@@ -86,11 +87,15 @@ func (h *RegistrationHandler) ListAgentTokens(c echo.Context) error {
 		}
 		agentID = &parsed
 	}
-	items, err := h.svc.ListAgentTokens(c.Request().Context(), uid, agentID)
+	opts, err := parseAgentTokenListOptions(c)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
+	resp, err := h.svc.ListAgentTokens(c.Request().Context(), uid, agentID, opts)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // RevokeAgentToken DELETE /api/v1/creator/agent-tokens/:id
@@ -135,4 +140,40 @@ func (h *RegistrationHandler) RegisterAgentViaToken(c echo.Context) error {
 		return err
 	}
 	return c.JSON(http.StatusCreated, resp)
+}
+
+func parseAgentTokenListOptions(c echo.Context) (ListAgentTokensOptions, error) {
+	limit, err := parseInt32ListQuery(c.QueryParam("limit"), 10, 1, 50, "limit")
+	if err != nil {
+		return ListAgentTokensOptions{}, err
+	}
+	offset, err := parseInt32ListQuery(c.QueryParam("offset"), 0, 0, 100000, "offset")
+	if err != nil {
+		return ListAgentTokensOptions{}, err
+	}
+	return normalizeAgentTokenListOptions(ListAgentTokensOptions{
+		Limit:   limit,
+		Offset:  offset,
+		SortBy:  strings.TrimSpace(c.QueryParam("sort_by")),
+		SortDir: strings.ToLower(strings.TrimSpace(c.QueryParam("sort_dir"))),
+	}), nil
+}
+
+func parseInt32ListQuery(raw string, fallback, minValue, maxValue int32, name string) (int32, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, httpx.BadRequest(name + " 不是合法整数")
+	}
+	value := int32(n)
+	if value < minValue {
+		return 0, httpx.BadRequest(name + " 过小")
+	}
+	if value > maxValue {
+		return maxValue, nil
+	}
+	return value, nil
 }

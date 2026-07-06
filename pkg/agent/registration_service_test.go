@@ -141,9 +141,11 @@ func TestRegistrationService_ListAgentTokens_OnlyOwn(t *testing.T) {
 	_, err = svc.CreateAgentToken(ctx, creatorB, &agent.CreateAgentTokenRequest{Name: "B token"})
 	require.NoError(t, err)
 
-	items, err := svc.ListAgentTokens(ctx, creatorA, nil)
+	resp, err := svc.ListAgentTokens(ctx, creatorA, nil, agent.ListAgentTokensOptions{})
 	require.NoError(t, err)
+	items := resp.Items
 	require.Len(t, items, 1)
+	require.Equal(t, int32(1), resp.Total)
 	require.Equal(t, "A token", items[0].Name)
 	require.Empty(t, items[0].PlaintextToken)
 }

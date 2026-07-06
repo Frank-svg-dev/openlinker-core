@@ -417,7 +417,13 @@ func TestAgentTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("CreateAgentToken scan = %#v", token)
 	}
 
-	listed, err := q.ListAgentTokensByCreator(context.Background(), creatorID)
+	listed, err := q.ListAgentTokensByCreator(context.Background(), ListAgentTokensByCreatorParams{
+		CreatorUserID: creatorID,
+		Limit:         10,
+		Offset:        20,
+		SortBy:        "created_at",
+		SortDir:       "desc",
+	})
 	if err != nil {
 		t.Fatalf("ListAgentTokensByCreator error = %v", err)
 	}
@@ -425,9 +431,26 @@ func TestAgentTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 	if len(listed) != 1 || listed[0].TokenHash != "hash" {
 		t.Fatalf("ListAgentTokensByCreator scan = %#v", listed)
 	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{creatorID, int32(10), int32(20), "created_at", "desc"}) {
+		t.Fatalf("ListAgentTokensByCreator args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(4)}}
+	totalByCreator, err := q.CountAgentTokensByCreator(context.Background(), creatorID)
+	if err != nil || totalByCreator != 4 {
+		t.Fatalf("CountAgentTokensByCreator = %d, %v", totalByCreator, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountAgentTokensByCreator")
 
 	dbtx.queryRows = &fakeRows{rows: [][]any{tokenValues}}
-	filtered, err := q.ListAgentTokensByCreatorAndAgent(context.Background(), ListAgentTokensByCreatorAndAgentParams{CreatorUserID: creatorID, AgentID: agentID})
+	filtered, err := q.ListAgentTokensByCreatorAndAgent(context.Background(), ListAgentTokensByCreatorAndAgentParams{
+		CreatorUserID: creatorID,
+		AgentID:       agentID,
+		Limit:         5,
+		Offset:        15,
+		SortBy:        "name",
+		SortDir:       "asc",
+	})
 	if err != nil {
 		t.Fatalf("ListAgentTokensByCreatorAndAgent error = %v", err)
 	}
@@ -435,6 +458,19 @@ func TestAgentTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 	if len(filtered) != 1 || filtered[0].AgentID == nil || *filtered[0].AgentID != agentID {
 		t.Fatalf("ListAgentTokensByCreatorAndAgent scan = %#v", filtered)
 	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{creatorID, agentID, int32(5), int32(15), "name", "asc"}) {
+		t.Fatalf("ListAgentTokensByCreatorAndAgent args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(2)}}
+	totalByAgent, err := q.CountAgentTokensByCreatorAndAgent(context.Background(), CountAgentTokensByCreatorAndAgentParams{
+		CreatorUserID: creatorID,
+		AgentID:       agentID,
+	})
+	if err != nil || totalByAgent != 2 {
+		t.Fatalf("CountAgentTokensByCreatorAndAgent = %d, %v", totalByAgent, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountAgentTokensByCreatorAndAgent")
 
 	activeTokenValues := append([]any{}, tokenValues...)
 	activeTokenValues[11] = nil
@@ -458,6 +494,7 @@ func TestAgentTokenQueriesScanRowsAndAffectedRows(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.execSQL, "RevokeAgentTokenForCreator")
 
+	dbtx.row = fakeRow{values: tokenValues}
 	redeemed, err := q.RedeemPendingAgentToken(context.Background(), RedeemPendingAgentTokenParams{
 		ID:            tokenID,
 		AgentID:       agentID,
@@ -1887,7 +1924,7 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListAgentTokensByCreator", run: func() error {
-			_, err := q.ListAgentTokensByCreator(ctx, id)
+			_, err := q.ListAgentTokensByCreator(ctx, ListAgentTokensByCreatorParams{CreatorUserID: id, Limit: 10, SortBy: "created_at", SortDir: "desc"})
 			return err
 		}},
 		{name: "ListActiveAgentTokensByPrefix", run: func() error {

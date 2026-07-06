@@ -29,6 +29,14 @@ const (
 	maxAgentTokens           = 10
 )
 
+var allowedAgentTokenListSorts = map[string]struct{}{
+	"created_at":   {},
+	"last_used_at": {},
+	"expires_at":   {},
+	"name":         {},
+	"status":       {},
+}
+
 // 非字母数字字符在 slug 派生时统一替换成 '-'。
 var slugDeriveSanitize = regexp.MustCompile(`[^a-z0-9]+`)
 
@@ -138,12 +146,14 @@ func (s *RegistrationService) CreateAgentToken(ctx context.Context, creatorID uu
 	return &resp, nil
 }
 
-func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uuid.UUID, agentID *uuid.UUID) ([]AgentTokenResponse, error) {
+func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uuid.UUID, agentID *uuid.UUID, opts ListAgentTokensOptions) (*AgentTokenListResponse, error) {
 	if err := s.ensureCreator(ctx, creatorID); err != nil {
 		return nil, err
 	}
+	opts = normalizeAgentTokenListOptions(opts)
 	var (
 		tokens []db.AgentToken
+		total  int32
 		err    error
 	)
 	if agentID != nil {
@@ -157,9 +167,28 @@ func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uui
 		tokens, err = s.queries.ListAgentTokensByCreatorAndAgent(ctx, db.ListAgentTokensByCreatorAndAgentParams{
 			CreatorUserID: creatorID,
 			AgentID:       *agentID,
+			Limit:         opts.Limit,
+			Offset:        opts.Offset,
+			SortBy:        opts.SortBy,
+			SortDir:       opts.SortDir,
 		})
+		if err == nil {
+			total, err = s.queries.CountAgentTokensByCreatorAndAgent(ctx, db.CountAgentTokensByCreatorAndAgentParams{
+				CreatorUserID: creatorID,
+				AgentID:       *agentID,
+			})
+		}
 	} else {
-		tokens, err = s.queries.ListAgentTokensByCreator(ctx, creatorID)
+		tokens, err = s.queries.ListAgentTokensByCreator(ctx, db.ListAgentTokensByCreatorParams{
+			CreatorUserID: creatorID,
+			Limit:         opts.Limit,
+			Offset:        opts.Offset,
+			SortBy:        opts.SortBy,
+			SortDir:       opts.SortDir,
+		})
+		if err == nil {
+			total, err = s.queries.CountAgentTokensByCreator(ctx, creatorID)
+		}
 	}
 	if err != nil {
 		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("registration.ListAgentTokens")
@@ -169,7 +198,15 @@ func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uui
 	for _, t := range tokens {
 		items = append(items, agentTokenResponse(t))
 	}
-	return items, nil
+	return &AgentTokenListResponse{
+		Items:   items,
+		Total:   total,
+		Limit:   opts.Limit,
+		Offset:  opts.Offset,
+		SortBy:  opts.SortBy,
+		SortDir: opts.SortDir,
+		HasMore: opts.Offset+int32(len(items)) < total,
+	}, nil
 }
 
 func (s *RegistrationService) RevokeAgentToken(ctx context.Context, creatorID, tokenID uuid.UUID) error {
@@ -284,6 +321,25 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 		Agent:      toAgentResponse(&created),
 		AgentToken: agentTokenResponse(redeemed),
 	}, nil
+}
+
+func normalizeAgentTokenListOptions(opts ListAgentTokensOptions) ListAgentTokensOptions {
+	if opts.Limit <= 0 {
+		opts.Limit = 10
+	}
+	if opts.Limit > 50 {
+		opts.Limit = 50
+	}
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	if _, ok := allowedAgentTokenListSorts[opts.SortBy]; !ok {
+		opts.SortBy = "created_at"
+	}
+	if opts.SortDir != "asc" {
+		opts.SortDir = "desc"
+	}
+	return opts
 }
 
 func (s *RegistrationService) ensureCreator(ctx context.Context, userID uuid.UUID) error {
