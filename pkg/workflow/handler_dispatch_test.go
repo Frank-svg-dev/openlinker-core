@@ -424,6 +424,10 @@ type mockWorkflowService struct {
 
 	listUserID uuid.UUID
 	listLimit  int32
+	listQuery  string
+	listStatus string
+	listSort   string
+	listPage   int32
 	listResp   *WorkflowListResponse
 
 	getUserID     uuid.UUID
@@ -478,6 +482,16 @@ func (m *mockWorkflowService) CreateWorkflow(_ context.Context, userID uuid.UUID
 func (m *mockWorkflowService) ListWorkflows(_ context.Context, userID uuid.UUID, limit int32) (*WorkflowListResponse, error) {
 	m.listUserID = userID
 	m.listLimit = limit
+	return m.listResp, m.err
+}
+
+func (m *mockWorkflowService) ListWorkflowsPage(_ context.Context, userID uuid.UUID, query, status, sort string, page, size int32) (*WorkflowListResponse, error) {
+	m.listUserID = userID
+	m.listLimit = size
+	m.listQuery = query
+	m.listStatus = status
+	m.listSort = sort
+	m.listPage = page
 	return m.listResp, m.err
 }
 

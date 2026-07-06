@@ -244,27 +244,50 @@ func (h *Handler) RequestRevision(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-// ListMine GET /tasks/me?limit=20
+// ListMine GET /tasks/me?q=&status=&visibility=&sort=created_desc&page=1&size=20
 func (h *Handler) ListMine(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	limit := int32(20)
-	if v := c.QueryParam("limit"); v != "" {
+	page := int32(1)
+	if v := c.QueryParam("page"); v != "" {
 		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
-			if n > 20 {
-				n = 20
-			}
-			// #nosec G115 -- strconv.ParseInt with bitSize=32 guarantees int32 range, then limit is capped.
-			limit = int32(n)
+			page = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range.
 		}
 	}
-	items, err := h.svc.ListMine(c.Request().Context(), uid, limit)
+	size := int32(20)
+	if v := firstNonEmpty(c.QueryParam("size"), c.QueryParam("limit")); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
+			if n > 50 {
+				n = 50
+			}
+			size = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range, then size is capped.
+		}
+	}
+	resp, err := h.svc.ListMinePage(
+		c.Request().Context(),
+		uid,
+		c.QueryParam("q"),
+		c.QueryParam("visibility"),
+		c.QueryParam("status"),
+		c.QueryParam("sort"),
+		page,
+		size,
+	)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
+	return c.JSON(http.StatusOK, resp)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // ListBoard GET /tasks/board?limit=20

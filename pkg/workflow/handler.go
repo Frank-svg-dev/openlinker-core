@@ -3,6 +3,7 @@ package workflow
 import (
 	"context"
 	"net/http"
+	"strconv"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -19,6 +20,7 @@ type Handler struct {
 type workflowService interface {
 	CreateWorkflow(context.Context, uuid.UUID, *CreateWorkflowRequest) (*WorkflowResponse, error)
 	ListWorkflows(context.Context, uuid.UUID, int32) (*WorkflowListResponse, error)
+	ListWorkflowsPage(context.Context, uuid.UUID, string, string, string, int32, int32) (*WorkflowListResponse, error)
 	GetWorkflow(context.Context, uuid.UUID, uuid.UUID) (*WorkflowResponse, error)
 	RunWorkflow(context.Context, uuid.UUID, uuid.UUID, *RunWorkflowRequest) (*WorkflowRunResponse, error)
 	StartWorkflowRun(context.Context, uuid.UUID, uuid.UUID, *RunWorkflowRequest) (*WorkflowRunResponse, error)
@@ -95,11 +97,43 @@ func (h *Handler) List(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := h.svc.ListWorkflows(c.Request().Context(), uid, 20)
+	page := int32(1)
+	if v := c.QueryParam("page"); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
+			page = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range.
+		}
+	}
+	size := int32(20)
+	if v := firstNonEmpty(c.QueryParam("size"), c.QueryParam("limit")); v != "" {
+		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
+			if n > 50 {
+				n = 50
+			}
+			size = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range, then size is capped.
+		}
+	}
+	resp, err := h.svc.ListWorkflowsPage(
+		c.Request().Context(),
+		uid,
+		c.QueryParam("q"),
+		c.QueryParam("status"),
+		c.QueryParam("sort"),
+		page,
+		size,
+	)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (h *Handler) Get(c echo.Context) error {

@@ -635,19 +635,109 @@ func (s *Service) ListMine(ctx context.Context, userID uuid.UUID, limit int32) (
 	if limit <= 0 || limit > 20 {
 		limit = 20
 	}
+	resp, err := s.ListMinePage(ctx, userID, "", "", "", "created_desc", 1, limit)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
+// ListMinePage returns task history with server-side search, filters, sorting, and pagination.
+func (s *Service) ListMinePage(ctx context.Context, userID uuid.UUID, query, visibility, status, sort string, page, size int32) (*HistoryListResponse, error) {
+	page, size = normalizeTaskHistoryPage(page, size)
+	query = normalizeTaskHistoryQuery(query)
+	visibility = normalizeTaskHistoryVisibility(visibility)
+	status = normalizeTaskHistoryStatus(status)
+	sort = normalizeTaskHistorySort(sort)
+	offset := (page - 1) * size
+
 	rows, err := s.queries.ListTaskQueriesByUser(ctx, db.ListTaskQueriesByUserParams{
-		UserID: userID,
-		Limit:  limit,
+		UserID:     userID,
+		Query:      query,
+		Visibility: visibility,
+		Status:     status,
+		Sort:       sort,
+		Limit:      size,
+		Offset:     offset,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("task.ListMine: query")
+		return nil, httpx.Internal("查询任务历史失败")
+	}
+	total, err := s.queries.CountTaskQueriesByUser(ctx, db.CountTaskQueriesByUserParams{
+		UserID:     userID,
+		Query:      query,
+		Visibility: visibility,
+		Status:     status,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("task.ListMine: count")
 		return nil, httpx.Internal("查询任务历史失败")
 	}
 	out := make([]HistoryItem, 0, len(rows))
 	for i := range rows {
 		out = append(out, toHistoryItem(&rows[i]))
 	}
-	return out, nil
+	return &HistoryListResponse{
+		Items:            out,
+		Total:            total,
+		Page:             page,
+		Size:             size,
+		Query:            query,
+		Sort:             sort,
+		StatusFilter:     status,
+		VisibilityFilter: visibility,
+	}, nil
+}
+
+func normalizeTaskHistoryPage(page, size int32) (int32, int32) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 50 {
+		size = 50
+	}
+	return page, size
+}
+
+func normalizeTaskHistoryQuery(query string) string {
+	query = strings.TrimSpace(query)
+	if len([]rune(query)) > 200 {
+		query = string([]rune(query)[:200])
+	}
+	return query
+}
+
+func normalizeTaskHistoryVisibility(visibility string) string {
+	switch strings.ToLower(strings.TrimSpace(visibility)) {
+	case taskVisibilityPrivate:
+		return taskVisibilityPrivate
+	case taskVisibilityPublic:
+		return taskVisibilityPublic
+	default:
+		return ""
+	}
+}
+
+func normalizeTaskHistoryStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "accepted", "revision_requested", "completed", "in_progress", "matched", "needs_agent", "open":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
+}
+
+func normalizeTaskHistorySort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "created_asc":
+		return "created_asc"
+	default:
+		return "created_desc"
+	}
 }
 
 // ListBoard 返回任务广场最近公开任务。列表不暴露发布者身份。

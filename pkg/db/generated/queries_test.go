@@ -2336,7 +2336,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	}
 
 	dbtx.row = fakeRow{values: []any{int32(4)}}
-	workflowCount, err := q.CountWorkflowsByUser(context.Background(), userID)
+	workflowCount, err := q.CountWorkflowsByUser(context.Background(), CountWorkflowsByUserParams{UserID: userID})
 	if err != nil || workflowCount != 4 {
 		t.Fatalf("CountWorkflowsByUser = %d, %v", workflowCount, err)
 	}

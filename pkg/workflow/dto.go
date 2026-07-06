@@ -38,8 +38,13 @@ type WorkflowResponse struct {
 }
 
 type WorkflowListResponse struct {
-	Items []WorkflowResponse `json:"items"`
-	Total int32              `json:"total"`
+	Items        []WorkflowResponse `json:"items"`
+	Total        int32              `json:"total"`
+	Page         int32              `json:"page"`
+	Size         int32              `json:"size"`
+	Query        string             `json:"query,omitempty"`
+	Sort         string             `json:"sort"`
+	StatusFilter string             `json:"status_filter,omitempty"`
 }
 
 type WorkflowNodeResponse struct {

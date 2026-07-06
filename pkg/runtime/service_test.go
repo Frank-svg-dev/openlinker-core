@@ -1655,6 +1655,11 @@ func TestGetRun_NotOwner(t *testing.T) {
 	// userB 不是 owner，必须 404（不暴露存在性）
 	_, err = svc.GetRun(ctx, userB, mustParseUUID(t, created.RunID))
 	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	got, err := svc.GetRun(ctx, creatorID, mustParseUUID(t, created.RunID))
+	require.NoError(t, err)
+	require.Equal(t, created.RunID, got.RunID)
+	require.Equal(t, agentID.String(), got.AgentID)
 }
 
 func TestGetRun_MissingAndDelegatedChildContext(t *testing.T) {

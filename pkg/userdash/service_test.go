@@ -113,19 +113,22 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 		callRecordCount: 12,
 	}
 
-	resp, err := (&Service{queries: queries}).ListCallRecords(context.Background(), userID, "made", " ctx-root ", "amount_desc", 2, maxSize+50)
+	resp, err := (&Service{queries: queries}).ListCallRecords(context.Background(), userID, "made", " ctx-root ", "amount_desc", "success", "api", "a2a_child", 2, maxSize+50)
 	if err != nil {
 		t.Fatalf("ListCallRecords error = %v", err)
 	}
 	if queries.callRecordArg.UserID != userID || queries.callRecordArg.View != "made" ||
 		queries.callRecordArg.Query != "ctx-root" || queries.callRecordArg.Sort != "amount_desc" ||
+		queries.callRecordArg.Status != "success" || queries.callRecordArg.Source != "api" || queries.callRecordArg.Relation != "a2a_child" ||
 		queries.callRecordArg.Limit != maxSize || queries.callRecordArg.Offset != maxSize {
 		t.Fatalf("ListCallRecords query arg = %#v", queries.callRecordArg)
 	}
-	if queries.callRecordCountArg.UserID != userID || queries.callRecordCountArg.View != "made" || queries.callRecordCountArg.Query != "ctx-root" {
+	if queries.callRecordCountArg.UserID != userID || queries.callRecordCountArg.View != "made" || queries.callRecordCountArg.Query != "ctx-root" ||
+		queries.callRecordCountArg.Status != "success" || queries.callRecordCountArg.Source != "api" || queries.callRecordCountArg.Relation != "a2a_child" {
 		t.Fatalf("CountCallRecords query arg = %#v", queries.callRecordCountArg)
 	}
-	if resp.Total != 12 || resp.Page != 2 || resp.Size != maxSize || resp.View != "made" || resp.Query != "ctx-root" || resp.Sort != "amount_desc" || len(resp.Items) != 1 {
+	if resp.Total != 12 || resp.Page != 2 || resp.Size != maxSize || resp.View != "made" || resp.Query != "ctx-root" || resp.Sort != "amount_desc" ||
+		resp.StatusFilter != "success" || resp.SourceFilter != "api" || resp.RelationFilter != "a2a_child" || len(resp.Items) != 1 {
 		t.Fatalf("ListCallRecords response = %#v", resp)
 	}
 	got := resp.Items[0]
@@ -285,7 +288,7 @@ func TestUserDashServiceErrors(t *testing.T) {
 		{
 			name: "call records rows",
 			call: func(s *Service) error {
-				_, err := s.ListCallRecords(context.Background(), userID, "all", "", "", 1, 20)
+				_, err := s.ListCallRecords(context.Background(), userID, "all", "", "", "", "", "", 1, 20)
 				return err
 			},
 			q:    &fakeDashboardQueries{callRecordErr: sentinel},
@@ -294,7 +297,7 @@ func TestUserDashServiceErrors(t *testing.T) {
 		{
 			name: "call records count",
 			call: func(s *Service) error {
-				_, err := s.ListCallRecords(context.Background(), userID, "all", "", "", 1, 20)
+				_, err := s.ListCallRecords(context.Background(), userID, "all", "", "", "", "", "", 1, 20)
 				return err
 			},
 			q:    &fakeDashboardQueries{callRecordCountErr: sentinel},

@@ -166,15 +166,34 @@ func (s *Service) ListWorkflows(ctx context.Context, userID uuid.UUID, limit int
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
+	return s.ListWorkflowsPage(ctx, userID, "", "", "updated_desc", 1, limit)
+}
+
+// ListWorkflowsPage returns workflows with server-side search, status filter, sort, and pagination.
+func (s *Service) ListWorkflowsPage(ctx context.Context, userID uuid.UUID, query, status, sort string, page, size int32) (*WorkflowListResponse, error) {
+	page, size = normalizeWorkflowListPage(page, size)
+	query = normalizeWorkflowListQuery(query)
+	status = normalizeWorkflowListStatus(status)
+	sort = normalizeWorkflowListSort(sort)
+	offset := (page - 1) * size
+
 	rows, err := s.queries.ListWorkflowsByUser(ctx, db.ListWorkflowsByUserParams{
 		UserID: userID,
-		Limit:  limit,
+		Query:  query,
+		Status: status,
+		Sort:   sort,
+		Limit:  size,
+		Offset: offset,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("workflow.ListWorkflows")
 		return nil, httpx.Internal("查询 workflows 失败")
 	}
-	total, err := s.queries.CountWorkflowsByUser(ctx, userID)
+	total, err := s.queries.CountWorkflowsByUser(ctx, db.CountWorkflowsByUserParams{
+		UserID: userID,
+		Query:  query,
+		Status: status,
+	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("workflow.ListWorkflows: count")
 		return nil, httpx.Internal("查询 workflow 数量失败")
@@ -192,7 +211,64 @@ func (s *Service) ListWorkflows(ctx context.Context, userID uuid.UUID, limit int
 	for _, w := range rows {
 		items = append(items, workflowToResponse(w, nodesByWorkflowID[w.ID]))
 	}
-	return &WorkflowListResponse{Items: items, Total: total}, nil
+	return &WorkflowListResponse{
+		Items:        items,
+		Total:        total,
+		Page:         page,
+		Size:         size,
+		Query:        query,
+		Sort:         sort,
+		StatusFilter: status,
+	}, nil
+}
+
+func normalizeWorkflowListPage(page, size int32) (int32, int32) {
+	if page < 1 {
+		page = 1
+	}
+	if size < 1 {
+		size = 20
+	}
+	if size > 50 {
+		size = 50
+	}
+	return page, size
+}
+
+func normalizeWorkflowListQuery(query string) string {
+	query = strings.TrimSpace(query)
+	if len([]rune(query)) > 200 {
+		query = string([]rune(query)[:200])
+	}
+	return query
+}
+
+func normalizeWorkflowListStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "active":
+		return "active"
+	case "archived":
+		return "archived"
+	default:
+		return ""
+	}
+}
+
+func normalizeWorkflowListSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "updated_asc":
+		return "updated_asc"
+	case "created_desc":
+		return "created_desc"
+	case "created_asc":
+		return "created_asc"
+	case "name_asc":
+		return "name_asc"
+	case "name_desc":
+		return "name_desc"
+	default:
+		return "updated_desc"
+	}
 }
 
 func (s *Service) RunWorkflow(ctx context.Context, userID, workflowID uuid.UUID, req *RunWorkflowRequest) (*WorkflowRunResponse, error) {

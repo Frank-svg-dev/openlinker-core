@@ -129,16 +129,48 @@ const listWorkflowsByUser = `-- name: ListWorkflowsByUser :many
 SELECT id, user_id, name, description, status, edges, created_at, updated_at
 FROM workflows
 WHERE user_id = $1
-ORDER BY updated_at DESC, created_at DESC
-LIMIT $2`
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR name ILIKE '%' || $2 || '%'
+      OR COALESCE(description, '') ILIKE '%' || $2 || '%'
+      OR status ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM workflow_nodes n
+          WHERE n.workflow_id = workflows.id
+            AND (
+                n.id::text ILIKE '%' || $2 || '%'
+                OR n.node_key ILIKE '%' || $2 || '%'
+                OR n.title ILIKE '%' || $2 || '%'
+                OR n.agent_id::text ILIKE '%' || $2 || '%'
+            )
+      )
+  )
+  AND ($3::text = '' OR status = $3)
+ORDER BY
+  CASE WHEN $4 = 'updated_asc' THEN updated_at END ASC,
+  CASE WHEN $4 = 'updated_desc' THEN updated_at END DESC,
+  CASE WHEN $4 = 'created_asc' THEN created_at END ASC,
+  CASE WHEN $4 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $4 = 'name_asc' THEN lower(name) END ASC,
+  CASE WHEN $4 = 'name_desc' THEN lower(name) END DESC,
+  updated_at DESC,
+  created_at DESC,
+  id DESC
+LIMIT $5 OFFSET $6`
 
 type ListWorkflowsByUserParams struct {
 	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	Query  string    `db:"query" json:"query"`
+	Status string    `db:"status" json:"status"`
+	Sort   string    `db:"sort" json:"sort"`
 	Limit  int32     `db:"limit" json:"limit"`
+	Offset int32     `db:"offset" json:"offset"`
 }
 
 func (q *Queries) ListWorkflowsByUser(ctx context.Context, arg ListWorkflowsByUserParams) ([]Workflow, error) {
-	rows, err := q.db.Query(ctx, listWorkflowsByUser, arg.UserID, arg.Limit)
+	rows, err := q.db.Query(ctx, listWorkflowsByUser, arg.UserID, arg.Query, arg.Status, arg.Sort, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -157,10 +189,35 @@ func (q *Queries) ListWorkflowsByUser(ctx context.Context, arg ListWorkflowsByUs
 const countWorkflowsByUser = `-- name: CountWorkflowsByUser :one
 SELECT COUNT(*)::int
 FROM workflows
-WHERE user_id = $1`
+WHERE user_id = $1
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR name ILIKE '%' || $2 || '%'
+      OR COALESCE(description, '') ILIKE '%' || $2 || '%'
+      OR status ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM workflow_nodes n
+          WHERE n.workflow_id = workflows.id
+            AND (
+                n.id::text ILIKE '%' || $2 || '%'
+                OR n.node_key ILIKE '%' || $2 || '%'
+                OR n.title ILIKE '%' || $2 || '%'
+                OR n.agent_id::text ILIKE '%' || $2 || '%'
+            )
+      )
+  )
+  AND ($3::text = '' OR status = $3)`
 
-func (q *Queries) CountWorkflowsByUser(ctx context.Context, userID uuid.UUID) (int32, error) {
-	row := q.db.QueryRow(ctx, countWorkflowsByUser, userID)
+type CountWorkflowsByUserParams struct {
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+	Query  string    `db:"query" json:"query"`
+	Status string    `db:"status" json:"status"`
+}
+
+func (q *Queries) CountWorkflowsByUser(ctx context.Context, arg CountWorkflowsByUserParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countWorkflowsByUser, arg.UserID, arg.Query, arg.Status)
 	var count int32
 	err := row.Scan(&count)
 	return count, err

@@ -75,13 +75,16 @@ type CallRecordItem struct {
 }
 
 type CallRecordListResponse struct {
-	Items []CallRecordItem `json:"items"`
-	Total int32            `json:"total"`
-	Page  int32            `json:"page"`
-	Size  int32            `json:"size"`
-	View  string           `json:"view"`
-	Query string           `json:"query,omitempty"`
-	Sort  string           `json:"sort"`
+	Items          []CallRecordItem `json:"items"`
+	Total          int32            `json:"total"`
+	Page           int32            `json:"page"`
+	Size           int32            `json:"size"`
+	View           string           `json:"view"`
+	Query          string           `json:"query,omitempty"`
+	Sort           string           `json:"sort"`
+	StatusFilter   string           `json:"status_filter,omitempty"`
+	SourceFilter   string           `json:"source_filter,omitempty"`
+	RelationFilter string           `json:"relation_filter,omitempty"`
 }
 
 type UsageStats struct {

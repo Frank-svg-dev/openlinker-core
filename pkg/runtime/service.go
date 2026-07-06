@@ -1204,7 +1204,7 @@ func (s *Service) callAgent(
 	}
 }
 
-// GetRun 查单条调用详情；仅 owner 可看。
+// GetRun 查单条调用详情；调用者本人和被调用 Agent 创作者可看。
 func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
 	r, err := s.queries.GetRunByID(ctx, runID)
 	if err != nil {
@@ -1214,12 +1214,23 @@ func (s *Service) GetRun(ctx context.Context, userID, runID uuid.UUID) (*RunResp
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.GetRun: GetRunByID")
 		return nil, httpx.Internal("查询调用记录失败")
 	}
-	if r.UserID != userID {
+	agent, agentErr := s.queries.GetAgentByID(ctx, r.AgentID)
+	if agentErr != nil && !errors.Is(agentErr, pgx.ErrNoRows) {
+		log.Error().Err(agentErr).Str("agent_id", r.AgentID.String()).Msg("runtime.GetRun: GetAgentByID")
+		return nil, httpx.Internal("查询调用记录失败")
+	}
+	if r.UserID != userID && (agentErr != nil || agent.CreatorID != userID) {
 		// 不暴露存在性，统一 404
 		return nil, httpx.NotFound("调用记录不存在")
 	}
 	resp := runToResponse(&r)
-	s.attachRunAgentSummary(ctx, r.AgentID, resp)
+	if agentErr == nil {
+		resp.AgentSlug = agent.Slug
+		resp.AgentName = agent.Name
+		resp.AgentConnectionMode = agent.ConnectionMode
+	} else {
+		s.attachRunAgentSummary(ctx, r.AgentID, resp)
+	}
 	s.attachRunA2AContext(ctx, runID, resp)
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	s.attachRunEvidenceSummary(ctx, runID, resp)

@@ -320,18 +320,51 @@ SELECT id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
        created_at
 FROM task_queries
 WHERE user_id = $1
-ORDER BY created_at DESC
-LIMIT $2`
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR query ILIKE '%' || $2 || '%'
+      OR COALESCE(public_summary, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(completion_summary, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(revision_note, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(claim_run_id::text, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(completion_run_id::text, '') ILIKE '%' || $2 || '%'
+      OR array_to_string(COALESCE(parsed_skills, ARRAY[]::text[]), ' ') ILIKE '%' || $2 || '%'
+      OR array_to_string(COALESCE(mcp_tools, ARRAY[]::text[]), ' ') ILIKE '%' || $2 || '%'
+      OR COALESCE(recommended_agent_ids::text, '') ILIKE '%' || $2 || '%'
+  )
+  AND ($3::text = '' OR visibility = $3)
+  AND (
+      $4::text = ''
+      OR ($4 = 'accepted' AND delivery_status = 'accepted')
+      OR ($4 = 'revision_requested' AND delivery_status = 'revision_requested')
+      OR ($4 = 'completed' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NOT NULL)
+      OR ($4 = 'in_progress' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NOT NULL)
+      OR ($4 = 'matched' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NOT NULL)
+      OR ($4 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
+      OR ($4 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
+  )
+ORDER BY
+  CASE WHEN $5 = 'created_asc' THEN created_at END ASC,
+  CASE WHEN $5 = 'created_desc' THEN created_at END DESC,
+  created_at DESC,
+  id DESC
+LIMIT $6 OFFSET $7`
 
 // ListTaskQueriesByUserParams 入参。
 type ListTaskQueriesByUserParams struct {
-	UserID uuid.UUID `db:"user_id" json:"user_id"`
-	Limit  int32     `db:"limit" json:"limit"`
+	UserID     uuid.UUID `db:"user_id" json:"user_id"`
+	Query      string    `db:"query" json:"query"`
+	Visibility string    `db:"visibility" json:"visibility"`
+	Status     string    `db:"status" json:"status"`
+	Sort       string    `db:"sort" json:"sort"`
+	Limit      int32     `db:"limit" json:"limit"`
+	Offset     int32     `db:"offset" json:"offset"`
 }
 
 // ListTaskQueriesByUser 用户最近 N 条任务历史（倒序）。
 func (q *Queries) ListTaskQueriesByUser(ctx context.Context, arg ListTaskQueriesByUserParams) ([]TaskQuery, error) {
-	rows, err := q.db.Query(ctx, listTaskQueriesByUser, arg.UserID, arg.Limit)
+	rows, err := q.db.Query(ctx, listTaskQueriesByUser, arg.UserID, arg.Query, arg.Visibility, arg.Status, arg.Sort, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +381,49 @@ func (q *Queries) ListTaskQueriesByUser(ctx context.Context, arg ListTaskQueries
 		return nil, err
 	}
 	return items, nil
+}
+
+const countTaskQueriesByUser = `-- name: CountTaskQueriesByUser :one
+SELECT COUNT(*)::int
+FROM task_queries
+WHERE user_id = $1
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR query ILIKE '%' || $2 || '%'
+      OR COALESCE(public_summary, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(completion_summary, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(revision_note, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(claim_run_id::text, '') ILIKE '%' || $2 || '%'
+      OR COALESCE(completion_run_id::text, '') ILIKE '%' || $2 || '%'
+      OR array_to_string(COALESCE(parsed_skills, ARRAY[]::text[]), ' ') ILIKE '%' || $2 || '%'
+      OR array_to_string(COALESCE(mcp_tools, ARRAY[]::text[]), ' ') ILIKE '%' || $2 || '%'
+      OR COALESCE(recommended_agent_ids::text, '') ILIKE '%' || $2 || '%'
+  )
+  AND ($3::text = '' OR visibility = $3)
+  AND (
+      $4::text = ''
+      OR ($4 = 'accepted' AND delivery_status = 'accepted')
+      OR ($4 = 'revision_requested' AND delivery_status = 'revision_requested')
+      OR ($4 = 'completed' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NOT NULL)
+      OR ($4 = 'in_progress' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NOT NULL)
+      OR ($4 = 'matched' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NOT NULL)
+      OR ($4 = 'needs_agent' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) = 0)
+      OR ($4 = 'open' AND delivery_status NOT IN ('accepted', 'revision_requested') AND completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0)
+  )`
+
+type CountTaskQueriesByUserParams struct {
+	UserID     uuid.UUID `db:"user_id" json:"user_id"`
+	Query      string    `db:"query" json:"query"`
+	Visibility string    `db:"visibility" json:"visibility"`
+	Status     string    `db:"status" json:"status"`
+}
+
+func (q *Queries) CountTaskQueriesByUser(ctx context.Context, arg CountTaskQueriesByUserParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countTaskQueriesByUser, arg.UserID, arg.Query, arg.Visibility, arg.Status)
+	var count int32
+	err := row.Scan(&count)
+	return count, err
 }
 
 const listPublicTaskQueries = `-- name: ListPublicTaskQueries :many

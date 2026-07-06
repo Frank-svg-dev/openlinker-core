@@ -76,28 +76,39 @@ AND (
     OR COALESCE(NULLIF(ctx.protocol_task_id, ''), r.id::text) ILIKE '%' || $3 || '%'
     OR array_to_string(COALESCE(ctx.reference_task_ids, ARRAY[]::text[]), ' ') ILIKE '%' || $3 || '%'
 )
+AND ($4 = '' OR r.status = $4)
+AND ($5 = '' OR r.source = $5)
+AND (
+    $6 = ''
+    OR ($6 = 'direct' AND d.parent_run_id IS NULL AND COALESCE(children.child_count, 0) = 0)
+    OR ($6 = 'a2a_child' AND d.parent_run_id IS NOT NULL)
+    OR ($6 = 'a2a_parent' AND d.parent_run_id IS NULL AND COALESCE(children.child_count, 0) > 0)
+)
 ORDER BY
-    CASE WHEN $4 = 'started_asc' THEN r.started_at END ASC,
-    CASE WHEN $4 = 'started_desc' THEN r.started_at END DESC,
-    CASE WHEN $4 = 'amount_asc' THEN
+    CASE WHEN $7 = 'started_asc' THEN r.started_at END ASC,
+    CASE WHEN $7 = 'started_desc' THEN r.started_at END DESC,
+    CASE WHEN $7 = 'amount_asc' THEN
         CASE WHEN a.creator_id = $1 AND r.user_id <> $1 THEN r.creator_revenue_cents ELSE r.cost_cents END
     END ASC,
-    CASE WHEN $4 = 'amount_desc' THEN
+    CASE WHEN $7 = 'amount_desc' THEN
         CASE WHEN a.creator_id = $1 AND r.user_id <> $1 THEN r.creator_revenue_cents ELSE r.cost_cents END
     END DESC,
-    CASE WHEN $4 = 'duration_asc' THEN COALESCE(r.duration_ms, 2147483647) END ASC,
-    CASE WHEN $4 = 'duration_desc' THEN COALESCE(r.duration_ms, -1) END DESC,
+    CASE WHEN $7 = 'duration_asc' THEN COALESCE(r.duration_ms, 2147483647) END ASC,
+    CASE WHEN $7 = 'duration_desc' THEN COALESCE(r.duration_ms, -1) END DESC,
     r.started_at DESC,
     r.id DESC
-LIMIT $5 OFFSET $6`
+LIMIT $8 OFFSET $9`
 
 type ListCallRecordsForUserParams struct {
-	UserID uuid.UUID `db:"user_id" json:"user_id"`
-	View   string    `db:"view" json:"view"`
-	Query  string    `db:"query" json:"query"`
-	Sort   string    `db:"sort" json:"sort"`
-	Limit  int32     `db:"limit" json:"limit"`
-	Offset int32     `db:"offset" json:"offset"`
+	UserID   uuid.UUID `db:"user_id" json:"user_id"`
+	View     string    `db:"view" json:"view"`
+	Query    string    `db:"query" json:"query"`
+	Status   string    `db:"status" json:"status"`
+	Source   string    `db:"source" json:"source"`
+	Relation string    `db:"relation" json:"relation"`
+	Sort     string    `db:"sort" json:"sort"`
+	Limit    int32     `db:"limit" json:"limit"`
+	Offset   int32     `db:"offset" json:"offset"`
 }
 
 type ListCallRecordsForUserRow struct {
@@ -131,7 +142,7 @@ type ListCallRecordsForUserRow struct {
 }
 
 func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecordsForUserParams) ([]ListCallRecordsForUserRow, error) {
-	rows, err := q.db.Query(ctx, listCallRecordsForUser, arg.UserID, arg.View, arg.Query, arg.Sort, arg.Limit, arg.Offset)
+	rows, err := q.db.Query(ctx, listCallRecordsForUser, arg.UserID, arg.View, arg.Query, arg.Status, arg.Source, arg.Relation, arg.Sort, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -179,6 +190,12 @@ const countCallRecordsForUser = `-- name: CountCallRecordsForUser :one
 SELECT COUNT(*)::int AS total
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
+LEFT JOIN run_delegations d ON d.child_run_id = r.id
+LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS child_count
+    FROM run_delegations cd
+    WHERE cd.parent_run_id = r.id
+) children ON TRUE
 WHERE (
     ($2 = 'made' AND r.user_id = $1)
     OR ($2 = 'received' AND a.creator_id = $1)
@@ -220,16 +237,27 @@ AND (
               OR array_to_string(ctx.reference_task_ids, ' ') ILIKE '%' || $3 || '%'
           )
     )
+)
+AND ($4 = '' OR r.status = $4)
+AND ($5 = '' OR r.source = $5)
+AND (
+    $6 = ''
+    OR ($6 = 'direct' AND d.parent_run_id IS NULL AND COALESCE(children.child_count, 0) = 0)
+    OR ($6 = 'a2a_child' AND d.parent_run_id IS NOT NULL)
+    OR ($6 = 'a2a_parent' AND d.parent_run_id IS NULL AND COALESCE(children.child_count, 0) > 0)
 )`
 
 type CountCallRecordsForUserParams struct {
-	UserID uuid.UUID `db:"user_id" json:"user_id"`
-	View   string    `db:"view" json:"view"`
-	Query  string    `db:"query" json:"query"`
+	UserID   uuid.UUID `db:"user_id" json:"user_id"`
+	View     string    `db:"view" json:"view"`
+	Query    string    `db:"query" json:"query"`
+	Status   string    `db:"status" json:"status"`
+	Source   string    `db:"source" json:"source"`
+	Relation string    `db:"relation" json:"relation"`
 }
 
 func (q *Queries) CountCallRecordsForUser(ctx context.Context, arg CountCallRecordsForUserParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countCallRecordsForUser, arg.UserID, arg.View, arg.Query)
+	row := q.db.QueryRow(ctx, countCallRecordsForUser, arg.UserID, arg.View, arg.Query, arg.Status, arg.Source, arg.Relation)
 	var total int32
 	err := row.Scan(&total)
 	return total, err

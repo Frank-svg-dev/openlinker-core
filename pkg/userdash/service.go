@@ -75,32 +75,41 @@ func (s *Service) ListUserRuns(ctx context.Context, userID uuid.UUID, page, size
 	return &RunListResponse{Items: items, Total: total, Page: page, Size: size}, nil
 }
 
-func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view, query, sort string, page, size int32) (*CallRecordListResponse, error) {
+func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view, query, sort, status, source, relation string, page, size int32) (*CallRecordListResponse, error) {
 	page, size = normalizePage(page, size)
 	view = normalizeCallRecordView(view)
 	query = normalizeCallRecordQuery(query)
 	sort = normalizeCallRecordSort(sort)
+	status = normalizeCallRecordStatus(status)
+	source = normalizeCallRecordSource(source)
+	relation = normalizeCallRecordRelation(relation)
 	offset := (page - 1) * size
 
 	rows, err := s.queries.ListCallRecordsForUser(ctx, db.ListCallRecordsForUserParams{
-		UserID: userID,
-		View:   view,
-		Query:  query,
-		Sort:   sort,
-		Limit:  size,
-		Offset: offset,
+		UserID:   userID,
+		View:     view,
+		Query:    query,
+		Status:   status,
+		Source:   source,
+		Relation: relation,
+		Sort:     sort,
+		Limit:    size,
+		Offset:   offset,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Str("query", query).Str("sort", sort).Msg("userdash.ListCallRecords: ListCallRecordsForUser")
+		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Str("query", query).Str("sort", sort).Str("status", status).Str("source", source).Str("relation", relation).Msg("userdash.ListCallRecords: ListCallRecordsForUser")
 		return nil, httpx.Internal("查询调用记录失败")
 	}
 	total, err := s.queries.CountCallRecordsForUser(ctx, db.CountCallRecordsForUserParams{
-		UserID: userID,
-		View:   view,
-		Query:  query,
+		UserID:   userID,
+		View:     view,
+		Query:    query,
+		Status:   status,
+		Source:   source,
+		Relation: relation,
 	})
 	if err != nil {
-		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Str("query", query).Msg("userdash.ListCallRecords: CountCallRecordsForUser")
+		log.Error().Err(err).Str("user_id", userID.String()).Str("view", view).Str("query", query).Str("status", status).Str("source", source).Str("relation", relation).Msg("userdash.ListCallRecords: CountCallRecordsForUser")
 		return nil, httpx.Internal("查询调用记录失败")
 	}
 
@@ -108,7 +117,18 @@ func (s *Service) ListCallRecords(ctx context.Context, userID uuid.UUID, view, q
 	for i := range rows {
 		items = append(items, toCallRecordItem(rows[i]))
 	}
-	return &CallRecordListResponse{Items: items, Total: total, Page: page, Size: size, View: view, Query: query, Sort: sort}, nil
+	return &CallRecordListResponse{
+		Items:          items,
+		Total:          total,
+		Page:           page,
+		Size:           size,
+		View:           view,
+		Query:          query,
+		Sort:           sort,
+		StatusFilter:   status,
+		SourceFilter:   source,
+		RelationFilter: relation,
+	}, nil
 }
 
 func (s *Service) ListCreatorAgentRuns(ctx context.Context, creatorID, agentID uuid.UUID, page, size int32) (*RunListResponse, error) {
@@ -317,6 +337,33 @@ func normalizeCallRecordSort(sort string) string {
 		return strings.ToLower(strings.TrimSpace(sort))
 	default:
 		return "started_desc"
+	}
+}
+
+func normalizeCallRecordStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "running", "success", "failed", "timeout", "canceled":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
+}
+
+func normalizeCallRecordSource(source string) string {
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "web", "api", "mcp", "runtime", "a2a":
+		return strings.ToLower(strings.TrimSpace(source))
+	default:
+		return ""
+	}
+}
+
+func normalizeCallRecordRelation(relation string) string {
+	switch strings.ToLower(strings.TrimSpace(relation)) {
+	case "direct", "a2a_parent", "a2a_child":
+		return strings.ToLower(strings.TrimSpace(relation))
+	default:
+		return ""
 	}
 }
 

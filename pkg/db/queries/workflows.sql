@@ -35,13 +35,60 @@ ORDER BY workflow_id ASC, position ASC, created_at ASC;
 SELECT id, user_id, name, description, status, edges, created_at, updated_at
 FROM workflows
 WHERE user_id = $1
-ORDER BY updated_at DESC, created_at DESC
-LIMIT $2;
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR name ILIKE '%' || $2 || '%'
+      OR COALESCE(description, '') ILIKE '%' || $2 || '%'
+      OR status ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM workflow_nodes n
+          WHERE n.workflow_id = workflows.id
+            AND (
+                n.id::text ILIKE '%' || $2 || '%'
+                OR n.node_key ILIKE '%' || $2 || '%'
+                OR n.title ILIKE '%' || $2 || '%'
+                OR n.agent_id::text ILIKE '%' || $2 || '%'
+            )
+      )
+  )
+  AND ($3::text = '' OR status = $3)
+ORDER BY
+  CASE WHEN $4 = 'updated_asc' THEN updated_at END ASC,
+  CASE WHEN $4 = 'updated_desc' THEN updated_at END DESC,
+  CASE WHEN $4 = 'created_asc' THEN created_at END ASC,
+  CASE WHEN $4 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $4 = 'name_asc' THEN lower(name) END ASC,
+  CASE WHEN $4 = 'name_desc' THEN lower(name) END DESC,
+  updated_at DESC,
+  created_at DESC,
+  id DESC
+LIMIT $5 OFFSET $6;
 
 -- name: CountWorkflowsByUser :one
 SELECT COUNT(*)::int
 FROM workflows
-WHERE user_id = $1;
+WHERE user_id = $1
+  AND (
+      $2::text = ''
+      OR id::text ILIKE '%' || $2 || '%'
+      OR name ILIKE '%' || $2 || '%'
+      OR COALESCE(description, '') ILIKE '%' || $2 || '%'
+      OR status ILIKE '%' || $2 || '%'
+      OR EXISTS (
+          SELECT 1
+          FROM workflow_nodes n
+          WHERE n.workflow_id = workflows.id
+            AND (
+                n.id::text ILIKE '%' || $2 || '%'
+                OR n.node_key ILIKE '%' || $2 || '%'
+                OR n.title ILIKE '%' || $2 || '%'
+                OR n.agent_id::text ILIKE '%' || $2 || '%'
+            )
+      )
+  )
+  AND ($3::text = '' OR status = $3);
 
 -- name: CreateWorkflowRun :one
 INSERT INTO workflow_runs (workflow_id, user_id, status, input)

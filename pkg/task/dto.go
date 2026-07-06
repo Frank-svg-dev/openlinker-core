@@ -165,6 +165,17 @@ type HistoryItem struct {
 	CreatedAt           string   `json:"created_at"`
 }
 
+type HistoryListResponse struct {
+	Items            []HistoryItem `json:"items"`
+	Total            int32         `json:"total"`
+	Page             int32         `json:"page"`
+	Size             int32         `json:"size"`
+	Query            string        `json:"query,omitempty"`
+	Sort             string        `json:"sort"`
+	StatusFilter     string        `json:"status_filter,omitempty"`
+	VisibilityFilter string        `json:"visibility_filter,omitempty"`
+}
+
 // PublicTaskItem 任务广场公开列表项。
 //
 // 不包含 user_id / email / display_name；创作者只看到需求、Skill 和匹配状态。
