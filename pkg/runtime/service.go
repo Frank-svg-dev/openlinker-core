@@ -44,7 +44,6 @@ const runtimePullEmptyClaimRetryAfter = 5 * time.Second
 const runtimePullHeartbeatInterval = 60 * time.Second
 const runtimePullMaxLongPollWait = 30 * time.Second
 const runtimePullLongPollTick = 5 * time.Second
-const runtimeTokenVerificationCacheTTL = 30 * time.Second
 const runtimeBestEffortWriteTimeout = 10 * time.Second
 const runtimeBestEffortWriteConcurrency = 32
 const runtimeTokenTouchMinInterval = 30 * time.Second
@@ -93,8 +92,8 @@ type DeliveryEnqueuer interface {
 // 关键时序约束（见 docs/13 模块 4 / docs/10 章四）：
 //  1. 事务 A：INSERT runs(status=running)
 //  2. 事务外：HTTP POST 创作者 endpoint（60s 超时）
-//  3. 事务 B：成功 → MarkRunSuccess + IncrementAgentStats
-//     失败 → MarkRunFailed
+//  3. 事务 B：成功 → MarkRunSuccess；失败 → MarkRunFailed
+//     成功统计、availability、artifact 和事件写入不得把已完成的 run 回滚。
 //  4. 事务外：异步触发 webhook 投递（不阻塞响应）
 //
 // HTTP 调用必须在事务外，否则会长时间占用数据库事务。
@@ -108,16 +107,9 @@ type Service struct {
 	taskCallbackSvc TaskCallbackEnqueuer
 	deliverySvc     DeliveryEnqueuer
 	wsHub           *runtimeWSHub
-	tokenCacheMu    sync.Mutex
-	tokenCache      map[string]runtimeTokenCacheEntry
 	bestEffortDBSem chan struct{}
 	tokenTouchMu    sync.Mutex
 	tokenTouchAt    map[uuid.UUID]time.Time
-}
-
-type runtimeTokenCacheEntry struct {
-	token     db.AgentRuntimeToken
-	expiresAt time.Time
 }
 
 type runInvocation struct {
@@ -203,7 +195,6 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		pool:         pool,
 		cfg:          cfg,
 		wsHub:        newRuntimeWSHub(),
-		tokenCache:   map[string]runtimeTokenCacheEntry{},
 		bestEffortDBSem: make(
 			chan struct{},
 			runtimeBestEffortWriteConcurrency,
@@ -625,7 +616,7 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 		return nil, err
 	}
 	if s.isRuntimePull(invocation) {
-		s.recordRunEventAsync(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
@@ -645,14 +636,14 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	}
 	if s.isRuntimePull(invocation) {
 		if invocation.runtimePullAvailable {
-			s.recordRunEventAsync(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 				"connection_mode": invocation.agent.ConnectionMode,
 				"agent_id":        invocation.agent.ID.String(),
 			})
 			s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		} else {
 			resp.NextAction = runtimePullWaitingNextAction(resp.RunID, invocation.agent.ID)
-			s.recordRunEventAsync(ctx, invocation.runID, "run.dispatch.waiting_runtime", map[string]interface{}{
+			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.waiting_runtime", map[string]interface{}{
 				"connection_mode":    invocation.agent.ConnectionMode,
 				"agent_id":           invocation.agent.ID.String(),
 				"reason":             "runtime_offline",
@@ -676,7 +667,7 @@ func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation
 		return nil, err
 	}
 	if s.isRuntimePull(invocation) {
-		s.recordRunEventAsync(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
+		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
@@ -1613,7 +1604,7 @@ func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRun
 	if strings.TrimSpace(connectionMode) != "" {
 		claimedPayload["connection_mode"] = strings.TrimSpace(connectionMode)
 	}
-	s.recordRunEventAsync(ctx, run.ID, "run.dispatch.claimed", claimedPayload)
+	s.recordRunEventBestEffort(ctx, run.ID, "run.dispatch.claimed", claimedPayload)
 
 	input := map[string]interface{}{}
 	if len(run.Input) > 0 {
@@ -1972,10 +1963,6 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
 		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 	}
-	cacheKey := runtimeTokenCacheKey(plaintext)
-	if token, ok := s.cachedRuntimeToken(cacheKey, acceptedScopes...); ok {
-		return token, nil
-	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -1985,59 +1972,10 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 	}
 	for _, token := range tokens {
 		if credential.VerifyTokenHash(token.TokenHash, plaintext) && hasAnyRuntimeScope(token.Scopes, acceptedScopes...) {
-			s.cacheRuntimeToken(cacheKey, token)
 			return token, nil
 		}
 	}
 	return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
-}
-
-func runtimeTokenCacheKey(plaintext string) string {
-	return sha256Hex([]byte(plaintext))
-}
-
-func (s *Service) cachedRuntimeToken(cacheKey string, acceptedScopes ...string) (db.AgentRuntimeToken, bool) {
-	if s == nil || cacheKey == "" {
-		return db.AgentRuntimeToken{}, false
-	}
-	now := time.Now()
-	s.tokenCacheMu.Lock()
-	defer s.tokenCacheMu.Unlock()
-	entry, ok := s.tokenCache[cacheKey]
-	if !ok {
-		return db.AgentRuntimeToken{}, false
-	}
-	if now.After(entry.expiresAt) {
-		delete(s.tokenCache, cacheKey)
-		return db.AgentRuntimeToken{}, false
-	}
-	if !hasAnyRuntimeScope(entry.token.Scopes, acceptedScopes...) {
-		return db.AgentRuntimeToken{}, false
-	}
-	return entry.token, true
-}
-
-func (s *Service) cacheRuntimeToken(cacheKey string, token db.AgentRuntimeToken) {
-	if s == nil || cacheKey == "" {
-		return
-	}
-	s.tokenCacheMu.Lock()
-	defer s.tokenCacheMu.Unlock()
-	if s.tokenCache == nil {
-		s.tokenCache = map[string]runtimeTokenCacheEntry{}
-	}
-	now := time.Now()
-	if len(s.tokenCache) > 4096 {
-		for key, entry := range s.tokenCache {
-			if now.After(entry.expiresAt) {
-				delete(s.tokenCache, key)
-			}
-		}
-	}
-	s.tokenCache[cacheKey] = runtimeTokenCacheEntry{
-		token:     token,
-		expiresAt: now.Add(runtimeTokenVerificationCacheTTL),
-	}
 }
 
 func hasAnyRuntimeScope(scopes []string, accepted ...string) bool {
@@ -2445,9 +2383,9 @@ func (s *Service) handleSuccess(
 		}); artifactErr != nil {
 			log.Error().Err(artifactErr).Str("run_id", runID.String()).Msg("runtime.handleSuccess: create artifacts failed")
 		}
-		s.recordRunSuccessStatsAsync(ctx, runID, agentID, 0)
+		s.recordRunSuccessStatsBestEffort(ctx, runID, agentID, 0)
 		s.recordAgentEventsBestEffort(ctx, runID, agentEvents)
-		s.recordRunEventAsync(ctx, runID, "run.completed", map[string]interface{}{
+		s.recordRunEventBestEffort(ctx, runID, "run.completed", map[string]interface{}{
 			"status":      "success",
 			"duration_ms": duration,
 			"output":      output,
@@ -3572,12 +3510,6 @@ func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID,
 	return &event
 }
 
-func (s *Service) recordRunEventAsync(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) {
-	s.runBestEffortDBAsync(ctx, runtimeBestEffortWriteTimeout, func(eventCtx context.Context) {
-		s.recordRunEventBestEffort(eventCtx, runID, eventType, payload)
-	})
-}
-
 func (s *Service) touchRuntimeTokenAsync(ctx context.Context, tokenID uuid.UUID) {
 	if !s.shouldTouchRuntimeToken(tokenID, time.Now()) {
 		return
@@ -3605,23 +3537,23 @@ func (s *Service) shouldTouchRuntimeToken(tokenID uuid.UUID, now time.Time) bool
 	return true
 }
 
-func (s *Service) recordRunSuccessStatsAsync(ctx context.Context, runID, agentID uuid.UUID, revenue int32) {
-	s.runBestEffortDBAsync(ctx, runtimeBestEffortWriteTimeout, func(statsCtx context.Context) {
-		if err := pgx.BeginFunc(statsCtx, s.pool, func(tx pgx.Tx) error {
-			q := s.queries.WithTx(tx)
-			if e := q.IncrementAgentStats(statsCtx, db.IncrementAgentStatsParams{
-				ID:           agentID,
-				RevenueCents: int64(revenue),
-			}); e != nil {
-				return e
-			}
-			_, e := q.MarkAgentAvailabilitySuccess(statsCtx, agentID)
+func (s *Service) recordRunSuccessStatsBestEffort(ctx context.Context, runID, agentID uuid.UUID, revenue int32) {
+	statsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeBestEffortWriteTimeout)
+	defer cancel()
+	if err := pgx.BeginFunc(statsCtx, s.pool, func(tx pgx.Tx) error {
+		q := s.queries.WithTx(tx)
+		if e := q.IncrementAgentStats(statsCtx, db.IncrementAgentStatsParams{
+			ID:           agentID,
+			RevenueCents: int64(revenue),
+		}); e != nil {
 			return e
-		}); err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).Str("agent_id", agentID.String()).
-				Msg("runtime.recordRunSuccessStatsAsync")
 		}
-	})
+		_, e := q.MarkAgentAvailabilitySuccess(statsCtx, agentID)
+		return e
+	}); err != nil {
+		log.Error().Err(err).Str("run_id", runID.String()).Str("agent_id", agentID.String()).
+			Msg("runtime.recordRunSuccessStatsBestEffort")
+	}
 }
 
 func (s *Service) runBestEffortDBAsync(ctx context.Context, timeout time.Duration, fn func(context.Context)) {

@@ -179,32 +179,6 @@ func TestRunStartedEventPayloadIncludesConnectionDetails(t *testing.T) {
 	}
 }
 
-func TestRuntimeTokenVerificationCacheRespectsScopeAndExpiry(t *testing.T) {
-	svc := &Service{}
-	key := runtimeTokenCacheKey("ol_agent_test_cache_token")
-	token := db.AgentRuntimeToken{
-		ID:     uuid.New(),
-		Scopes: []string{"agent:pull"},
-	}
-
-	svc.cacheRuntimeToken(key, token)
-	got, ok := svc.cachedRuntimeToken(key, "agent:pull")
-	require.True(t, ok)
-	require.Equal(t, token.ID, got.ID)
-
-	_, ok = svc.cachedRuntimeToken(key, "agent:call")
-	require.False(t, ok)
-
-	svc.tokenCacheMu.Lock()
-	svc.tokenCache[key] = runtimeTokenCacheEntry{
-		token:     token,
-		expiresAt: time.Now().Add(-time.Second),
-	}
-	svc.tokenCacheMu.Unlock()
-	_, ok = svc.cachedRuntimeToken(key, "agent:pull")
-	require.False(t, ok)
-}
-
 func TestRuntimeTokenTouchThrottle(t *testing.T) {
 	svc := &Service{}
 	tokenID := uuid.New()
