@@ -347,10 +347,10 @@ func (h *Handler) PostRunEvent(c echo.Context) error {
 }
 
 func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
+	var wait time.Duration
 	defer func() {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfter.Seconds())))
-			c.Response().Header().Set("X-OpenLinker-Max-Claim-Wait-Seconds", strconv.Itoa(int(runtimePullMaxLongPollWait.Seconds())))
+			setRuntimePullEmptyClaimHeaders(c, wait)
 			if !c.Response().Committed {
 				c.Response().WriteHeader(http.StatusNoContent)
 			}
@@ -371,7 +371,7 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
 		}
 		return err
 	}
-	wait, err := runtimePullClaimWait(c.QueryParam("wait"))
+	wait, err = runtimePullClaimWait(c.QueryParam("wait"))
 	if err != nil {
 		return err
 	}
@@ -384,8 +384,7 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
 	resp, err := h.svc.ClaimRuntimePullRunForToken(c.Request().Context(), verifiedToken, RuntimePullClaimOptions{Wait: wait})
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfter.Seconds())))
-			c.Response().Header().Set("X-OpenLinker-Max-Claim-Wait-Seconds", strconv.Itoa(int(runtimePullMaxLongPollWait.Seconds())))
+			setRuntimePullEmptyClaimHeaders(c, wait)
 			c.Response().WriteHeader(http.StatusNoContent)
 			return nil
 		}
@@ -393,11 +392,22 @@ func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
 	}
 	if resp == nil {
 		h.runtimeLimiter.markEmptyClaim(tokenKey, wait)
-		c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfter.Seconds())))
-		c.Response().Header().Set("X-OpenLinker-Max-Claim-Wait-Seconds", strconv.Itoa(int(runtimePullMaxLongPollWait.Seconds())))
+		setRuntimePullEmptyClaimHeaders(c, wait)
 		return c.NoContent(http.StatusNoContent)
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func setRuntimePullEmptyClaimHeaders(c echo.Context, wait time.Duration) {
+	c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfterForWait(wait).Seconds())))
+	c.Response().Header().Set("X-OpenLinker-Max-Claim-Wait-Seconds", strconv.Itoa(int(runtimePullMaxLongPollWait.Seconds())))
+}
+
+func runtimePullEmptyClaimRetryAfterForWait(wait time.Duration) time.Duration {
+	if wait > 0 {
+		return 0
+	}
+	return runtimePullEmptyClaimRetryAfter
 }
 
 func runtimePullClaimWait(raw string) (time.Duration, error) {

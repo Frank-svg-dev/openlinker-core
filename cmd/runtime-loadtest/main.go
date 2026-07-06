@@ -1698,7 +1698,7 @@ func retryAfterDuration(headers http.Header, fallback time.Duration) time.Durati
 	if headers != nil {
 		raw := strings.TrimSpace(headers.Get("Retry-After"))
 		if raw != "" {
-			if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+			if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
 				return time.Duration(seconds) * time.Second
 			}
 			if at, err := http.ParseTime(raw); err == nil {

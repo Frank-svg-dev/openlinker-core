@@ -35,10 +35,10 @@ func (l *redisRuntimeEndpointLimiter) allowHeartbeat(key string) time.Duration {
 }
 
 func (l *redisRuntimeEndpointLimiter) beginClaim(key string, wait time.Duration) (time.Duration, func()) {
-	if retry := l.ttl("empty", key); retry > 0 {
-		return retry, func() {}
-	}
 	if wait <= 0 {
+		if retry := l.ttl("empty", key); retry > 0 {
+			return retry, func() {}
+		}
 		return 0, func() {}
 	}
 	ttl := wait + runtimePullConcurrentClaimRetryAfter
@@ -65,6 +65,9 @@ func (l *redisRuntimeEndpointLimiter) beginClaim(key string, wait time.Duration)
 }
 
 func (l *redisRuntimeEndpointLimiter) markEmptyClaim(key string, wait time.Duration) {
+	if wait > 0 {
+		return
+	}
 	ctx, cancel := l.context()
 	defer cancel()
 	if err := l.client.Set(ctx, l.key("empty", key), "1", runtimePullEmptyClaimRetryAfter).Err(); err != nil {

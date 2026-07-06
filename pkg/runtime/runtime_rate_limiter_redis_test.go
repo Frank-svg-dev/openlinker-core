@@ -45,9 +45,14 @@ func TestRedisRuntimeEndpointLimiterWithRealRedis(t *testing.T) {
 	release()
 
 	limiter.markEmptyClaim("empty", 0)
-	retry, release = limiter.beginClaim("empty", time.Second)
+	retry, release = limiter.beginClaim("empty", 0)
 	release()
 	if retry <= 0 {
 		t.Fatalf("empty claim retry = %s, want > 0", retry)
+	}
+	retry, release = limiter.beginClaim("empty", time.Second)
+	release()
+	if retry != 0 {
+		t.Fatalf("long-poll empty claim retry = %s, want 0", retry)
 	}
 }

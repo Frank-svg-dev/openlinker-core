@@ -59,7 +59,7 @@ func (l *runtimeEndpointLimiter) beginClaim(key string, wait time.Duration) (tim
 	defer l.mu.Unlock()
 	l.purgeLocked(now)
 	state := l.stateForLocked(key, now)
-	if now.Before(state.emptyClaimAllowedAt) {
+	if wait <= 0 && now.Before(state.emptyClaimAllowedAt) {
 		return state.emptyClaimAllowedAt.Sub(now), func() {}
 	}
 	if wait > 0 && state.activeLongPollClaim {
@@ -80,6 +80,9 @@ func (l *runtimeEndpointLimiter) beginClaim(key string, wait time.Duration) (tim
 }
 
 func (l *runtimeEndpointLimiter) markEmptyClaim(key string, wait time.Duration) {
+	if wait > 0 {
+		return
+	}
 	now := l.now()
 	l.mu.Lock()
 	defer l.mu.Unlock()

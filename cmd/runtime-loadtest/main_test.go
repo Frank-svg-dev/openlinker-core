@@ -55,6 +55,13 @@ func TestWebSocketDialErrorIncludesResponseDetails(t *testing.T) {
 	}
 }
 
+func TestRetryAfterDurationAllowsImmediateRetry(t *testing.T) {
+	got := retryAfterDuration(http.Header{"Retry-After": []string{"0"}}, 30*time.Second)
+	if got != 0 {
+		t.Fatalf("retryAfterDuration = %s, want 0", got)
+	}
+}
+
 func TestEnsureAccountUsesVerificationCodeAndLoginAfterRegister(t *testing.T) {
 	var loginCalls int
 	var sawVerification bool

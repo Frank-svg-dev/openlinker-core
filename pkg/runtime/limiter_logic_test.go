@@ -51,21 +51,26 @@ func TestRuntimeEndpointLimiterStateMachine(t *testing.T) {
 	}
 
 	limiter.markEmptyClaim("token:empty", 0)
-	if retry, release := limiter.beginClaim("token:empty", time.Second); retry != runtimePullEmptyClaimRetryAfter {
-		t.Fatalf("empty claim cooldown retry = %v", retry)
+	if retry, release := limiter.beginClaim("token:empty", 0); retry != runtimePullEmptyClaimRetryAfter {
+		t.Fatalf("empty short-poll cooldown retry = %v", retry)
+	} else {
+		release()
+	}
+	if retry, release := limiter.beginClaim("token:empty", time.Second); retry != 0 {
+		t.Fatalf("long-poll should bypass empty cooldown retry = %v", retry)
 	} else {
 		release()
 	}
 	now = now.Add(runtimePullEmptyClaimRetryAfter)
-	if retry, release := limiter.beginClaim("token:empty", time.Second); retry != 0 {
+	if retry, release := limiter.beginClaim("token:empty", 0); retry != 0 {
 		t.Fatalf("empty claim after cooldown retry = %v", retry)
 	} else {
 		release()
 	}
 
 	limiter.markEmptyClaim("token:custom-empty", 7*time.Second)
-	if retry, release := limiter.beginClaim("token:custom-empty", time.Second); retry != runtimePullEmptyClaimRetryAfter {
-		t.Fatalf("custom empty claim cooldown retry = %v", retry)
+	if retry, release := limiter.beginClaim("token:custom-empty", time.Second); retry != 0 {
+		t.Fatalf("long-poll empty claim should not start cooldown retry = %v", retry)
 	} else {
 		release()
 	}
