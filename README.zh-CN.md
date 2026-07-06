@@ -35,6 +35,28 @@ OpenLinker Core 目前仍是 pre-1.0。运行时模型已经可用，但 API 细
 
 这些能力属于托管商业服务层，不应放进本仓库。
 
+## 开源架构图
+
+开源仓库以 Core 作为共同的注册中心和运行时网关。托管部署可以在 Core API 边界接入
+可选 bridge，但闭源产品模块不属于本图，也不应成为本仓库依赖。
+
+```mermaid
+flowchart LR
+  CoreWeb["openlinker-core-web<br/>自托管 UI"] -->|"REST / session API"| Core
+  SDKs["openlinker-js / openlinker-go<br/>客户端与 runtime SDK"] -->|"HTTP / A2A / MCP binding"| Core
+  MCPCaller["MCP 或 A2A 调用方"] -->|"tool call / message/send"| Core
+
+  HostedBridge["Hosted Bridge<br/>可选部署适配层"] -.->|"授权后的 Core API"| Core
+
+  Core["openlinker-core<br/>auth / registry / runs / events"]
+
+  Core -->|"direct_http"| HTTPAgent["公网 HTTPS Agent"]
+  Core -->|"mcp_server"| MCPAgent["远程 MCP / JSON-RPC server"]
+  Core -->|"runtime_ws / runtime_pull"| AgentNode["openlinker-agent-node"]
+  AgentNode -->|"http / command / a2a / codex adapter"| Backend["Agent backend"]
+  Backend -->|"events / result"| AgentNode
+```
+
 ## 快速开始
 
 依赖：

@@ -40,6 +40,29 @@ Excluded:
 
 Those concerns belong in the hosted product services layer, outside this repository.
 
+## Open-source Architecture
+
+The open-source repositories depend on Core as the shared registry and runtime
+gateway. Hosted deployments can attach an optional bridge at the Core API
+boundary, but closed product modules are intentionally not part of this diagram.
+
+```mermaid
+flowchart LR
+  CoreWeb["openlinker-core-web<br/>self-hosted UI"] -->|"REST / session APIs"| Core
+  SDKs["openlinker-js / openlinker-go<br/>client and runtime SDKs"] -->|"HTTP / A2A / MCP bindings"| Core
+  MCPCaller["MCP or A2A caller"] -->|"tool call / message/send"| Core
+
+  HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"authorized Core APIs"| Core
+
+  Core["openlinker-core<br/>auth / registry / runs / events"]
+
+  Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
+  Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
+  Core -->|"runtime_ws / runtime_pull"| AgentNode["openlinker-agent-node"]
+  AgentNode -->|"http / command / a2a / codex adapter"| Backend["Agent backend"]
+  Backend -->|"events / result"| AgentNode
+```
+
 ## Quick Start
 
 Prerequisites:
