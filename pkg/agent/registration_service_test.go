@@ -29,6 +29,12 @@ func TestRegistrationService_CreateAgentToken_PendingDefaults(t *testing.T) {
 	require.NotNil(t, resp.ExpiresAt)
 	require.Equal(t, []string{"agent:call", "agent:pull"}, resp.Scopes)
 	require.Equal(t, resp.Prefix, resp.PlaintextToken[:12])
+
+	var tokenHash string
+	err = pool.QueryRow(context.Background(), `SELECT token_hash FROM agent_tokens WHERE id = $1`, uuid.MustParse(resp.ID)).Scan(&tokenHash)
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(tokenHash, credential.FastTokenHashPrefix))
+	require.True(t, credential.VerifyFastTokenHash(tokenHash, resp.PlaintextToken))
 }
 
 func TestRegistrationService_CreateAgentToken_NonCreatorRejected(t *testing.T) {

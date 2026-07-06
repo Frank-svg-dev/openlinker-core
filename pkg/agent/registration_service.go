@@ -13,7 +13,6 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/rs/zerolog/log"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
@@ -119,13 +118,6 @@ func (s *RegistrationService) CreateAgentToken(ctx context.Context, creatorID uu
 		return nil, httpx.Internal("生成 Agent Token 失败")
 	}
 	tokenHash := credential.FastTokenHash(plaintext)
-	if status != "active_runtime" {
-		hash, err := bcrypt.GenerateFromPassword(credential.BcryptTokenInput(plaintext), credential.BcryptCost)
-		if err != nil {
-			return nil, httpx.Internal("加密 Agent Token 失败")
-		}
-		tokenHash = string(hash)
-	}
 	token, err := s.queries.CreateAgentToken(ctx, db.CreateAgentTokenParams{
 		AgentID:       agentID,
 		CreatorUserID: creatorID,
@@ -360,7 +352,7 @@ func (s *RegistrationService) ensureCreator(ctx context.Context, userID uuid.UUI
 	return nil
 }
 
-// verifyPendingAgentToken 解析明文 token，按 prefix 拉候选后 bcrypt 校验。
+// verifyPendingAgentToken 解析明文 token，按 prefix 拉候选后校验哈希。
 // 不修改状态；调用方在事务里走 RedeemPendingAgentToken 原子兑换。
 func (s *RegistrationService) verifyPendingAgentToken(ctx context.Context, plaintext string) (db.AgentToken, error) {
 	plaintext = strings.TrimSpace(plaintext)

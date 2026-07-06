@@ -276,6 +276,21 @@ type metrics struct {
 	c                counters
 }
 
+type phaseTimestamps struct {
+	setupAccountsStart time.Time
+	setupAccountsEnd   time.Time
+	setupAgentsStart   time.Time
+	setupAgentsEnd     time.Time
+	workersStart       time.Time
+	workersReady       time.Time
+	historyStart       time.Time
+	historyEnd         time.Time
+	measuredStart      time.Time
+	measuredEnd        time.Time
+	holdStart          time.Time
+	holdEnd            time.Time
+}
+
 type dbActivitySampler struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -641,11 +656,17 @@ func main() {
 		accountRunID = runID
 	}
 
+	phases := phaseTimestamps{}
+
+	phases.setupAccountsStart = time.Now()
 	accounts, err := setupAccounts(ctx, api, cfg, accountRunID, m)
+	phases.setupAccountsEnd = time.Now()
 	if err != nil {
 		fail(err)
 	}
+	phases.setupAgentsStart = time.Now()
 	agents, err := setupAgents(ctx, api, cfg, runID, accounts, m)
+	phases.setupAgentsEnd = time.Now()
 	if err != nil {
 		fail(err)
 	}
@@ -664,6 +685,7 @@ func main() {
 	if cfg.Mode == "runtime_ws" {
 		m.startWSReadyWindow(time.Now())
 	}
+	phases.workersStart = time.Now()
 	workerOrdinal := 0
 	for _, agent := range agents {
 		for i, token := range agent.RuntimeKeys {
@@ -695,7 +717,9 @@ func main() {
 		workerWG.Wait()
 		fail(err)
 	}
+	phases.workersReady = time.Now()
 	if cfg.HistoryPerAgent > 0 {
+		phases.historyStart = time.Now()
 		if err := submitRuns(ctx, api, cfg, agents, tracker, m, "history", cfg.HistoryPerAgent*len(agents), 1); err != nil {
 			stopWorkers()
 			workerWG.Wait()
@@ -706,9 +730,11 @@ func main() {
 			workerWG.Wait()
 			fail(err)
 		}
+		phases.historyEnd = time.Now()
 	}
 
 	measuredStart := time.Now()
+	phases.measuredStart = measuredStart
 	if err := submitRuns(ctx, api, cfg, agents, tracker, m, "measured", cfg.Runs, cfg.RunConcurrency); err != nil {
 		stopWorkers()
 		workerWG.Wait()
@@ -716,13 +742,16 @@ func main() {
 	}
 	waitErr := waitForMeasuredPhase(ctx, cfg, tracker, cfg.Runs, cfg.Timeout)
 	measuredEnd := time.Now()
+	phases.measuredEnd = measuredEnd
 
 	var holdStart, holdEnd time.Time
 	var holdErr error
 	if waitErr == nil && cfg.HoldAfter > 0 {
 		holdStart = time.Now()
+		phases.holdStart = holdStart
 		holdErr = holdContext(ctx, cfg.HoldAfter)
 		holdEnd = time.Now()
+		phases.holdEnd = holdEnd
 	}
 	if stopWSHeartbeats != nil {
 		close(stopWSHeartbeats)
@@ -733,7 +762,7 @@ func main() {
 	workerWG.Wait()
 	m.endedAt = time.Now()
 
-	report := buildReport(cfg, runID, accountRunID, accounts, agents, tracker, m, measuredStart, measuredEnd, holdStart, holdEnd, waitErr, holdErr)
+	report := buildReport(cfg, runID, accountRunID, accounts, agents, tracker, m, phases, waitErr, holdErr)
 	if dbSampler != nil {
 		report["db_activity_sample"] = dbSampler.stopAndReport()
 	}
@@ -1685,7 +1714,7 @@ func retryAfterDuration(headers http.Header, fallback time.Duration) time.Durati
 	return fallback
 }
 
-func buildReport(cfg config, runID, accountRunID string, accounts []account, agents []agentRef, tracker *runTracker, m *metrics, measuredStart, measuredEnd, holdStart, holdEnd time.Time, waitErr, holdErr error) map[string]any {
+func buildReport(cfg config, runID, accountRunID string, accounts []account, agents []agentRef, tracker *runTracker, m *metrics, phases phaseTimestamps, waitErr, holdErr error) map[string]any {
 	records := tracker.snapshot()
 	var measured []*runRecord
 	var allCreateDur, assignDur, completeDur, resultAckDur []float64
@@ -1721,13 +1750,13 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 			}
 		}
 	}
-	totalWindow := measuredEnd.Sub(measuredStart).Seconds()
+	totalWindow := phases.measuredEnd.Sub(phases.measuredStart).Seconds()
 	if totalWindow <= 0 {
 		totalWindow = 1
 	}
 	holdActual := 0.0
-	if !holdStart.IsZero() && !holdEnd.IsZero() {
-		holdActual = ms(holdEnd.Sub(holdStart))
+	if !phases.holdStart.IsZero() && !phases.holdEnd.IsZero() {
+		holdActual = ms(phases.holdEnd.Sub(phases.holdStart))
 	}
 	httpByOp := map[string]any{}
 	for op, durations := range httpDurationsByOp(m.httpOps) {
@@ -1780,7 +1809,7 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"assign_delay_ms":         summaryStats(assignDur),
 		"result_ack_ms":           summaryStats(resultAckDur),
 		"completion_ms":           summaryStats(completeDur),
-		"measured_timeline":       measuredTimeline(measured, measuredStart, measuredEnd),
+		"measured_timeline":       measuredTimeline(measured, phases.measuredStart, phases.measuredEnd),
 		"ws_ready_ms":             summaryStats(wsReadyDur),
 		"ws_ready_timeline":       wsReadyTimeline,
 		"http_ms_by_op":           httpByOp,
@@ -1813,12 +1842,54 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 	if holdErr != nil {
 		report["hold_error"] = holdErr.Error()
 	}
-	if !holdStart.IsZero() {
-		report["hold_started_at"] = holdStart.UTC().Format(time.RFC3339Nano)
-		report["hold_ended_at"] = holdEnd.UTC().Format(time.RFC3339Nano)
+	report["phase_timestamps"] = phaseTimestampReport(phases)
+	report["phase_durations_ms"] = phaseDurationReport(phases)
+	if !phases.holdStart.IsZero() {
+		report["hold_started_at"] = phases.holdStart.UTC().Format(time.RFC3339Nano)
+		report["hold_ended_at"] = phases.holdEnd.UTC().Format(time.RFC3339Nano)
 	}
 	report["sample_failures"] = sampleFailures(measured, 10)
 	return report
+}
+
+func phaseTimestampReport(phases phaseTimestamps) map[string]any {
+	out := map[string]any{}
+	addTime := func(key string, value time.Time) {
+		if !value.IsZero() {
+			out[key] = value.UTC().Format(time.RFC3339Nano)
+		}
+	}
+	addTime("setup_accounts_started_at", phases.setupAccountsStart)
+	addTime("setup_accounts_ended_at", phases.setupAccountsEnd)
+	addTime("setup_agents_started_at", phases.setupAgentsStart)
+	addTime("setup_agents_ended_at", phases.setupAgentsEnd)
+	addTime("workers_started_at", phases.workersStart)
+	addTime("workers_ready_at", phases.workersReady)
+	addTime("history_started_at", phases.historyStart)
+	addTime("history_ended_at", phases.historyEnd)
+	addTime("measured_started_at", phases.measuredStart)
+	addTime("measured_ended_at", phases.measuredEnd)
+	addTime("hold_started_at", phases.holdStart)
+	addTime("hold_ended_at", phases.holdEnd)
+	return out
+}
+
+func phaseDurationReport(phases phaseTimestamps) map[string]any {
+	out := map[string]any{}
+	addDuration := func(key string, start, end time.Time) {
+		if !start.IsZero() && !end.IsZero() && !end.Before(start) {
+			out[key] = ms(end.Sub(start))
+		}
+	}
+	addDuration("setup_accounts_ms", phases.setupAccountsStart, phases.setupAccountsEnd)
+	addDuration("setup_agents_ms", phases.setupAgentsStart, phases.setupAgentsEnd)
+	addDuration("workers_ready_ms", phases.workersStart, phases.workersReady)
+	addDuration("history_ms", phases.historyStart, phases.historyEnd)
+	addDuration("measured_ms", phases.measuredStart, phases.measuredEnd)
+	addDuration("hold_ms", phases.holdStart, phases.holdEnd)
+	addDuration("setup_total_ms", phases.setupAccountsStart, phases.setupAgentsEnd)
+	addDuration("pre_measured_ms", phases.setupAccountsStart, phases.measuredStart)
+	return out
 }
 
 func collectDBReport(ctx context.Context, databaseURL string, agents []agentRef, tracker *runTracker) (map[string]any, error) {

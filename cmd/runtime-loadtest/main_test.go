@@ -369,3 +369,41 @@ func TestWSReadyReportBuildsLatencyStatsAndTimeline(t *testing.T) {
 		t.Fatalf("ready final cumulative = %v, want 2", got)
 	}
 }
+
+func TestPhaseReportsIncludeTimestampsAndDurations(t *testing.T) {
+	start := time.Date(2026, 7, 5, 8, 0, 0, 0, time.UTC)
+	phases := phaseTimestamps{
+		setupAccountsStart: start,
+		setupAccountsEnd:   start.Add(2 * time.Second),
+		setupAgentsStart:   start.Add(2 * time.Second),
+		setupAgentsEnd:     start.Add(7 * time.Second),
+		workersStart:       start.Add(8 * time.Second),
+		workersReady:       start.Add(11 * time.Second),
+		measuredStart:      start.Add(12 * time.Second),
+		measuredEnd:        start.Add(72 * time.Second),
+		holdStart:          start.Add(73 * time.Second),
+		holdEnd:            start.Add(193 * time.Second),
+	}
+
+	timestamps := phaseTimestampReport(phases)
+	if got := timestamps["setup_accounts_started_at"]; got != "2026-07-05T08:00:00Z" {
+		t.Fatalf("setup_accounts_started_at = %v", got)
+	}
+	if _, ok := timestamps["history_started_at"]; ok {
+		t.Fatalf("history_started_at should be omitted when zero")
+	}
+
+	durations := phaseDurationReport(phases)
+	if got := durations["setup_accounts_ms"]; got != 2000.0 {
+		t.Fatalf("setup_accounts_ms = %v, want 2000", got)
+	}
+	if got := durations["setup_agents_ms"]; got != 5000.0 {
+		t.Fatalf("setup_agents_ms = %v, want 5000", got)
+	}
+	if got := durations["pre_measured_ms"]; got != 12000.0 {
+		t.Fatalf("pre_measured_ms = %v, want 12000", got)
+	}
+	if _, ok := durations["history_ms"]; ok {
+		t.Fatalf("history_ms should be omitted when zero")
+	}
+}
