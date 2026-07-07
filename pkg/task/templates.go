@@ -20,6 +20,8 @@ type taskTemplate struct {
 	ExpectedArtifactTypes []string
 }
 
+var defaultTaskTemplateMCPTools = []string{"create_task", "run_agent", "get_run"}
+
 var taskTemplateCatalog = []taskTemplate{
 	{
 		ID:               "support-review",
@@ -28,6 +30,7 @@ var taskTemplateCatalog = []taskTemplate{
 		Category:         "support",
 		Summary:          "把客服对话整理成问题分类、情绪、根因和下一步动作。",
 		RequiredSkillIDs: []string{"content/summarization", "content/structured-data"},
+		RequiredMCPTools: append([]string{}, defaultTaskTemplateMCPTools...),
 		ExampleQuery:     "请复盘这段客服对话，输出问题分类、客户情绪、根因和下一步动作。",
 		ExpectedArtifactTypes: []string{
 			"json", "text",
@@ -40,6 +43,7 @@ var taskTemplateCatalog = []taskTemplate{
 		Category:         "engineering",
 		Summary:          "审查 diff、PR 描述或代码片段，输出风险、阻断项和测试建议。",
 		RequiredSkillIDs: []string{"dev/code-review"},
+		RequiredMCPTools: append([]string{}, defaultTaskTemplateMCPTools...),
 		ExampleQuery:     "请审查这段 diff，指出潜在 bug、安全风险和需要补的测试。",
 		ExpectedArtifactTypes: []string{
 			"text", "json",
@@ -52,6 +56,7 @@ var taskTemplateCatalog = []taskTemplate{
 		Category:         "data",
 		Summary:          "从指标 JSON、表格摘要或 CSV 片段中提取趋势、异常和业务结论。",
 		RequiredSkillIDs: []string{"data/analysis"},
+		RequiredMCPTools: append([]string{}, defaultTaskTemplateMCPTools...),
 		ExampleQuery:     "请分析这组周度指标，输出趋势、异常点和建议继续追问的问题。",
 		ExpectedArtifactTypes: []string{
 			"json", "text",
@@ -64,6 +69,7 @@ var taskTemplateCatalog = []taskTemplate{
 		Category:         "market",
 		Summary:          "整理竞品、差异化能力、定价区间和 OpenLinker 可学习的产品动作。",
 		RequiredSkillIDs: []string{"ops/web-scraping", "data/analysis"},
+		RequiredMCPTools: append([]string{}, defaultTaskTemplateMCPTools...),
 		ExampleQuery:     "请分析 4 家竞品的定位、定价逻辑、优势劣势，并给出我们应该学习的点。",
 		ExpectedArtifactTypes: []string{
 			"text", "json",
@@ -76,6 +82,7 @@ var taskTemplateCatalog = []taskTemplate{
 		Category:         "legal",
 		Summary:          "从合同或条款摘要中抽取风险点、责任边界和需要人工复核的条款。",
 		RequiredSkillIDs: []string{"content/structured-data", "ops/document-generate"},
+		RequiredMCPTools: append([]string{}, defaultTaskTemplateMCPTools...),
 		ExampleQuery:     "请从这份合同摘要中抽取高风险条款、责任边界和需要人工复核的问题。",
 		ExpectedArtifactTypes: []string{
 			"json", "text",

@@ -370,8 +370,11 @@ func TestTaskTemplatesAndTemplateIDDriveRecommendationSkills(t *testing.T) {
 	assert.Equal(t, "support-review", templates[0].ID)
 	assert.Equal(t, "private", templates[0].DefaultVisibility)
 	assert.Equal(t, []string{"content/summarization", "content/structured-data"}, templates[0].RequiredSkillIDs)
+	assert.Equal(t, []string{"create_task", "run_agent", "get_run"}, templates[0].RequiredMCPTools)
 	require.Len(t, templates[0].RequiredSkillRefs, 2)
+	require.Len(t, templates[0].RequiredMCPToolRefs, 3)
 	assert.Equal(t, "摘要", templates[0].RequiredSkillRefs[0].Name)
+	assert.Equal(t, "create_task", templates[0].RequiredMCPToolRefs[0].Name)
 
 	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
 		TemplateID: "support-review",
