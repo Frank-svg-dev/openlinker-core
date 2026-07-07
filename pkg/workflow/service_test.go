@@ -20,6 +20,7 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
 )
@@ -117,6 +118,51 @@ func TestWorkflowRunExecutesAgentNodesAndPersistsChildRuns(t *testing.T) {
 		Scan(&runCount)
 	require.NoError(t, err)
 	require.Equal(t, 2, runCount)
+}
+
+func TestWorkflowCreateRejectsUncallableAgent(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	userID := insertWorkflowUser(t, pool, "wf-uncallable-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-uncallable-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/offline")
+	setWorkflowAgentUnreachable(t, pool, agentID)
+
+	svc := workflow.NewService(pool, nil)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Uncallable workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "offline", Title: "Offline Agent", AgentID: agentID},
+		},
+	})
+	require.Nil(t, created)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestWorkflowStartRejectsAgentThatBecameUncallable(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	userID := insertWorkflowUser(t, pool, "wf-stale-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-stale-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/offline")
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	svc := workflow.NewService(pool, runtimeSvc)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Stale workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "offline", Title: "Offline Agent", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	setWorkflowAgentUnreachable(t, pool, agentID)
+
+	run, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "should not queue"},
+	})
+	require.Nil(t, run)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
 }
 
 func TestWorkflowRunExecutesIndependentBranchesInParallelAndAggregatesOutputs(t *testing.T) {
@@ -1138,7 +1184,29 @@ func insertWorkflowAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, 
 		) VALUES ($1, $2, $3, $4, $5, $6, NULL, 0, '{}', 'active', 'public', 'unreviewed')`,
 		id, creatorID, "wf-agent-"+id.String()[:8], "Workflow Agent", "test workflow agent", endpoint)
 	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(),
+		`INSERT INTO agent_availability_snapshots (
+			agent_id, availability_status, last_successful_run_at, last_checked_at, consecutive_failures
+		) VALUES ($1, 'healthy', NOW(), NOW(), 0)`,
+		id,
+	)
+	require.NoError(t, err)
 	return id
+}
+
+func setWorkflowAgentUnreachable(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE agent_availability_snapshots
+		 SET availability_status='unreachable',
+		     last_successful_run_at=NULL,
+		     last_failed_run_at=NOW(),
+		     last_checked_at=NOW(),
+		     consecutive_failures=3
+		 WHERE agent_id=$1`,
+		agentID,
+	)
+	require.NoError(t, err)
 }
 
 func setWorkflowAgentRuntimePullMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
@@ -1211,4 +1279,11 @@ func waitForWorkflowRunStatus(t *testing.T, svc *workflow.Service, userID, runID
 		case <-tick.C:
 		}
 	}
+}
+
+func requireWorkflowHTTPStatus(t *testing.T, err error, want int) {
+	t.Helper()
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, want, httpErr.Status)
 }

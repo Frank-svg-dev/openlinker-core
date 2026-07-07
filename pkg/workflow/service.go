@@ -81,6 +81,9 @@ func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *Cre
 	if err := validateWorkflowGraphFromRequest(req.Nodes, edges); err != nil {
 		return nil, err
 	}
+	if err := s.validateWorkflowRequestAgentsCallable(ctx, req.Nodes); err != nil {
+		return nil, err
+	}
 	edgesJSON, err := json.Marshal(edges)
 	if err != nil {
 		return nil, httpx.BadRequest("edges 不是合法 JSON")
@@ -716,6 +719,9 @@ func (s *Service) prepareWorkflowExecution(
 	if err != nil {
 		return db.Workflow{}, nil, nil, nil, nil, 0, httpx.BadRequest("input 不是合法 JSON")
 	}
+	if err := s.validateWorkflowStoredAgentsCallable(ctx, nodes); err != nil {
+		return db.Workflow{}, nil, nil, nil, nil, 0, err
+	}
 	return w, nodes, graph, input, inputJSON, maxAttempts, nil
 }
 
@@ -1020,6 +1026,9 @@ func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.Workflow
 			return s.failWorkflowRun(ctx, run.ID, "清理重试 workflow steps 失败: "+err.Error())
 		}
 	}
+	if err := s.validateWorkflowStoredAgentsCallable(ctx, nodes); err != nil {
+		return s.failWorkflowRun(ctx, run.ID, err.Error())
+	}
 	_, err = s.executeWorkflowRun(ctx, w, nodes, graph, run, input)
 	return err
 }
@@ -1089,6 +1098,112 @@ func (s *Service) listWorkflowRunStepsByRunIDs(ctx context.Context, runIDs []uui
 		grouped[step.WorkflowRunID] = append(grouped[step.WorkflowRunID], step)
 	}
 	return grouped, nil
+}
+
+type workflowAgentRef struct {
+	NodeKey string
+	Title   string
+	AgentID uuid.UUID
+}
+
+func (s *Service) validateWorkflowRequestAgentsCallable(ctx context.Context, nodes []WorkflowNodeRequest) error {
+	refs := make([]workflowAgentRef, 0, len(nodes))
+	for _, node := range nodes {
+		refs = append(refs, workflowAgentRef{
+			NodeKey: strings.TrimSpace(node.Key),
+			Title:   strings.TrimSpace(node.Title),
+			AgentID: node.AgentID,
+		})
+	}
+	return s.validateWorkflowAgentsCallable(ctx, refs)
+}
+
+func (s *Service) validateWorkflowStoredAgentsCallable(ctx context.Context, nodes []db.WorkflowNode) error {
+	refs := make([]workflowAgentRef, 0, len(nodes))
+	for _, node := range nodes {
+		refs = append(refs, workflowAgentRef{
+			NodeKey: node.NodeKey,
+			Title:   node.Title,
+			AgentID: node.AgentID,
+		})
+	}
+	return s.validateWorkflowAgentsCallable(ctx, refs)
+}
+
+func (s *Service) validateWorkflowAgentsCallable(ctx context.Context, refs []workflowAgentRef) error {
+	for _, ref := range refs {
+		if ref.AgentID == uuid.Nil {
+			return httpx.BadRequest("workflow node agent_id 不能为空")
+		}
+		agentRow, err := s.queries.GetAgentByID(ctx, ref.AgentID)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
+			}
+			log.Error().Err(err).Str("agent_id", ref.AgentID.String()).Msg("workflow.validateWorkflowAgentsCallable: GetAgentByID")
+			return httpx.Internal("校验 workflow Agent 失败")
+		}
+		if agentRow.LifecycleStatus != "active" || agentRow.Visibility != "public" || hasNonMarketTag(agentRow.Tags) {
+			return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
+		}
+		callable, err := s.workflowAgentCallable(ctx, agentRow)
+		if err != nil {
+			return err
+		}
+		if !callable {
+			return httpx.Conflict("workflow node Agent 当前不可调用: " + workflowAgentRefLabel(ref))
+		}
+	}
+	return nil
+}
+
+func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent) (bool, error) {
+	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: GetAgentAvailabilitySnapshot")
+		return false, httpx.Internal("校验 workflow Agent 可用性失败")
+	}
+	callable := snapshot.AvailabilityStatus == "healthy" ||
+		(snapshot.AvailabilityStatus != "unreachable" && snapshot.LastSuccessfulRunAt != nil)
+	if !callable {
+		return false, nil
+	}
+	if agentRow.ConnectionMode == "runtime_pull" || agentRow.ConnectionMode == "runtime_ws" {
+		hasRecentRuntimeToken, err := s.queries.HasRecentRuntimePullToken(ctx, agentRow.ID)
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasRecentRuntimePullToken")
+			return false, httpx.Internal("校验 workflow Agent 运行时心跳失败")
+		}
+		if !hasRecentRuntimeToken {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func workflowAgentRefLabel(ref workflowAgentRef) string {
+	if ref.Title != "" {
+		return ref.Title
+	}
+	if ref.NodeKey != "" {
+		return ref.NodeKey
+	}
+	return ref.AgentID.String()
+}
+
+func hasNonMarketTag(tags []string) bool {
+	for _, tag := range tags {
+		clean := strings.TrimSpace(tag)
+		lower := strings.ToLower(clean)
+		if lower == "internal" || lower == "test" || lower == "validation" ||
+			clean == "内部" || clean == "测试" || clean == "验收" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) failWorkflowRun(ctx context.Context, workflowRunID uuid.UUID, message string) error {

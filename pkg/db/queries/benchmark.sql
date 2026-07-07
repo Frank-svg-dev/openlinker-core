@@ -184,7 +184,10 @@ LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
     SELECT MAX(last_used_at) AS last_runtime_token_used_at
     FROM agent_tokens
-    WHERE agent_id = a.id AND revoked_at IS NULL AND status = 'active_runtime'
+    WHERE agent_id = a.id
+      AND revoked_at IS NULL
+      AND status = 'active_runtime'
+      AND 'agent:pull' = ANY(scopes)
 ) rt ON TRUE
 LEFT JOIN agent_skill_scores s
        ON s.agent_id = ag.agent_id
@@ -192,13 +195,23 @@ LEFT JOIN agent_skill_scores s
       AND s.skill_id = ANY($1::text[])
 WHERE ag.skill_id = ANY($1::text[])
   AND a.visibility = 'public' AND a.lifecycle_status = 'active'
-  AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM unnest(a.tags) AS tag
+      WHERE lower(tag) IN ('internal', 'test', 'validation')
+         OR tag IN ('内部', '测试', '验收')
+  )
   AND (
-      COALESCE(av.availability_status, 'unknown') = 'healthy'
-      OR av.last_successful_run_at IS NOT NULL
-      OR (
+      (
+          COALESCE(av.availability_status, 'unknown') = 'healthy'
+          OR (
+              av.last_successful_run_at IS NOT NULL
+              AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+          )
+      )
+      AND NOT (
           a.connection_mode IN ('runtime_pull', 'runtime_ws')
-          AND rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
+          AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
   )
 GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at, rt.last_runtime_token_used_at
