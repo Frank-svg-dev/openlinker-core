@@ -483,7 +483,7 @@ func (q *Queries) CountAgentsByCreatorFiltered(ctx context.Context, arg CountAge
 
 const countAgentBucketsByCreator = `-- name: CountAgentBucketsByCreator :one
 SELECT
-  COUNT(*)::int AS total,
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active')::int AS total,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND (
     COALESCE(av.availability_status, 'unknown') = 'healthy'
     OR (
@@ -497,7 +497,7 @@ SELECT
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'public')::int AS public,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'unlisted')::int AS unlisted,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'private')::int AS private,
-  COUNT(*) FILTER (WHERE a.certification_status = 'pending')::int AS pending
+  COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.certification_status = 'pending')::int AS pending
 FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (

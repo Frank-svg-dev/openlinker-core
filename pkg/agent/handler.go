@@ -164,29 +164,23 @@ func (h *Handler) ListMyAgents(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	if hasAgentListQuery(c) {
-		resp, err := h.svc.ListMyAgentsPage(c.Request().Context(), uid, AgentListOptions{
-			Query:               c.QueryParam("q"),
-			Status:              c.QueryParam("status"),
-			Visibility:          c.QueryParam("visibility"),
-			CertificationStatus: c.QueryParam("certification_status"),
-			SortBy:              c.QueryParam("sort_by"),
-			Limit:               parseInt32Query(c, "limit", 25),
-			Offset:              parseInt32Query(c, "offset", 0),
-		})
-		if err != nil {
-			return err
-		}
-		return c.JSON(http.StatusOK, resp)
+	status := c.QueryParam("status")
+	if status == "" || status == "all" {
+		status = "active"
 	}
-	items, err := h.svc.ListMyAgents(c.Request().Context(), uid)
+	resp, err := h.svc.ListMyAgentsPage(c.Request().Context(), uid, AgentListOptions{
+		Query:               c.QueryParam("q"),
+		Status:              status,
+		Visibility:          c.QueryParam("visibility"),
+		CertificationStatus: c.QueryParam("certification_status"),
+		SortBy:              c.QueryParam("sort_by"),
+		Limit:               parseInt32Query(c, "limit", 25),
+		Offset:              parseInt32Query(c, "offset", 0),
+	})
 	if err != nil {
 		return err
 	}
-	if items == nil {
-		items = []AgentResponse{}
-	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
+	return c.JSON(http.StatusOK, resp)
 }
 
 func hasAgentListQuery(c echo.Context) bool {

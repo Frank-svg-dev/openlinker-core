@@ -771,6 +771,7 @@ func TestListMyAgentsPageStatusActiveFiltersDisabled(t *testing.T) {
 	require.Len(t, page.Items, 1)
 	require.Equal(t, activeAgent.ID, page.Items[0].ID)
 	require.Equal(t, "active", page.Items[0].LifecycleStatus)
+	require.EqualValues(t, 1, page.Counts.Total)
 }
 
 func TestListMyAgents_IncludesDeclaredSkillIDs(t *testing.T) {

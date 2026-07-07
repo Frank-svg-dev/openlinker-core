@@ -62,9 +62,24 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 	})
 	requireNoDispatchError(t, h.ListMyAgents(c))
 	requireDispatchStatus(t, rec, http.StatusOK)
-	listBody := decodeAgentDispatchJSON[map[string][]AgentResponse](t, rec)
-	if listBody["items"] == nil {
-		t.Fatalf("ListMyAgents should normalize nil items to an empty slice: %#v", listBody)
+	defaultPageBody := decodeAgentDispatchJSON[AgentListResponse](t, rec)
+	if defaultPageBody.Limit != 25 || defaultPageBody.Offset != 0 {
+		t.Fatalf("ListMyAgents default pagination = %#v", defaultPageBody)
+	}
+	if mock.lastListOptions.Status != "active" {
+		t.Fatalf("ListMyAgents default status = %q, want active", mock.lastListOptions.Status)
+	}
+
+	c, rec = newAgentDispatchContext(agentDispatchRequest{
+		method: http.MethodGet,
+		target: "/creator/agents?limit=50",
+		userID: userID.String(),
+	})
+	requireNoDispatchError(t, h.ListMyAgents(c))
+	requireDispatchStatus(t, rec, http.StatusOK)
+	pageOnlyBody := decodeAgentDispatchJSON[AgentListResponse](t, rec)
+	if pageOnlyBody.Limit != 50 || mock.lastListOptions.Status != "active" {
+		t.Fatalf("ListMyAgents paged default = body %#v options %#v", pageOnlyBody, mock.lastListOptions)
 	}
 
 	c, rec = newAgentDispatchContext(agentDispatchRequest{
@@ -237,7 +252,8 @@ func TestAgentHandlerDispatchesServiceSuccess(t *testing.T) {
 		"CheckSlug",
 		"BecomeCreator",
 		"CreateAgent",
-		"ListMyAgents",
+		"ListMyAgentsPage",
+		"ListMyAgentsPage",
 		"ListMyAgentsPage",
 		"GetMyAgent",
 		"UpdateAgent",
