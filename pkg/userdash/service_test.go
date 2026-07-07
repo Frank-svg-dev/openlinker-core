@@ -161,16 +161,20 @@ func TestUserDashServiceDashboards(t *testing.T) {
 	}
 
 	queries := &fakeDashboardQueries{
-		user:          db.User{ID: userID, IsCreator: true},
-		userMonthRuns: 5,
-		userSpent:     250,
-		userRunCount:  18,
-		creatorMonth:  7,
-		creatorEarned: 330,
-		agentCount:    4,
-		publicCount:   3,
-		pendingCount:  1,
-		listUserRows:  []db.ListRunsByUserWithAgentRow{recentRun},
+		user: db.User{ID: userID, IsCreator: true},
+		userUsage: db.GetUserDashboardUsageRow{
+			ThisMonthCalls: 5,
+			ThisMonthSpent: 250,
+			TotalCalls:     18,
+		},
+		creatorSummary: db.GetCreatorDashboardSummaryRow{
+			ThisMonthCalls:   7,
+			ThisMonthRevenue: 330,
+			TotalAgents:      4,
+			PublicAgents:     3,
+			PendingAgents:    1,
+		},
+		listUserRows: []db.ListRunsByUserWithAgentRow{recentRun},
 	}
 	userResp, err := (&Service{queries: queries}).GetUserDashboard(context.Background(), userID)
 	if err != nil {
@@ -188,12 +192,14 @@ func TestUserDashServiceDashboards(t *testing.T) {
 
 	statsID := uuid.New()
 	creatorQueries := &fakeDashboardQueries{
-		user:          db.User{ID: userID, IsCreator: true},
-		creatorMonth:  11,
-		creatorEarned: 900,
-		agentCount:    2,
-		publicCount:   1,
-		pendingCount:  1,
+		user: db.User{ID: userID, IsCreator: true},
+		creatorSummary: db.GetCreatorDashboardSummaryRow{
+			ThisMonthCalls:   11,
+			ThisMonthRevenue: 900,
+			TotalAgents:      2,
+			PublicAgents:     1,
+			PendingAgents:    1,
+		},
 		agentStatsRows: []db.ListAgentStatsForCreatorRow{
 			{
 				ID:                statsID,
@@ -318,7 +324,7 @@ func TestUserDashServiceErrors(t *testing.T) {
 				_, err := s.GetUserDashboard(context.Background(), userID)
 				return err
 			},
-			q:    &fakeDashboardQueries{user: db.User{ID: userID}, userMonthErr: sentinel},
+			q:    &fakeDashboardQueries{user: db.User{ID: userID}, userUsageErr: sentinel},
 			want: http.StatusInternalServerError,
 		},
 		{
@@ -327,7 +333,7 @@ func TestUserDashServiceErrors(t *testing.T) {
 				_, err := s.GetUserDashboard(context.Background(), userID)
 				return err
 			},
-			q:    &fakeDashboardQueries{user: db.User{ID: userID, IsCreator: true}, creatorMonthErr: sentinel},
+			q:    &fakeDashboardQueries{user: db.User{ID: userID, IsCreator: true}, creatorSummaryErr: sentinel},
 			want: http.StatusInternalServerError,
 		},
 		{
@@ -394,21 +400,11 @@ type fakeDashboardQueries struct {
 	user       db.User
 	getUserErr error
 
-	userMonthRuns int32
-	userMonthErr  error
-	userSpent     int64
-	userSpentErr  error
+	userUsage    db.GetUserDashboardUsageRow
+	userUsageErr error
 
-	creatorMonth    int32
-	creatorMonthErr error
-	creatorEarned   int64
-	creatorEarnErr  error
-	agentCount      int32
-	agentCountErr   error
-	publicCount     int32
-	publicCountErr  error
-	pendingCount    int32
-	pendingCountErr error
+	creatorSummary    db.GetCreatorDashboardSummaryRow
+	creatorSummaryErr error
 
 	agentStatsRows []db.ListAgentStatsForCreatorRow
 	agentStatsErr  error
@@ -452,32 +448,12 @@ func (q *fakeDashboardQueries) GetUserByID(context.Context, uuid.UUID) (db.User,
 	return q.user, q.getUserErr
 }
 
-func (q *fakeDashboardQueries) CountRunsByUserThisMonth(context.Context, uuid.UUID) (int32, error) {
-	return q.userMonthRuns, q.userMonthErr
+func (q *fakeDashboardQueries) GetUserDashboardUsage(context.Context, uuid.UUID) (db.GetUserDashboardUsageRow, error) {
+	return q.userUsage, q.userUsageErr
 }
 
-func (q *fakeDashboardQueries) SumSpentByUserThisMonth(context.Context, uuid.UUID) (int64, error) {
-	return q.userSpent, q.userSpentErr
-}
-
-func (q *fakeDashboardQueries) CountRunsForCreatorThisMonth(context.Context, uuid.UUID) (int32, error) {
-	return q.creatorMonth, q.creatorMonthErr
-}
-
-func (q *fakeDashboardQueries) SumEarningsByCreatorThisMonth(context.Context, uuid.UUID) (int64, error) {
-	return q.creatorEarned, q.creatorEarnErr
-}
-
-func (q *fakeDashboardQueries) CountAgentsByCreator(context.Context, uuid.UUID) (int32, error) {
-	return q.agentCount, q.agentCountErr
-}
-
-func (q *fakeDashboardQueries) CountPublicAgentsByCreator(context.Context, uuid.UUID) (int32, error) {
-	return q.publicCount, q.publicCountErr
-}
-
-func (q *fakeDashboardQueries) CountPendingAgentsByCreator(context.Context, uuid.UUID) (int32, error) {
-	return q.pendingCount, q.pendingCountErr
+func (q *fakeDashboardQueries) GetCreatorDashboardSummary(context.Context, uuid.UUID) (db.GetCreatorDashboardSummaryRow, error) {
+	return q.creatorSummary, q.creatorSummaryErr
 }
 
 func (q *fakeDashboardQueries) ListAgentStatsForCreator(context.Context, uuid.UUID) ([]db.ListAgentStatsForCreatorRow, error) {

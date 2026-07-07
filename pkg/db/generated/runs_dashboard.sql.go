@@ -313,6 +313,29 @@ func (q *Queries) CountRunsByUser(ctx context.Context, userID uuid.UUID) (int32,
 	return total, err
 }
 
+const getUserDashboardUsage = `-- name: GetUserDashboardUsage :one
+SELECT
+  COUNT(*) FILTER (WHERE started_at >= date_trunc('month', NOW()))::int AS this_month_calls,
+  COALESCE(SUM(cost_cents) FILTER (WHERE status = 'success' AND started_at >= date_trunc('month', NOW())), 0)::bigint AS this_month_spent,
+  COUNT(*)::int AS total_calls
+FROM runs
+WHERE user_id = $1`
+
+// GetUserDashboardUsageRow 用户概览用量聚合。
+type GetUserDashboardUsageRow struct {
+	ThisMonthCalls int32 `db:"this_month_calls" json:"this_month_calls"`
+	ThisMonthSpent int64 `db:"this_month_spent" json:"this_month_spent"`
+	TotalCalls     int32 `db:"total_calls" json:"total_calls"`
+}
+
+// GetUserDashboardUsage 单次扫描当前用户 runs，避免 dashboard 串行统计放大延迟。
+func (q *Queries) GetUserDashboardUsage(ctx context.Context, userID uuid.UUID) (GetUserDashboardUsageRow, error) {
+	row := q.db.QueryRow(ctx, getUserDashboardUsage, userID)
+	var r GetUserDashboardUsageRow
+	err := row.Scan(&r.ThisMonthCalls, &r.ThisMonthSpent, &r.TotalCalls)
+	return r, err
+}
+
 const countRunsByCreatorAgent = `-- name: CountRunsByCreatorAgent :one
 SELECT COUNT(*)::int AS total
 FROM runs r
@@ -385,6 +408,51 @@ func (q *Queries) CountRunsForCreatorThisMonth(ctx context.Context, creatorID uu
 	var total int32
 	err := row.Scan(&total)
 	return total, err
+}
+
+const getCreatorDashboardSummary = `-- name: GetCreatorDashboardSummary :one
+WITH creator_agents AS (
+  SELECT id, lifecycle_status, visibility, certification_status
+  FROM agents
+  WHERE creator_id = $1
+)
+SELECT
+  COALESCE(SUM(monthly.calls_this_month), 0)::int AS this_month_calls,
+  COALESCE(SUM(monthly.revenue_this_month), 0)::bigint AS this_month_revenue,
+  COUNT(*) FILTER (WHERE ca.lifecycle_status = 'active')::int AS total_agents,
+  COUNT(*) FILTER (WHERE ca.lifecycle_status = 'active' AND ca.visibility = 'public')::int AS public_agents,
+  COUNT(*) FILTER (WHERE ca.lifecycle_status = 'active' AND ca.certification_status = 'pending')::int AS pending_agents
+FROM creator_agents ca
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)::int AS calls_this_month,
+         COALESCE(SUM(r.creator_revenue_cents), 0)::bigint AS revenue_this_month
+  FROM runs r
+  WHERE r.agent_id = ca.id
+    AND r.status = 'success'
+    AND r.started_at >= date_trunc('month', NOW())
+) monthly ON TRUE`
+
+// GetCreatorDashboardSummaryRow 创作者概览聚合。
+type GetCreatorDashboardSummaryRow struct {
+	ThisMonthCalls   int32 `db:"this_month_calls" json:"this_month_calls"`
+	ThisMonthRevenue int64 `db:"this_month_revenue" json:"this_month_revenue"`
+	TotalAgents      int32 `db:"total_agents" json:"total_agents"`
+	PublicAgents     int32 `db:"public_agents" json:"public_agents"`
+	PendingAgents    int32 `db:"pending_agents" json:"pending_agents"`
+}
+
+// GetCreatorDashboardSummary 以 creator 的 agent 集合为起点聚合概览。
+func (q *Queries) GetCreatorDashboardSummary(ctx context.Context, creatorID uuid.UUID) (GetCreatorDashboardSummaryRow, error) {
+	row := q.db.QueryRow(ctx, getCreatorDashboardSummary, creatorID)
+	var r GetCreatorDashboardSummaryRow
+	err := row.Scan(
+		&r.ThisMonthCalls,
+		&r.ThisMonthRevenue,
+		&r.TotalAgents,
+		&r.PublicAgents,
+		&r.PendingAgents,
+	)
+	return r, err
 }
 
 const listAgentStatsForCreator = `-- name: ListAgentStatsForCreator :many

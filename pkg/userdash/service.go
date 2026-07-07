@@ -35,13 +35,8 @@ type dashboardQueries interface {
 	ListRunsByCreatorAgentWithAgent(context.Context, db.ListRunsByCreatorAgentWithAgentParams) ([]db.ListRunsByCreatorAgentWithAgentRow, error)
 	CountRunsByCreatorAgent(context.Context, db.CountRunsByCreatorAgentParams) (int32, error)
 	GetUserByID(context.Context, uuid.UUID) (db.User, error)
-	CountRunsByUserThisMonth(context.Context, uuid.UUID) (int32, error)
-	SumSpentByUserThisMonth(context.Context, uuid.UUID) (int64, error)
-	CountRunsForCreatorThisMonth(context.Context, uuid.UUID) (int32, error)
-	SumEarningsByCreatorThisMonth(context.Context, uuid.UUID) (int64, error)
-	CountAgentsByCreator(context.Context, uuid.UUID) (int32, error)
-	CountPublicAgentsByCreator(context.Context, uuid.UUID) (int32, error)
-	CountPendingAgentsByCreator(context.Context, uuid.UUID) (int32, error)
+	GetUserDashboardUsage(context.Context, uuid.UUID) (db.GetUserDashboardUsageRow, error)
+	GetCreatorDashboardSummary(context.Context, uuid.UUID) (db.GetCreatorDashboardSummaryRow, error)
 	ListAgentStatsForCreator(context.Context, uuid.UUID) ([]db.ListAgentStatsForCreatorRow, error)
 }
 
@@ -185,28 +180,18 @@ func (s *Service) GetUserDashboard(ctx context.Context, userID uuid.UUID) (*User
 		return nil, httpx.Unauthorized("账号已禁用")
 	}
 
-	monthCalls, err := s.queries.CountRunsByUserThisMonth(ctx, userID)
+	usage, err := s.queries.GetUserDashboardUsage(ctx, userID)
 	if err != nil {
-		log.Error().Err(err).Msg("userdash.GetUserDashboard: CountRunsByUserThisMonth")
-		return nil, httpx.Internal("查询用量失败")
-	}
-	monthSpent, err := s.queries.SumSpentByUserThisMonth(ctx, userID)
-	if err != nil {
-		log.Error().Err(err).Msg("userdash.GetUserDashboard: SumSpentByUserThisMonth")
-		return nil, httpx.Internal("查询用量失败")
-	}
-	totalCalls, err := s.queries.CountRunsByUser(ctx, userID)
-	if err != nil {
-		log.Error().Err(err).Msg("userdash.GetUserDashboard: CountRunsByUser")
+		log.Error().Err(err).Msg("userdash.GetUserDashboard: GetUserDashboardUsage")
 		return nil, httpx.Internal("查询用量失败")
 	}
 
 	resp := &UserDashboardResponse{
 		IsCreator: user.IsCreator,
 		Usage: UsageStats{
-			ThisMonthCalls: monthCalls,
-			ThisMonthSpent: monthSpent,
-			TotalCalls:     totalCalls,
+			ThisMonthCalls: usage.ThisMonthCalls,
+			ThisMonthSpent: usage.ThisMonthSpent,
+			TotalCalls:     usage.TotalCalls,
 		},
 	}
 	if user.IsCreator {
@@ -266,37 +251,17 @@ func (s *Service) GetCreatorDashboard(ctx context.Context, creatorID uuid.UUID) 
 }
 
 func (s *Service) buildCreatorSummary(ctx context.Context, creatorID uuid.UUID) (*CreatorSummary, error) {
-	monthCalls, err := s.queries.CountRunsForCreatorThisMonth(ctx, creatorID)
+	summary, err := s.queries.GetCreatorDashboardSummary(ctx, creatorID)
 	if err != nil {
-		log.Error().Err(err).Msg("userdash.buildCreatorSummary: CountRunsForCreatorThisMonth")
+		log.Error().Err(err).Msg("userdash.buildCreatorSummary: GetCreatorDashboardSummary")
 		return nil, httpx.Internal("查询创作者用量失败")
 	}
-	monthRev, err := s.queries.SumEarningsByCreatorThisMonth(ctx, creatorID)
-	if err != nil {
-		log.Error().Err(err).Msg("userdash.buildCreatorSummary: SumEarningsByCreatorThisMonth")
-		return nil, httpx.Internal("查询创作者收入失败")
-	}
-	totalAgents, err := s.queries.CountAgentsByCreator(ctx, creatorID)
-	if err != nil {
-		log.Error().Err(err).Msg("userdash.buildCreatorSummary: CountAgentsByCreator")
-		return nil, httpx.Internal("查询 Agent 数失败")
-	}
-	publicAgents, err := s.queries.CountPublicAgentsByCreator(ctx, creatorID)
-	if err != nil {
-		log.Error().Err(err).Msg("userdash.buildCreatorSummary: CountPublicAgentsByCreator")
-		return nil, httpx.Internal("查询公开 Agent 数失败")
-	}
-	pendingAgents, err := s.queries.CountPendingAgentsByCreator(ctx, creatorID)
-	if err != nil {
-		log.Error().Err(err).Msg("userdash.buildCreatorSummary: CountPendingAgentsByCreator")
-		return nil, httpx.Internal("查询待处理 Agent 数失败")
-	}
 	return &CreatorSummary{
-		ThisMonthCalls:   monthCalls,
-		ThisMonthRevenue: monthRev,
-		TotalAgents:      totalAgents,
-		PublicAgents:     publicAgents,
-		PendingAgents:    pendingAgents,
+		ThisMonthCalls:   summary.ThisMonthCalls,
+		ThisMonthRevenue: summary.ThisMonthRevenue,
+		TotalAgents:      summary.TotalAgents,
+		PublicAgents:     summary.PublicAgents,
+		PendingAgents:    summary.PendingAgents,
 	}, nil
 }
 

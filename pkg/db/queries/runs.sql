@@ -311,6 +311,15 @@ LIMIT $3 OFFSET $4;
 -- name: CountRunsByUser :one
 SELECT COUNT(*)::int AS total FROM runs WHERE user_id = $1;
 
+-- name: GetUserDashboardUsage :one
+-- 用户概览用量聚合：单次扫描当前用户 runs，避免 dashboard 串行统计放大延迟。
+SELECT
+  COUNT(*) FILTER (WHERE started_at >= date_trunc('month', NOW()))::int AS this_month_calls,
+  COALESCE(SUM(cost_cents) FILTER (WHERE status = 'success' AND started_at >= date_trunc('month', NOW())), 0)::bigint AS this_month_spent,
+  COUNT(*)::int AS total_calls
+FROM runs
+WHERE user_id = $1;
+
 -- name: ListCallRecordsForUser :many
 -- 用户视角调用记录：同一个页面展示“我调用的”和“我的 Agent 被调用的”。
 -- direction:
@@ -497,6 +506,29 @@ SELECT COUNT(*)::int AS total
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
 WHERE a.creator_id = $1 AND r.status = 'success' AND r.started_at >= date_trunc('month', NOW());
+
+-- name: GetCreatorDashboardSummary :one
+-- 创作者概览聚合：以 creator 的 agent 集合为起点，避免在大测试数据中重复扫描全量 runs。
+WITH creator_agents AS (
+  SELECT id, lifecycle_status, visibility, certification_status
+  FROM agents
+  WHERE creator_id = $1
+)
+SELECT
+  COALESCE(SUM(monthly.calls_this_month), 0)::int AS this_month_calls,
+  COALESCE(SUM(monthly.revenue_this_month), 0)::bigint AS this_month_revenue,
+  COUNT(*) FILTER (WHERE ca.lifecycle_status = 'active')::int AS total_agents,
+  COUNT(*) FILTER (WHERE ca.lifecycle_status = 'active' AND ca.visibility = 'public')::int AS public_agents,
+  COUNT(*) FILTER (WHERE ca.lifecycle_status = 'active' AND ca.certification_status = 'pending')::int AS pending_agents
+FROM creator_agents ca
+LEFT JOIN LATERAL (
+  SELECT COUNT(*)::int AS calls_this_month,
+         COALESCE(SUM(r.creator_revenue_cents), 0)::bigint AS revenue_this_month
+  FROM runs r
+  WHERE r.agent_id = ca.id
+    AND r.status = 'success'
+    AND r.started_at >= date_trunc('month', NOW())
+) monthly ON TRUE;
 
 -- name: ListAgentStatsForCreator :many
 -- 创作者每个 Agent 的本月调用 + 收入（用于 creator dashboard）
