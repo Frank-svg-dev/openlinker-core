@@ -855,6 +855,11 @@ func TestWorkflowRunPropagatesRuntimePullFailure(t *testing.T) {
 	require.Equal(t, "failed", history.Items[0].Steps[0].Status)
 	require.Equal(t, claimed.RunID, history.Items[0].Steps[0].RunID)
 	require.Contains(t, history.Items[0].Steps[0].Error, "runtime worker failed")
+
+	retry, err := svc.RetryWorkflowRun(ctx, userID, uuid.MustParse(history.Items[0].ID))
+	require.NoError(t, err)
+	require.Equal(t, "pending", retry.Status)
+	require.Equal(t, uuid.MustParse(created.ID).String(), retry.WorkflowID)
 }
 
 func TestPauseResumeWorkflowRunControlsWorkerClaim(t *testing.T) {

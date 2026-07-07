@@ -1166,9 +1166,7 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 		log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: GetAgentAvailabilitySnapshot")
 		return false, httpx.Internal("校验 workflow Agent 可用性失败")
 	}
-	callable := snapshot.AvailabilityStatus == "healthy" ||
-		(snapshot.AvailabilityStatus != "unreachable" && snapshot.LastSuccessfulRunAt != nil)
-	if !callable {
+	if snapshot.AvailabilityStatus == "unreachable" {
 		return false, nil
 	}
 	if requireRuntimeOnline && (agentRow.ConnectionMode == "runtime_pull" || agentRow.ConnectionMode == "runtime_ws") {
