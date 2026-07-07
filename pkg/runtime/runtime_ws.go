@@ -24,8 +24,10 @@ const (
 	runtimeWSPongWait           = 75 * time.Second
 	runtimeWSPingInterval       = 30 * time.Second
 	runtimeWSSendBuffer         = 16
+	runtimeWSRecvBuffer         = 64
 	runtimeWSDispatchRetryDelay = 250 * time.Millisecond
 	runtimeWSAssignmentAckWait  = 30 * time.Second
+	runtimeWSHeartbeatTimeout   = 5 * time.Second
 )
 
 var runtimeWSUpgrader = websocket.Upgrader{
@@ -82,6 +84,7 @@ type runtimeWSConn struct {
 	plaintext      string
 	connectionMode string
 	send           chan runtimeWSSendRequest
+	recv           chan RuntimeWSClientMessage
 	closed         chan struct{}
 	closeOnce      sync.Once
 	mu             sync.Mutex
@@ -134,6 +137,7 @@ func (s *Service) ServeRuntimeWebSocket(w http.ResponseWriter, r *http.Request, 
 		plaintext:      plaintextToken,
 		connectionMode: agent.ConnectionMode,
 		send:           make(chan runtimeWSSendRequest, runtimeWSSendBuffer),
+		recv:           make(chan RuntimeWSClientMessage, runtimeWSRecvBuffer),
 		closed:         make(chan struct{}),
 	}
 	s.wsHub.register(conn)
@@ -143,16 +147,19 @@ func (s *Service) ServeRuntimeWebSocket(w http.ResponseWriter, r *http.Request, 
 	}()
 
 	go conn.writeLoop()
-	if heartbeat, heartbeatErr := s.HeartbeatAgent(ctx, plaintextToken); heartbeatErr == nil {
+	go conn.messageLoop(ctx)
+	if heartbeat, heartbeatErr := s.heartbeatRuntimeAgentForToken(ctx, token, &agent); heartbeatErr == nil {
 		_ = conn.sendServerMessage(ctx, RuntimeWSServerMessage{
 			Type:      "runtime.ready",
 			AgentID:   token.AgentID.String(),
 			Heartbeat: heartbeat,
 		})
+		if runtimeWSHeartbeatShouldDispatch(heartbeat) {
+			s.dispatchRuntimeWSRunBestEffort(ctx, token.AgentID)
+		}
 	} else {
 		log.Warn().Err(heartbeatErr).Str("agent_id", token.AgentID.String()).Msg("runtime.ws: heartbeat on connect failed")
 	}
-	s.dispatchRuntimeWSRunBestEffort(ctx, token.AgentID)
 
 	conn.readLoop(ctx)
 	return nil
@@ -243,7 +250,37 @@ func (c *runtimeWSConn) readLoop(ctx context.Context) {
 		if err := c.ws.ReadJSON(&msg); err != nil {
 			return
 		}
-		c.service.handleRuntimeWSClientMessage(ctx, c, &msg)
+		if runtimeWSMessageIsHeartbeat(msg.Type) {
+			c.service.handleRuntimeWSHeartbeatMessageAsync(ctx, c, msg)
+			continue
+		}
+		c.enqueueClientMessage(ctx, msg)
+	}
+}
+
+func (c *runtimeWSConn) messageLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.closed:
+			return
+		case msg := <-c.recv:
+			c.service.handleRuntimeWSClientMessage(ctx, c, &msg)
+		}
+	}
+}
+
+func (c *runtimeWSConn) enqueueClientMessage(ctx context.Context, msg RuntimeWSClientMessage) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-c.closed:
+		return
+	case c.recv <- msg:
+		return
+	default:
+		_ = c.sendServerMessage(ctx, runtimeWSErrorMessage(msg.ID, httpx.RateLimited("runtime websocket message backlog full")))
 	}
 }
 
@@ -409,18 +446,7 @@ func (c *runtimeWSConn) replaceReservedRunSlot(oldRunID, newRunID uuid.UUID) boo
 func (s *Service) handleRuntimeWSClientMessage(ctx context.Context, conn *runtimeWSConn, msg *RuntimeWSClientMessage) {
 	switch msg.Type {
 	case "heartbeat", "ping":
-		heartbeat, err := s.heartbeatRuntimeAgentForToken(ctx, conn.token, &conn.agent)
-		if err != nil {
-			_ = conn.sendServerMessage(ctx, runtimeWSErrorMessage(msg.ID, err))
-			return
-		}
-		_ = conn.sendServerMessage(ctx, RuntimeWSServerMessage{
-			Type:      "runtime.heartbeat",
-			ID:        msg.ID,
-			AgentID:   conn.token.AgentID.String(),
-			Heartbeat: heartbeat,
-		})
-		s.dispatchRuntimeWSRunBestEffort(ctx, conn.token.AgentID)
+		s.handleRuntimeWSHeartbeatMessage(ctx, conn, msg)
 	case "claim", "runtime.claim":
 		if assigned, err := s.assignRuntimeWSRun(ctx, conn); err != nil {
 			_ = conn.sendServerMessage(ctx, runtimeWSErrorMessage(msg.ID, err))
@@ -500,6 +526,72 @@ func (s *Service) handleRuntimeWSClientMessage(ctx context.Context, conn *runtim
 			Error: &AgentError{Code: "UNKNOWN_WS_MESSAGE", Message: "runtime websocket message type 不支持"},
 		})
 	}
+}
+
+func runtimeWSMessageIsHeartbeat(messageType string) bool {
+	switch messageType {
+	case "heartbeat", "ping":
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeWSHeartbeatShouldDispatch(heartbeat *AgentHeartbeatResponse) bool {
+	return heartbeat != nil && heartbeat.ClaimNow && heartbeat.PendingRunCount > 0
+}
+
+func (s *Service) handleRuntimeWSHeartbeatMessageAsync(ctx context.Context, conn *runtimeWSConn, msg RuntimeWSClientMessage) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	go func() {
+		heartbeatCtx, cancel := context.WithTimeout(ctx, runtimeWSHeartbeatTimeout)
+		defer cancel()
+		s.handleRuntimeWSHeartbeatMessage(heartbeatCtx, conn, &msg)
+	}()
+}
+
+func (s *Service) handleRuntimeWSHeartbeatMessage(ctx context.Context, conn *runtimeWSConn, msg *RuntimeWSClientMessage) {
+	started := time.Now()
+	heartbeat, err := s.heartbeatRuntimeAgentForTokenWithOptions(ctx, conn.token, &conn.agent, runtimeHeartbeatOptions{
+		asyncTokenTouch: true,
+	})
+	if err != nil {
+		_ = conn.sendServerMessage(ctx, runtimeWSErrorMessage(msg.ID, err))
+		logRuntimeWSSlowHeartbeat(started, conn, heartbeat, err)
+		return
+	}
+	_ = conn.sendServerMessage(ctx, RuntimeWSServerMessage{
+		Type:      "runtime.heartbeat",
+		ID:        msg.ID,
+		AgentID:   conn.token.AgentID.String(),
+		Heartbeat: heartbeat,
+	})
+	logRuntimeWSSlowHeartbeat(started, conn, heartbeat, nil)
+	if runtimeWSHeartbeatShouldDispatch(heartbeat) {
+		s.dispatchRuntimeWSRunBestEffort(ctx, conn.token.AgentID)
+	}
+}
+
+func logRuntimeWSSlowHeartbeat(started time.Time, conn *runtimeWSConn, heartbeat *AgentHeartbeatResponse, err error) {
+	elapsed := time.Since(started)
+	if elapsed < time.Second && err == nil {
+		return
+	}
+	event := log.Warn().
+		Dur("elapsed", elapsed).
+		Str("agent_id", conn.token.AgentID.String()).
+		Str("runtime_token_id", conn.token.ID.String())
+	if heartbeat != nil {
+		event = event.
+			Bool("claim_now", heartbeat.ClaimNow).
+			Int32("pending_run_count", heartbeat.PendingRunCount)
+	}
+	if err != nil {
+		event = event.Err(err)
+	}
+	event.Msg("runtime.ws: heartbeat slow")
 }
 
 func runtimeWSErrorMessage(id string, err error) RuntimeWSServerMessage {

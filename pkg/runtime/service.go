@@ -159,6 +159,10 @@ type RuntimePullRunTimeoutConfig struct {
 	BatchSize       int32
 }
 
+type runtimeHeartbeatOptions struct {
+	asyncTokenTouch bool
+}
+
 // EndpointRunTimeoutConfig controls how long direct_http / mcp_server runs may
 // stay running before the platform converts them to terminal timeout.
 type EndpointRunTimeoutConfig struct {
@@ -1957,6 +1961,10 @@ func (s *Service) HeartbeatAgentForToken(ctx context.Context, token db.AgentRunt
 }
 
 func (s *Service) heartbeatRuntimeAgentForToken(ctx context.Context, token db.AgentRuntimeToken, agent *db.Agent) (*AgentHeartbeatResponse, error) {
+	return s.heartbeatRuntimeAgentForTokenWithOptions(ctx, token, agent, runtimeHeartbeatOptions{})
+}
+
+func (s *Service) heartbeatRuntimeAgentForTokenWithOptions(ctx context.Context, token db.AgentRuntimeToken, agent *db.Agent, opts runtimeHeartbeatOptions) (*AgentHeartbeatResponse, error) {
 	if agent == nil {
 		return nil, httpx.NotFound("Agent 不存在")
 	}
@@ -1978,7 +1986,11 @@ func (s *Service) heartbeatRuntimeAgentForToken(ctx context.Context, token db.Ag
 	if claimNow {
 		nextClaimAfterSeconds = 0
 	}
-	_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
+	if opts.asyncTokenTouch {
+		s.touchRuntimeTokenAsync(ctx, token.ID)
+	} else {
+		_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
+	}
 	return &AgentHeartbeatResponse{
 		AgentID:                          snapshot.AgentID.String(),
 		AvailabilityStatus:               snapshot.AvailabilityStatus,

@@ -126,6 +126,28 @@ func TestRuntimeQueuedModeAndAssignmentMessage(t *testing.T) {
 	}
 }
 
+func TestRuntimeWSHeartbeatDispatchDecision(t *testing.T) {
+	cases := []struct {
+		name      string
+		heartbeat *AgentHeartbeatResponse
+		want      bool
+	}{
+		{name: "nil", heartbeat: nil, want: false},
+		{name: "empty", heartbeat: &AgentHeartbeatResponse{}, want: false},
+		{name: "claim now without pending count", heartbeat: &AgentHeartbeatResponse{ClaimNow: true}, want: false},
+		{name: "pending count without claim now", heartbeat: &AgentHeartbeatResponse{PendingRunCount: 1}, want: false},
+		{name: "claimable pending run", heartbeat: &AgentHeartbeatResponse{ClaimNow: true, PendingRunCount: 1}, want: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runtimeWSHeartbeatShouldDispatch(tc.heartbeat); got != tc.want {
+				t.Fatalf("runtimeWSHeartbeatShouldDispatch() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRuntimeWSConnSendServerMessageDoesNotBlockWhenBufferFull(t *testing.T) {
 	conn := &runtimeWSConn{
 		send:   make(chan runtimeWSSendRequest, 1),
