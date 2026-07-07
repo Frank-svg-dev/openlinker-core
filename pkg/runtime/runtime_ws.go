@@ -276,6 +276,15 @@ func (c *runtimeWSConn) sendServerMessage(ctx context.Context, msg RuntimeWSServ
 	}
 }
 
+func (c *runtimeWSConn) isClosed() bool {
+	select {
+	case <-c.closed:
+		return true
+	default:
+		return false
+	}
+}
+
 func (c *runtimeWSConn) close() {
 	c.closeOnce.Do(func() {
 		close(c.closed)
@@ -286,6 +295,9 @@ func (c *runtimeWSConn) close() {
 func (c *runtimeWSConn) tryReserveRunSlot(runID uuid.UUID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.isClosed() {
+		return false
+	}
 	if c.inFlightRuns == nil {
 		c.inFlightRuns = map[uuid.UUID]*runtimeWSInFlight{}
 	}
@@ -375,15 +387,23 @@ func (c *runtimeWSConn) releaseRunClaim(ctx context.Context, runID uuid.UUID, re
 	}
 }
 
-func (c *runtimeWSConn) replaceReservedRunSlot(oldRunID, newRunID uuid.UUID) {
+func (c *runtimeWSConn) replaceReservedRunSlot(oldRunID, newRunID uuid.UUID) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.isClosed() {
+		delete(c.inFlightRuns, oldRunID)
+		return false
+	}
+	if c.inFlightRuns == nil {
+		c.inFlightRuns = map[uuid.UUID]*runtimeWSInFlight{}
+	}
 	inFlight := c.inFlightRuns[oldRunID]
 	if inFlight == nil {
 		inFlight = &runtimeWSInFlight{}
 	}
 	delete(c.inFlightRuns, oldRunID)
 	c.inFlightRuns[newRunID] = inFlight
+	return true
 }
 
 func (s *Service) handleRuntimeWSClientMessage(ctx context.Context, conn *runtimeWSConn, msg *RuntimeWSClientMessage) {
@@ -502,6 +522,9 @@ func (s *Service) dispatchRuntimeWSRunBestEffort(ctx context.Context, agentID uu
 		return false
 	}
 	for _, conn := range s.wsHub.connections(agentID) {
+		if conn.isClosed() {
+			continue
+		}
 		if err := ctx.Err(); err != nil {
 			return false
 		}
@@ -564,7 +587,12 @@ func (s *Service) assignRuntimeWSRun(ctx context.Context, conn *runtimeWSConn) (
 		conn.releaseRunSlot(uuid.Nil)
 		return false, err
 	}
-	conn.replaceReservedRunSlot(uuid.Nil, runID)
+	if !conn.replaceReservedRunSlot(uuid.Nil, runID) {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), runtimeBestEffortWriteTimeout)
+		defer cancel()
+		conn.releaseRunClaim(releaseCtx, runID, "connection_closed")
+		return false, nil
+	}
 	if err := conn.sendServerMessage(ctx, runtimeWSAssignmentMessage(run)); err != nil {
 		conn.releaseRunSlot(runID)
 		releaseCtx, cancel := context.WithTimeout(context.Background(), runtimeBestEffortWriteTimeout)

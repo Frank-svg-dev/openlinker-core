@@ -183,6 +183,35 @@ func TestRuntimeWSConnSendServerMessageClosedAndCanceled(t *testing.T) {
 	}
 }
 
+func TestRuntimeWSConnRunSlotReservationSkipsClosedConnection(t *testing.T) {
+	conn := &runtimeWSConn{closed: make(chan struct{})}
+	close(conn.closed)
+
+	if conn.tryReserveRunSlot(uuid.Nil) {
+		t.Fatal("tryReserveRunSlot() = true, want false for closed connection")
+	}
+	if len(conn.inFlightRuns) != 0 {
+		t.Fatalf("inFlightRuns len = %d, want 0", len(conn.inFlightRuns))
+	}
+}
+
+func TestRuntimeWSConnReplaceReservedRunSlotAfterCloseDoesNotPanic(t *testing.T) {
+	conn := &runtimeWSConn{closed: make(chan struct{})}
+	if !conn.tryReserveRunSlot(uuid.Nil) {
+		t.Fatal("tryReserveRunSlot() = false, want true")
+	}
+
+	conn.releaseAllRunClaims(context.Background(), "test")
+	close(conn.closed)
+
+	if conn.replaceReservedRunSlot(uuid.Nil, uuid.New()) {
+		t.Fatal("replaceReservedRunSlot() = true, want false for closed connection")
+	}
+	if len(conn.inFlightRuns) != 0 {
+		t.Fatalf("inFlightRuns len = %d, want 0", len(conn.inFlightRuns))
+	}
+}
+
 func TestRuntimeWSErrorMessageMapsHTTPAndGenericErrors(t *testing.T) {
 	msg := runtimeWSErrorMessage("req-1", httpx.BadRequest("bad runtime ws message"))
 	if msg.Type != "error" || msg.ID != "req-1" || msg.Error == nil {
