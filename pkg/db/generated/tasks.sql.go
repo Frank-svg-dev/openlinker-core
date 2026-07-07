@@ -162,6 +162,35 @@ func (q *Queries) PublishTaskQuery(ctx context.Context, arg PublishTaskQueryPara
 	return t, err
 }
 
+const unpublishTaskQuery = `-- name: UnpublishTaskQuery :one
+UPDATE task_queries
+SET visibility = 'private',
+    public_summary = NULL,
+    published_at = NULL
+WHERE id = $1
+  AND user_id = $2
+  AND visibility = 'public'
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
+          created_at`
+
+type UnpublishTaskQueryParams struct {
+	ID     uuid.UUID `db:"id" json:"id"`
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+}
+
+func (q *Queries) UnpublishTaskQuery(ctx context.Context, arg UnpublishTaskQueryParams) (TaskQuery, error) {
+	row := q.db.QueryRow(ctx, unpublishTaskQuery, arg.ID, arg.UserID)
+	var t TaskQuery
+	err := scanTaskQuery(row, &t)
+	return t, err
+}
+
 const claimTaskQuery = `-- name: ClaimTaskQuery :one
 UPDATE task_queries
 SET claimed_agent_id = $3,

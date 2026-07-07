@@ -64,6 +64,24 @@ RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
           visibility, public_summary, published_at,
           created_at;
 
+-- name: UnpublishTaskQuery :one
+-- 用户撤回已发布任务的公开可见性；清空公开摘要以满足 private 发布边界约束。
+UPDATE task_queries
+SET visibility = 'private',
+    public_summary = NULL,
+    published_at = NULL
+WHERE id = $1
+  AND user_id = $2
+  AND visibility = 'public'
+RETURNING id, user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
+          chosen_agent_id, chosen_at,
+          claimed_agent_id, claimed_by_user_id, claimed_at, claim_run_id,
+          completed_at, completion_summary, completion_run_id,
+          delivery_status, delivery_visibility, delivery_artifact,
+          accepted_at, revision_requested_at, revision_note,
+          visibility, public_summary, published_at,
+          created_at;
+
 -- name: ClaimTaskQuery :one
 -- 创作者用自己的 Agent 接入公开任务。已被用户选择 / 已被接入 / 已完成的任务不可重复接入。
 UPDATE task_queries

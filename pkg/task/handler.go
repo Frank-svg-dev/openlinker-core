@@ -30,6 +30,7 @@ func NewHandler(svc *Service) *Handler {
 //	POST /tasks/recommend       自然语言 → 推荐 Top3 Agent
 //	POST /tasks/:id/choose      用户选定推荐里某个 Agent
 //	POST /tasks/:id/publish     显式把私有推荐草稿发布到任务广场
+//	POST /tasks/:id/unpublish   撤回公开任务，保留为私有历史
 //	POST /tasks/:id/claim       创作者用自己的 Agent 接入任务广场任务
 //	POST /tasks/:id/run         从任务直接启动一次 Agent 运行
 //	POST /tasks/:id/complete    把成功 run 写回任务结果
@@ -46,6 +47,7 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.POST("/recommend", h.Recommend)
 	g.POST("/:id/choose", h.Choose)
 	g.POST("/:id/publish", h.Publish)
+	g.POST("/:id/unpublish", h.Unpublish)
 	g.POST("/:id/claim", h.Claim)
 	g.POST("/:id/run", h.Run)
 	g.POST("/:id/complete", h.Complete)
@@ -125,6 +127,23 @@ func (h *Handler) Publish(c echo.Context) error {
 		return httpx.Unprocessable(err.Error())
 	}
 	resp, err := h.svc.Publish(c.Request().Context(), taskID, uid, &req)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// Unpublish POST /tasks/:id/unpublish
+func (h *Handler) Unpublish(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	resp, err := h.svc.Unpublish(c.Request().Context(), taskID, uid)
 	if err != nil {
 		return err
 	}

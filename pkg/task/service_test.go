@@ -501,6 +501,22 @@ func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
 	assert.Equal(t, "accepted", accepted.Status)
 	assert.Equal(t, "accepted", accepted.DeliveryStatus)
 	require.NotNil(t, accepted.AcceptedAt)
+
+	unpublished, err := svc.Unpublish(context.Background(), taskID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, "private", unpublished.Visibility)
+	assert.Equal(t, "accepted", unpublished.Status)
+	assert.Nil(t, unpublished.PublicSummary)
+	assert.Nil(t, unpublished.PublishedAt)
+	require.NotNil(t, unpublished.AcceptedAt)
+
+	boardAfterUnpublish, err := svc.ListBoard(context.Background(), 20)
+	require.NoError(t, err)
+	require.Empty(t, boardAfterUnpublish)
+
+	again, err := svc.Unpublish(context.Background(), taskID, ownerID)
+	require.NoError(t, err)
+	assert.Equal(t, "private", again.Visibility)
 }
 
 func TestRecommendWithoutMatchesReturnsPrivateDraftNextAction(t *testing.T) {
@@ -793,6 +809,26 @@ func TestTaskHandlersWorkLifecycleSuccess(t *testing.T) {
 	decodeTaskHandlerJSON(t, rec, &accepted)
 	assert.Equal(t, "accepted", accepted.Status)
 	assert.Equal(t, "accepted", accepted.DeliveryStatus)
+
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/unpublish", "", ownerID, taskID)
+	require.NoError(t, h.Unpublish(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var unpublished task.DetailResponse
+	decodeTaskHandlerJSON(t, rec, &unpublished)
+	assert.Equal(t, "private", unpublished.Visibility)
+	assert.Equal(t, "accepted", unpublished.Status)
+
+	boardRec := httptest.NewRecorder()
+	boardCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/board?limit=50", nil), boardRec)
+	require.NoError(t, h.ListBoard(boardCtx))
+	require.Equal(t, http.StatusOK, boardRec.Code)
+	var boardBody struct {
+		Items []task.PublicTaskItem `json:"items"`
+		Total int32                 `json:"total"`
+	}
+	decodeTaskHandlerJSON(t, boardRec, &boardBody)
+	require.Empty(t, boardBody.Items)
+	assert.Equal(t, int32(0), boardBody.Total)
 
 	c, rec = newTaskHandlerContext(e, http.MethodGet, "/api/v1/tasks/"+taskID.String(), "", ownerID, taskID)
 	require.NoError(t, h.GetByID(c))

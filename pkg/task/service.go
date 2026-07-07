@@ -317,6 +317,36 @@ func (s *Service) Publish(ctx context.Context, taskID, userID uuid.UUID, req *Pu
 	return s.detailFromTask(ctx, &published)
 }
 
+// Unpublish 把已发布任务撤回为私有历史。任务内容、交付和验收记录不变。
+func (s *Service) Unpublish(ctx context.Context, taskID, userID uuid.UUID) (*DetailResponse, error) {
+	t, err := s.queries.GetTaskQuery(ctx, taskID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Unpublish: GetTaskQuery")
+		return nil, httpx.Internal("查询任务失败")
+	}
+	if t.UserID != userID {
+		return nil, httpx.NotFound("任务不存在")
+	}
+	if t.Visibility != taskVisibilityPublic {
+		return s.GetByID(ctx, taskID, userID)
+	}
+	unpublished, err := s.queries.UnpublishTaskQuery(ctx, db.UnpublishTaskQueryParams{
+		ID:     taskID,
+		UserID: userID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.Conflict("任务状态已变化，请刷新后重试")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Unpublish: UnpublishTaskQuery")
+		return nil, httpx.Internal("撤回公开任务失败")
+	}
+	return s.detailFromTask(ctx, &unpublished)
+}
+
 // Choose 用户在推荐里选定一个 Agent。校验：
 //
 //   - task_id 必须属于该 user（否则 404，不暴露存在性）
