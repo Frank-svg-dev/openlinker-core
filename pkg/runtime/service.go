@@ -44,6 +44,7 @@ const runtimePullEmptyClaimRetryAfter = 5 * time.Second
 const runtimePullHeartbeatInterval = 60 * time.Second
 const runtimePullMaxLongPollWait = 30 * time.Second
 const runtimePullLongPollTick = 5 * time.Second
+const runtimePullResponseContextTimeout = 2 * time.Second
 const runtimeBestEffortWriteTimeout = 10 * time.Second
 const runtimeBestEffortWriteConcurrency = 32
 const runtimeTokenTouchMinInterval = 30 * time.Second
@@ -246,7 +247,7 @@ func (s *Service) agentA2AContextForRun(ctx context.Context, runID uuid.UUID) *A
 		base.ParentRunID = delegation.ParentRunID.String()
 		base.CallerAgentID = delegation.CallerAgentID.String()
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) && !isContextErr(err) {
 		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.agentA2AContextForRun")
 	}
 	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, runID)
@@ -254,7 +255,7 @@ func (s *Service) agentA2AContextForRun(ctx context.Context, runID uuid.UUID) *A
 		applyA2AContextMappingToAgentContext(base, mapping)
 		return base
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) && !isContextErr(err) {
 		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.agentA2AContextForRun.mapping")
 	}
 	return base
@@ -268,7 +269,7 @@ func (s *Service) conversationContextForRun(ctx context.Context, runID uuid.UUID
 	if err == nil {
 		return s.conversationContextFromMapping(ctx, mapping)
 	}
-	if !errors.Is(err, pgx.ErrNoRows) {
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) && !isContextErr(err) {
 		log.Warn().Err(err).Str("run_id", runID.String()).Msg("runtime.conversationContextForRun")
 	}
 	return nil
@@ -1660,6 +1661,8 @@ func (s *Service) runtimePullRunResponse(ctx context.Context, token db.AgentRunt
 	if len(run.Input) > 0 {
 		_ = json.Unmarshal(run.Input, &input)
 	}
+	decorateCtx, cancel := context.WithTimeout(ctx, runtimePullResponseContextTimeout)
+	defer cancel()
 	return &RuntimePullRunResponse{
 		RunID:          run.ID.String(),
 		AgentID:        run.AgentID.String(),
@@ -1678,8 +1681,8 @@ func (s *Service) runtimePullRunResponse(ctx context.Context, token db.AgentRunt
 			"result_timeout_seconds":               int(defaultRuntimePullResultTimeout.Seconds()),
 		},
 		Source:       run.Source,
-		A2A:          s.agentA2AContextForRun(ctx, run.ID),
-		Conversation: s.conversationContextForRun(ctx, run.ID),
+		A2A:          s.agentA2AContextForRun(decorateCtx, run.ID),
+		Conversation: s.conversationContextForRun(decorateCtx, run.ID),
 	}, nil
 }
 
@@ -3749,4 +3752,8 @@ func isTimeoutErr(err error) bool {
 		return t.Timeout()
 	}
 	return false
+}
+
+func isContextErr(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
