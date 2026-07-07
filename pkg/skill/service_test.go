@@ -126,12 +126,16 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	creatorID := insertSkillCreator(t, pool)
 	best := insertSkillAgent(t, pool, creatorID, "skill-best-"+uuid.NewString()[:8], "approved", 5)
 	second := insertSkillAgent(t, pool, creatorID, "skill-second-"+uuid.NewString()[:8], "approved", 20)
+	testingAgent := insertSkillAgent(t, pool, creatorID, "skill-testing-"+uuid.NewString()[:8], "approved", 500)
 	// docs/29 缺口 2 后语义：certification_status='pending' 仍进推荐池；
 	// 只有 disabled 会被过滤。换成 disabled 才能保留这个负面用例。
 	pending := insertSkillAgent(t, pool, creatorID, "skill-disabled-"+uuid.NewString()[:8], "disabled", 100)
 	ctx := context.Background()
 	markSkillAgentAvailability(t, pool, best, "healthy")
 	markSkillAgentAvailability(t, pool, second, "healthy")
+	markSkillAgentAvailability(t, pool, testingAgent, "healthy")
+	_, err := pool.Exec(ctx, `UPDATE agents SET tags = ARRAY['testing']::text[] WHERE id = $1`, testingAgent)
+	require.NoError(t, err)
 
 	require.NoError(t, svc.SetAgentSkills(ctx, best, []string{
 		" data/sql-query ",
@@ -140,6 +144,7 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 		"",
 	}))
 	require.NoError(t, svc.SetAgentSkills(ctx, second, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, testingAgent, []string{"data/sql-query", "data/analysis"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, pending, []string{"data/sql-query", "data/analysis"}))
 
 	items, err := svc.ListForAgent(ctx, best)
@@ -155,6 +160,8 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	assert.Equal(t, int32(2), matches[0].MatchCount)
 	assert.Equal(t, second, matches[1].AgentID)
 	assert.Equal(t, int32(1), matches[1].MatchCount)
+	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID}
+	assert.NotContains(t, recommendedIDs, testingAgent)
 
 	limited, err := svc.RecommendAgentsBySkills(ctx, []string{"data/sql-query", "data/analysis"}, 1)
 	require.NoError(t, err)

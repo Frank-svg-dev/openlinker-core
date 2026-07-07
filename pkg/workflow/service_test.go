@@ -138,16 +138,33 @@ func TestWorkflowCreateRejectsUncallableAgent(t *testing.T) {
 	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
 }
 
-func TestWorkflowCreateAllowsValidationTaggedAgent(t *testing.T) {
+func TestWorkflowCreateRejectsReservedPublicAgentTags(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 	userID := insertWorkflowUser(t, pool, "wf-validation-user")
 	creatorID := insertWorkflowUser(t, pool, "wf-validation-creator")
 	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/validation")
-	setWorkflowAgentTags(t, pool, agentID, []string{"workflow", "validation"})
+	setWorkflowAgentTags(t, pool, agentID, []string{"workflow", "testing"})
 
 	svc := workflow.NewService(pool, nil)
 	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
 		Name: "Validation tagged workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "validate", Title: "Validate", AgentID: agentID},
+		},
+	})
+	require.Nil(t, created)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+}
+
+func TestWorkflowCreateAllowsOwnReservedTaggedAgent(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	userID := insertWorkflowUser(t, pool, "wf-validation-owner")
+	agentID := insertWorkflowAgent(t, pool, userID, "https://example.com/validation")
+	setWorkflowAgentTags(t, pool, agentID, []string{"workflow", "testing"})
+
+	svc := workflow.NewService(pool, nil)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Own reserved tagged workflow",
 		Nodes: []workflow.WorkflowNodeRequest{
 			{Key: "validate", Title: "Validate", AgentID: agentID},
 		},

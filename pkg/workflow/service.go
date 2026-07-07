@@ -1146,6 +1146,9 @@ func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uu
 		if agentRow.LifecycleStatus != "active" || (agentRow.Visibility != "public" && agentRow.CreatorID != userID) {
 			return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
 		}
+		if agentRow.CreatorID != userID && hasReservedWorkflowAgentTag(agentRow.Tags) {
+			return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
+		}
 		callable, err := s.workflowAgentCallable(ctx, agentRow, requireRuntimeOnline)
 		if err != nil {
 			return err
@@ -1155,6 +1158,20 @@ func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uu
 		}
 	}
 	return nil
+}
+
+func hasReservedWorkflowAgentTag(tags []string) bool {
+	for _, tag := range tags {
+		switch strings.ToLower(strings.TrimSpace(tag)) {
+		case "internal", "test", "testing", "validation":
+			return true
+		}
+		switch strings.TrimSpace(tag) {
+		case "内部", "测试", "验收":
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {

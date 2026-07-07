@@ -199,6 +199,7 @@ func TestListMarket_FiltersInternalValidationAndTestAgents(t *testing.T) {
 	internalID := createApprovedAgent(t, pool, creatorID, "internal-callable", WithTags([]string{"internal"}))
 	validationID := createApprovedAgent(t, pool, creatorID, "validation-callable", WithTags([]string{"validation"}))
 	testID := createApprovedAgent(t, pool, creatorID, "test-callable", WithTags([]string{"测试"}))
+	testingID := createApprovedAgent(t, pool, creatorID, "testing-callable", WithTags([]string{"testing"}))
 
 	_, err := pool.Exec(ctx,
 		`INSERT INTO agent_availability_snapshots (
@@ -207,11 +208,13 @@ func TestListMarket_FiltersInternalValidationAndTestAgents(t *testing.T) {
 			($1, 'healthy', NOW(), 0),
 			($2, 'healthy', NOW(), 0),
 			($3, 'healthy', NOW(), 0),
-			($4, 'healthy', NOW(), 0)`,
+			($4, 'healthy', NOW(), 0),
+			($5, 'healthy', NOW(), 0)`,
 		publicID,
 		internalID,
 		validationID,
 		testID,
+		testingID,
 	)
 	require.NoError(t, err)
 

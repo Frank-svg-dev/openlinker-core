@@ -394,7 +394,7 @@ WHERE ag.skill_id = ANY($1::text[])
   AND NOT EXISTS (
       SELECT 1
       FROM unnest(a.tags) AS tag
-      WHERE lower(tag) IN ('internal', 'test', 'validation')
+      WHERE lower(tag) IN ('internal', 'test', 'testing', 'validation')
          OR tag IN ('内部', '测试', '验收')
   )
   AND (
