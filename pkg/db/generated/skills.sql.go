@@ -29,11 +29,33 @@ func scanSkill(row interface {
 const listSkills = `-- name: ListSkills :many
 SELECT id, category, name, description, sort_order, created_at
 FROM skills
-ORDER BY category, sort_order`
+WHERE
+  ($1::text = '' OR id ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2::text = '' OR category = $2)
+ORDER BY
+  CASE WHEN $3 = 'name_asc' THEN name END ASC,
+  CASE WHEN $3 = 'name_desc' THEN name END DESC,
+  CASE WHEN $3 = 'category_asc' THEN category END ASC,
+  CASE WHEN $3 = 'category_desc' THEN category END DESC,
+  CASE WHEN $3 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $3 = 'created_asc' THEN created_at END ASC,
+  category ASC,
+  sort_order ASC,
+  name ASC
+LIMIT $4 OFFSET $5`
 
-// ListSkills 列出全部内置 skill。
-func (q *Queries) ListSkills(ctx context.Context) ([]Skill, error) {
-	rows, err := q.db.Query(ctx, listSkills)
+// ListSkillsParams 是 ListSkills 的参数。
+type ListSkillsParams struct {
+	Query    string `db:"query" json:"query"`
+	Category string `db:"category" json:"category"`
+	Sort     string `db:"sort" json:"sort"`
+	Limit    int32  `db:"limit" json:"limit"`
+	Offset   int32  `db:"offset" json:"offset"`
+}
+
+// ListSkills 列出内置 skill，支持搜索、分类、排序和分页。
+func (q *Queries) ListSkills(ctx context.Context, arg ListSkillsParams) ([]Skill, error) {
+	rows, err := q.db.Query(ctx, listSkills, arg.Query, arg.Category, arg.Sort, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -50,6 +72,27 @@ func (q *Queries) ListSkills(ctx context.Context) ([]Skill, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const countSkills = `-- name: CountSkills :one
+SELECT COUNT(*)::bigint
+FROM skills
+WHERE
+  ($1::text = '' OR id ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2::text = '' OR category = $2)`
+
+// CountSkillsParams 是 CountSkills 的参数。
+type CountSkillsParams struct {
+	Query    string `db:"query" json:"query"`
+	Category string `db:"category" json:"category"`
+}
+
+// CountSkills 统计筛选后的 Skill 总数。
+func (q *Queries) CountSkills(ctx context.Context, arg CountSkillsParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countSkills, arg.Query, arg.Category)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 const getSkill = `-- name: GetSkill :one
@@ -173,12 +216,39 @@ const listSkillProposalsByOwner = `-- name: ListSkillProposalsByOwner :many
 SELECT id, owner_user_id, agent_id, proposed_skill_id, category, name, description, source, status, matched_skill_id, created_at, updated_at
 FROM skill_proposals
 WHERE owner_user_id = $1
-ORDER BY updated_at DESC, created_at DESC
-LIMIT 100`
+  AND ($2::text = '' OR proposed_skill_id ILIKE '%' || $2 || '%' OR category ILIKE '%' || $2 || '%' OR name ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%' OR source ILIKE '%' || $2 || '%' OR COALESCE(matched_skill_id, '') ILIKE '%' || $2 || '%')
+  AND ($3::text = '' OR status = $3)
+ORDER BY
+  CASE WHEN $4 = 'name_asc' THEN name END ASC,
+  CASE WHEN $4 = 'status_asc' THEN status END ASC,
+  CASE WHEN $4 = 'status_desc' THEN status END DESC,
+  CASE WHEN $4 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $4 = 'created_asc' THEN created_at END ASC,
+  CASE WHEN $4 = 'updated_asc' THEN updated_at END ASC,
+  updated_at DESC,
+  created_at DESC
+LIMIT $5 OFFSET $6`
 
-// ListSkillProposalsByOwner 列出当前用户最近 100 条 Skill Proposal。
-func (q *Queries) ListSkillProposalsByOwner(ctx context.Context, ownerUserID uuid.UUID) ([]SkillProposal, error) {
-	rows, err := q.db.Query(ctx, listSkillProposalsByOwner, ownerUserID)
+// ListSkillProposalsByOwnerParams 是 ListSkillProposalsByOwner 的参数。
+type ListSkillProposalsByOwnerParams struct {
+	OwnerUserID uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+	Query       string    `db:"query" json:"query"`
+	Status      string    `db:"status" json:"status"`
+	Sort        string    `db:"sort" json:"sort"`
+	Limit       int32     `db:"limit" json:"limit"`
+	Offset      int32     `db:"offset" json:"offset"`
+}
+
+// ListSkillProposalsByOwner 分页列出当前用户 Skill Proposal。
+func (q *Queries) ListSkillProposalsByOwner(ctx context.Context, arg ListSkillProposalsByOwnerParams) ([]SkillProposal, error) {
+	rows, err := q.db.Query(ctx, listSkillProposalsByOwner,
+		arg.OwnerUserID,
+		arg.Query,
+		arg.Status,
+		arg.Sort,
+		arg.Limit,
+		arg.Offset,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -195,6 +265,28 @@ func (q *Queries) ListSkillProposalsByOwner(ctx context.Context, ownerUserID uui
 		return nil, err
 	}
 	return items, nil
+}
+
+const countSkillProposalsByOwner = `-- name: CountSkillProposalsByOwner :one
+SELECT COUNT(*)::bigint
+FROM skill_proposals
+WHERE owner_user_id = $1
+  AND ($2::text = '' OR proposed_skill_id ILIKE '%' || $2 || '%' OR category ILIKE '%' || $2 || '%' OR name ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%' OR source ILIKE '%' || $2 || '%' OR COALESCE(matched_skill_id, '') ILIKE '%' || $2 || '%')
+  AND ($3::text = '' OR status = $3)`
+
+// CountSkillProposalsByOwnerParams 是 CountSkillProposalsByOwner 的参数。
+type CountSkillProposalsByOwnerParams struct {
+	OwnerUserID uuid.UUID `db:"owner_user_id" json:"owner_user_id"`
+	Query       string    `db:"query" json:"query"`
+	Status      string    `db:"status" json:"status"`
+}
+
+// CountSkillProposalsByOwner 统计当前用户 Skill Proposal 筛选后的总数。
+func (q *Queries) CountSkillProposalsByOwner(ctx context.Context, arg CountSkillProposalsByOwnerParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countSkillProposalsByOwner, arg.OwnerUserID, arg.Query, arg.Status)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
 }
 
 // 下面两条不是单条 sqlc 语句，由调用方在事务里 / 用数组传入：

@@ -326,13 +326,93 @@ func TestSkillQueriesScanRowsAndMatches(t *testing.T) {
 		t.Fatalf("GetSkill scan = %#v", skill)
 	}
 
-	listed, err := q.ListSkills(context.Background())
+	listed, err := q.ListSkills(context.Background(), ListSkillsParams{
+		Query:    "sql",
+		Category: "data",
+		Sort:     "name_asc",
+		Limit:    10,
+		Offset:   5,
+	})
 	if err != nil {
 		t.Fatalf("ListSkills error = %v", err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ListSkills")
 	if len(listed) != 1 || listed[0].Name != "SQL" {
 		t.Fatalf("ListSkills scan = %#v", listed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"sql", "data", "name_asc", int32(10), int32(5)}) {
+		t.Fatalf("ListSkills args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int64(11)}}
+	skillCount, err := q.CountSkills(context.Background(), CountSkillsParams{Query: "sql", Category: "data"})
+	if err != nil || skillCount != 11 {
+		t.Fatalf("CountSkills = %d, %v", skillCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountSkills")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"sql", "data"}) {
+		t.Fatalf("CountSkills args = %#v", dbtx.queryRowArgs)
+	}
+
+	proposalID := uuid.New()
+	ownerID := uuid.New()
+	matchedSkillID := "data/pdf-parse"
+	dbtx.row = fakeRow{values: skillProposalRow(proposalID, ownerID, &agentID, "data/pdf-parse", "data", "PDF Parse", "parse pdf", "manual", "merged", &matchedSkillID, now)}
+	createdProposal, err := q.CreateSkillProposal(context.Background(), CreateSkillProposalParams{
+		OwnerUserID:     ownerID,
+		AgentID:         &agentID,
+		ProposedSkillID: "data/pdf-parse",
+		Category:        "data",
+		Name:            "PDF Parse",
+		Description:     "parse pdf",
+		Source:          "manual",
+		Status:          "merged",
+		MatchedSkillID:  &matchedSkillID,
+	})
+	if err != nil {
+		t.Fatalf("CreateSkillProposal error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateSkillProposal")
+	if createdProposal.ID != proposalID || createdProposal.MatchedSkillID == nil || *createdProposal.MatchedSkillID != matchedSkillID {
+		t.Fatalf("CreateSkillProposal scan = %#v", createdProposal)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{ownerID, &agentID, "data/pdf-parse", "data", "PDF Parse", "parse pdf", "manual", "merged", &matchedSkillID}) {
+		t.Fatalf("CreateSkillProposal args = %#v", dbtx.queryRowArgs)
+	}
+
+	proposalRows := &fakeRows{rows: [][]any{skillProposalRow(proposalID, ownerID, &agentID, "data/pdf-parse", "data", "PDF Parse", "parse pdf", "manual", "pending", nil, now)}}
+	dbtx.queryRows = proposalRows
+	listedProposals, err := q.ListSkillProposalsByOwner(context.Background(), ListSkillProposalsByOwnerParams{
+		OwnerUserID: ownerID,
+		Query:       "pdf",
+		Status:      "pending",
+		Sort:        "created_desc",
+		Limit:       5,
+		Offset:      10,
+	})
+	if err != nil {
+		t.Fatalf("ListSkillProposalsByOwner error = %v", err)
+	}
+	requireSQLName(t, dbtx.querySQL, "ListSkillProposalsByOwner")
+	if len(listedProposals) != 1 || listedProposals[0].ProposedSkillID != "data/pdf-parse" || !proposalRows.closed {
+		t.Fatalf("ListSkillProposalsByOwner scan = %#v closed=%v", listedProposals, proposalRows.closed)
+	}
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{ownerID, "pdf", "pending", "created_desc", int32(5), int32(10)}) {
+		t.Fatalf("ListSkillProposalsByOwner args = %#v", dbtx.queryArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{int64(4)}}
+	proposalCount, err := q.CountSkillProposalsByOwner(context.Background(), CountSkillProposalsByOwnerParams{
+		OwnerUserID: ownerID,
+		Query:       "pdf",
+		Status:      "pending",
+	})
+	if err != nil || proposalCount != 4 {
+		t.Fatalf("CountSkillProposalsByOwner = %d, %v", proposalCount, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CountSkillProposalsByOwner")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{ownerID, "pdf", "pending"}) {
+		t.Fatalf("CountSkillProposalsByOwner args = %#v", dbtx.queryRowArgs)
 	}
 
 	agentSkillRows := &fakeRows{rows: [][]any{skillRow("ai/agent-orchestration", "ai", "Agent orchestration", "delegate safely", 3, now)}}
@@ -1881,7 +1961,7 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 	ctx := context.Background()
 	id := uuid.New()
 	now := time.Date(2026, 6, 20, 20, 0, 0, 0, time.UTC)
-	q := New(&fakeDBTX{queryErr: sentinel})
+	q := New(&fakeDBTX{queryErr: sentinel, row: fakeRow{err: sentinel}})
 
 	tests := []struct {
 		name string
@@ -2084,7 +2164,23 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListSkills", run: func() error {
-			_, err := q.ListSkills(ctx)
+			_, err := q.ListSkills(ctx, ListSkillsParams{Limit: 10})
+			return err
+		}},
+		{name: "CountSkills", run: func() error {
+			_, err := q.CountSkills(ctx, CountSkillsParams{})
+			return err
+		}},
+		{name: "CreateSkillProposal", run: func() error {
+			_, err := q.CreateSkillProposal(ctx, CreateSkillProposalParams{OwnerUserID: id})
+			return err
+		}},
+		{name: "ListSkillProposalsByOwner", run: func() error {
+			_, err := q.ListSkillProposalsByOwner(ctx, ListSkillProposalsByOwnerParams{OwnerUserID: id, Limit: 10})
+			return err
+		}},
+		{name: "CountSkillProposalsByOwner", run: func() error {
+			_, err := q.CountSkillProposalsByOwner(ctx, CountSkillProposalsByOwnerParams{OwnerUserID: id})
 			return err
 		}},
 		{name: "ListAgentSkills", run: func() error {
@@ -4020,6 +4116,23 @@ func adminAgentRow(values []any, creatorEmail, creatorName string, now time.Time
 
 func skillRow(id, category, name, description string, sortOrder int32, createdAt time.Time) []any {
 	return []any{id, category, name, description, sortOrder, createdAt}
+}
+
+func skillProposalRow(id, ownerID uuid.UUID, agentID *uuid.UUID, proposedSkillID, category, name, description, source, status string, matchedSkillID *string, now time.Time) []any {
+	return []any{
+		id,
+		ownerID,
+		agentID,
+		proposedSkillID,
+		category,
+		name,
+		description,
+		source,
+		status,
+		matchedSkillID,
+		now,
+		now,
+	}
 }
 
 func agentTokenRow(id uuid.UUID, agentID *uuid.UUID, creatorID uuid.UUID, status string, expiresAt, redeemedAt, revokedAt, lastUsedAt *time.Time, createdAt time.Time) []any {

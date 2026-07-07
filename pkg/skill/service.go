@@ -39,14 +39,58 @@ func NewService(pool *pgxpool.Pool) *Service {
 	}
 }
 
-// ListAll 返回平台全部内置 skill（公开，给 /publish 表单与发现页用）。
+// ListAll 返回平台内置 skill（公开，给 /publish 表单与发现页用）。
 func (s *Service) ListAll(ctx context.Context) ([]db.Skill, error) {
-	items, err := s.q.ListSkills(ctx)
+	items, err := s.q.ListSkills(ctx, db.ListSkillsParams{
+		Sort:  "order",
+		Limit: 200,
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("skill.ListAll: ListSkills")
 		return nil, httpx.Internal("查询 skill 列表失败")
 	}
 	return items, nil
+}
+
+// ListPage 返回公开 Skill 目录分页结果。
+func (s *Service) ListPage(ctx context.Context, query, category, sort string, page, size int32) (*SkillListResponse, error) {
+	page, size = normalizeSkillPage(page, size, 50, 200)
+	query = normalizeSkillListQuery(query)
+	category = normalizeSkillCategoryFilter(category)
+	sort = normalizeSkillListSort(sort)
+	offset := (page - 1) * size
+	rows, err := s.q.ListSkills(ctx, db.ListSkillsParams{
+		Query:    query,
+		Category: category,
+		Sort:     sort,
+		Limit:    size,
+		Offset:   offset,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("skill.ListPage: ListSkills")
+		return nil, httpx.Internal("查询 skill 列表失败")
+	}
+	total, err := s.q.CountSkills(ctx, db.CountSkillsParams{
+		Query:    query,
+		Category: category,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("skill.ListPage: CountSkills")
+		return nil, httpx.Internal("查询 skill 数量失败")
+	}
+	items := make([]SkillItem, 0, len(rows))
+	for i := range rows {
+		items = append(items, toSkillItem(&rows[i]))
+	}
+	return &SkillListResponse{
+		Items:          items,
+		Total:          total,
+		Page:           page,
+		Size:           size,
+		Query:          query,
+		CategoryFilter: category,
+		Sort:           sort,
+	}, nil
 }
 
 // ListForAgent 返回某 Agent 已声明的 skill 详情。
@@ -115,18 +159,56 @@ func (s *Service) CreateProposal(ctx context.Context, ownerID uuid.UUID, req *Cr
 	return &item, nil
 }
 
-// ListProposals 返回当前用户提交或导入生成的 Skill Proposal。
+// ListProposals 返回当前用户最近提交或导入生成的 Skill Proposal。
 func (s *Service) ListProposals(ctx context.Context, ownerID uuid.UUID) ([]SkillProposalItem, error) {
-	rows, err := s.q.ListSkillProposalsByOwner(ctx, ownerID)
+	resp, err := s.ListProposalsPage(ctx, ownerID, "", "", "updated_desc", 1, 100)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Items, nil
+}
+
+// ListProposalsPage 返回当前用户 Skill Proposal 分页结果。
+func (s *Service) ListProposalsPage(ctx context.Context, ownerID uuid.UUID, query, status, sort string, page, size int32) (*SkillProposalListResponse, error) {
+	page, size = normalizeSkillPage(page, size, 10, 50)
+	query = normalizeSkillListQuery(query)
+	status = normalizeSkillProposalStatus(status)
+	sort = normalizeSkillProposalSort(sort)
+	offset := (page - 1) * size
+	rows, err := s.q.ListSkillProposalsByOwner(ctx, db.ListSkillProposalsByOwnerParams{
+		OwnerUserID: ownerID,
+		Query:       query,
+		Status:      status,
+		Sort:        sort,
+		Limit:       size,
+		Offset:      offset,
+	})
 	if err != nil {
 		log.Error().Err(err).Str("owner_user_id", ownerID.String()).Msg("skill.ListProposals: ListSkillProposalsByOwner")
 		return nil, httpx.Internal("查询 Skill Proposal 失败")
+	}
+	total, err := s.q.CountSkillProposalsByOwner(ctx, db.CountSkillProposalsByOwnerParams{
+		OwnerUserID: ownerID,
+		Query:       query,
+		Status:      status,
+	})
+	if err != nil {
+		log.Error().Err(err).Str("owner_user_id", ownerID.String()).Msg("skill.ListProposals: CountSkillProposalsByOwner")
+		return nil, httpx.Internal("查询 Skill Proposal 数量失败")
 	}
 	items := make([]SkillProposalItem, 0, len(rows))
 	for i := range rows {
 		items = append(items, toSkillProposalItem(&rows[i]))
 	}
-	return items, nil
+	return &SkillProposalListResponse{
+		Items:        items,
+		Total:        total,
+		Page:         page,
+		Size:         size,
+		Query:        query,
+		StatusFilter: status,
+		Sort:         sort,
+	}, nil
 }
 
 // SetAgentSkills 用 skillIDs 覆盖某 Agent 的关联（事务内 DELETE + 批量 INSERT）。
@@ -272,6 +354,64 @@ func dedupNonEmpty(in []string) []string {
 		out = append(out, s)
 	}
 	return out
+}
+
+func normalizeSkillPage(page, size, defaultSize, maxSize int32) (int32, int32) {
+	if page <= 0 {
+		page = 1
+	}
+	if size <= 0 {
+		size = defaultSize
+	}
+	if size > maxSize {
+		size = maxSize
+	}
+	return page, size
+}
+
+func normalizeSkillListQuery(query string) string {
+	query = strings.TrimSpace(query)
+	if len(query) > 120 {
+		query = query[:120]
+	}
+	return query
+}
+
+func normalizeSkillCategoryFilter(category string) string {
+	category = strings.ToLower(strings.TrimSpace(category))
+	switch category {
+	case "content", "dev", "data", "media", "ops", "ai":
+		return category
+	default:
+		return ""
+	}
+}
+
+func normalizeSkillListSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "name_asc", "name_desc", "category_asc", "category_desc", "created_desc", "created_asc":
+		return strings.ToLower(strings.TrimSpace(sort))
+	default:
+		return "order"
+	}
+}
+
+func normalizeSkillProposalStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "pending", "merged", "rejected":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return ""
+	}
+}
+
+func normalizeSkillProposalSort(sort string) string {
+	switch strings.ToLower(strings.TrimSpace(sort)) {
+	case "updated_desc", "updated_asc", "created_desc", "created_asc", "name_asc", "status_asc", "status_desc":
+		return strings.ToLower(strings.TrimSpace(sort))
+	default:
+		return "updated_desc"
+	}
 }
 
 func stringPtr(v string) *string {

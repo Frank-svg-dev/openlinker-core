@@ -27,20 +27,29 @@ func TestSkillHandlerDispatchesServiceSuccess(t *testing.T) {
 	}
 
 	t.Run("list all", func(t *testing.T) {
-		mock := &mockSkillService{listAllResp: skills}
-		c, rec := newSkillDispatchContext(http.MethodGet, "/skills", "", "", nil)
+		mock := &mockSkillService{listPageResp: &SkillListResponse{
+			Items: []SkillItem{
+				{ID: "data/sql", Category: "data", Name: "SQL", Description: "query data", SortOrder: 1},
+				{ID: "dev/review", Category: "dev", Name: "Review", Description: "review code", SortOrder: 2},
+			},
+			Total:          2,
+			Page:           2,
+			Size:           5,
+			Query:          "sql",
+			CategoryFilter: "data",
+			Sort:           "name_asc",
+		}}
+		c, rec := newSkillDispatchContext(http.MethodGet, "/skills?q=sql&category=data&sort=name_asc&page=2&size=5", "", "", nil)
 
 		if err := NewHandler(mock, nil).ListAll(c); err != nil {
 			t.Fatalf("ListAll error = %v", err)
 		}
-		if rec.Code != http.StatusOK || !mock.listAllCalled {
-			t.Fatalf("list all code=%d called=%v", rec.Code, mock.listAllCalled)
+		if rec.Code != http.StatusOK || mock.listPageQuery != "sql" || mock.listPageCategory != "data" || mock.listPageSort != "name_asc" || mock.listPagePage != 2 || mock.listPageSize != 5 {
+			t.Fatalf("list page code=%d query=%q category=%q sort=%q page=%d size=%d", rec.Code, mock.listPageQuery, mock.listPageCategory, mock.listPageSort, mock.listPagePage, mock.listPageSize)
 		}
-		var body struct {
-			Items []SkillItem `json:"items"`
-		}
+		var body SkillListResponse
 		decodeSkillDispatchJSON(t, rec, &body)
-		if len(body.Items) != 2 || body.Items[0].ID != "data/sql" {
+		if len(body.Items) != 2 || body.Items[0].ID != "data/sql" || body.Total != 2 || body.Page != 2 {
 			t.Fatalf("body = %#v", body)
 		}
 	})
@@ -98,18 +107,26 @@ func TestSkillHandlerDispatchesServiceSuccess(t *testing.T) {
 	})
 
 	t.Run("list proposals", func(t *testing.T) {
-		mock := &mockSkillService{proposalListResp: []SkillProposalItem{{ID: uuid.NewString(), ProposedSkillID: "data/pdf-parse", Status: "pending"}}}
-		c, rec := newSkillDispatchContext(http.MethodGet, "/creator/skill-proposals", "", userID.String(), nil)
+		mock := &mockSkillService{proposalListPageResp: &SkillProposalListResponse{
+			Items:        []SkillProposalItem{{ID: uuid.NewString(), ProposedSkillID: "data/pdf-parse", Status: "pending"}},
+			Total:        7,
+			Page:         3,
+			Size:         2,
+			Query:        "pdf",
+			StatusFilter: "pending",
+			Sort:         "created_desc",
+		}}
+		c, rec := newSkillDispatchContext(http.MethodGet, "/creator/skill-proposals?q=pdf&status=pending&sort=created_desc&page=3&size=2", "", userID.String(), nil)
 
 		if err := NewHandler(mock, nil).ListProposals(c); err != nil {
 			t.Fatalf("ListProposals error = %v", err)
 		}
-		if rec.Code != http.StatusOK || mock.proposalListOwnerID != userID {
-			t.Fatalf("list proposals code=%d owner=%s", rec.Code, mock.proposalListOwnerID)
+		if rec.Code != http.StatusOK || mock.proposalListPageOwnerID != userID || mock.proposalListPageQuery != "pdf" || mock.proposalListPageStatus != "pending" || mock.proposalListPageSort != "created_desc" || mock.proposalListPagePage != 3 || mock.proposalListPageSize != 2 {
+			t.Fatalf("list proposals code=%d owner=%s query=%q status=%q sort=%q page=%d size=%d", rec.Code, mock.proposalListPageOwnerID, mock.proposalListPageQuery, mock.proposalListPageStatus, mock.proposalListPageSort, mock.proposalListPagePage, mock.proposalListPageSize)
 		}
 		var body SkillProposalListResponse
 		decodeSkillDispatchJSON(t, rec, &body)
-		if len(body.Items) != 1 || body.Items[0].ProposedSkillID != "data/pdf-parse" {
+		if len(body.Items) != 1 || body.Items[0].ProposedSkillID != "data/pdf-parse" || body.Total != 7 || body.Page != 3 {
 			t.Fatalf("body = %#v", body)
 		}
 	})
@@ -120,7 +137,7 @@ func TestSkillHandlerPropagatesServiceAndOwnershipErrors(t *testing.T) {
 	agentID := uuid.New()
 
 	t.Run("list all service error", func(t *testing.T) {
-		mock := &mockSkillService{listAllErr: httpx.Internal("list failed")}
+		mock := &mockSkillService{listPageErr: httpx.Internal("list failed")}
 		c, _ := newSkillDispatchContext(http.MethodGet, "/skills", "", "", nil)
 		requireSkillDispatchHTTPStatus(t, NewHandler(mock, nil).ListAll(c), http.StatusInternalServerError)
 	})
@@ -401,6 +418,14 @@ type mockSkillService struct {
 	listAllResp   []db.Skill
 	listAllErr    error
 
+	listPageQuery    string
+	listPageCategory string
+	listPageSort     string
+	listPagePage     int32
+	listPageSize     int32
+	listPageResp     *SkillListResponse
+	listPageErr      error
+
 	setAgentID  uuid.UUID
 	setSkillIDs []string
 	setErr      error
@@ -417,11 +442,29 @@ type mockSkillService struct {
 	proposalListOwnerID uuid.UUID
 	proposalListResp    []SkillProposalItem
 	proposalListErr     error
+
+	proposalListPageOwnerID uuid.UUID
+	proposalListPageQuery   string
+	proposalListPageStatus  string
+	proposalListPageSort    string
+	proposalListPagePage    int32
+	proposalListPageSize    int32
+	proposalListPageResp    *SkillProposalListResponse
+	proposalListPageErr     error
 }
 
 func (m *mockSkillService) ListAll(context.Context) ([]db.Skill, error) {
 	m.listAllCalled = true
 	return m.listAllResp, m.listAllErr
+}
+
+func (m *mockSkillService) ListPage(_ context.Context, query, category, sort string, page, size int32) (*SkillListResponse, error) {
+	m.listPageQuery = query
+	m.listPageCategory = category
+	m.listPageSort = sort
+	m.listPagePage = page
+	m.listPageSize = size
+	return m.listPageResp, m.listPageErr
 }
 
 func (m *mockSkillService) SetAgentSkills(_ context.Context, agentID uuid.UUID, skillIDs []string) error {
@@ -444,6 +487,16 @@ func (m *mockSkillService) CreateProposal(_ context.Context, ownerID uuid.UUID, 
 func (m *mockSkillService) ListProposals(_ context.Context, ownerID uuid.UUID) ([]SkillProposalItem, error) {
 	m.proposalListOwnerID = ownerID
 	return m.proposalListResp, m.proposalListErr
+}
+
+func (m *mockSkillService) ListProposalsPage(_ context.Context, ownerID uuid.UUID, query, status, sort string, page, size int32) (*SkillProposalListResponse, error) {
+	m.proposalListPageOwnerID = ownerID
+	m.proposalListPageQuery = query
+	m.proposalListPageStatus = status
+	m.proposalListPageSort = sort
+	m.proposalListPagePage = page
+	m.proposalListPageSize = size
+	return m.proposalListPageResp, m.proposalListPageErr
 }
 
 type mockSkillAgentReader struct {

@@ -1,8 +1,29 @@
 -- name: ListSkills :many
--- 列出全部内置 skill（按 category + sort_order 升序），用于 /publish 表单与发现页。
+-- 列出内置 skill，支持公开目录页服务端搜索、分类、排序和分页。
 SELECT id, category, name, description, sort_order, created_at
 FROM skills
-ORDER BY category, sort_order;
+WHERE
+  ($1::text = '' OR id ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2::text = '' OR category = $2)
+ORDER BY
+  CASE WHEN $3 = 'name_asc' THEN name END ASC,
+  CASE WHEN $3 = 'name_desc' THEN name END DESC,
+  CASE WHEN $3 = 'category_asc' THEN category END ASC,
+  CASE WHEN $3 = 'category_desc' THEN category END DESC,
+  CASE WHEN $3 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $3 = 'created_asc' THEN created_at END ASC,
+  category ASC,
+  sort_order ASC,
+  name ASC
+LIMIT $4 OFFSET $5;
+
+-- name: CountSkills :one
+-- 统计公开 Skill 目录筛选后的总数。
+SELECT COUNT(*)::bigint
+FROM skills
+WHERE
+  ($1::text = '' OR id ILIKE '%' || $1 || '%' OR name ILIKE '%' || $1 || '%' OR description ILIKE '%' || $1 || '%')
+  AND ($2::text = '' OR category = $2);
 
 -- name: GetSkill :one
 -- 按 id 取单条 skill；用于 Agent 声明 skill 时的存在性校验。
@@ -45,12 +66,30 @@ ON CONFLICT (owner_user_id, proposed_skill_id) DO UPDATE SET
 RETURNING id, owner_user_id, agent_id, proposed_skill_id, category, name, description, source, status, matched_skill_id, created_at, updated_at;
 
 -- name: ListSkillProposalsByOwner :many
--- 创作者侧查看自己提交或导入生成的 Skill Proposal。
+-- 创作者侧分页查看自己提交或导入生成的 Skill Proposal。
 SELECT id, owner_user_id, agent_id, proposed_skill_id, category, name, description, source, status, matched_skill_id, created_at, updated_at
 FROM skill_proposals
 WHERE owner_user_id = $1
-ORDER BY updated_at DESC, created_at DESC
-LIMIT 100;
+  AND ($2::text = '' OR proposed_skill_id ILIKE '%' || $2 || '%' OR category ILIKE '%' || $2 || '%' OR name ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%' OR source ILIKE '%' || $2 || '%' OR COALESCE(matched_skill_id, '') ILIKE '%' || $2 || '%')
+  AND ($3::text = '' OR status = $3)
+ORDER BY
+  CASE WHEN $4 = 'name_asc' THEN name END ASC,
+  CASE WHEN $4 = 'status_asc' THEN status END ASC,
+  CASE WHEN $4 = 'status_desc' THEN status END DESC,
+  CASE WHEN $4 = 'created_desc' THEN created_at END DESC,
+  CASE WHEN $4 = 'created_asc' THEN created_at END ASC,
+  CASE WHEN $4 = 'updated_asc' THEN updated_at END ASC,
+  updated_at DESC,
+  created_at DESC
+LIMIT $5 OFFSET $6;
+
+-- name: CountSkillProposalsByOwner :one
+-- 统计当前用户 Skill Proposal 筛选后的总数。
+SELECT COUNT(*)::bigint
+FROM skill_proposals
+WHERE owner_user_id = $1
+  AND ($2::text = '' OR proposed_skill_id ILIKE '%' || $2 || '%' OR category ILIKE '%' || $2 || '%' OR name ILIKE '%' || $2 || '%' OR description ILIKE '%' || $2 || '%' OR source ILIKE '%' || $2 || '%' OR COALESCE(matched_skill_id, '') ILIKE '%' || $2 || '%')
+  AND ($3::text = '' OR status = $3);
 
 -- name: ListAgentsBySkills :many
 -- 任务驱动推荐：传入 skill_id 数组，返回每个 agent_id 命中了多少个输入 skill。

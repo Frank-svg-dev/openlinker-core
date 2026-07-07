@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
@@ -25,10 +26,12 @@ type Handler struct {
 
 type skillService interface {
 	ListAll(context.Context) ([]db.Skill, error)
+	ListPage(context.Context, string, string, string, int32, int32) (*SkillListResponse, error)
 	SetAgentSkills(context.Context, uuid.UUID, []string) error
 	ListForAgent(context.Context, uuid.UUID) ([]db.Skill, error)
 	CreateProposal(context.Context, uuid.UUID, *CreateSkillProposalRequest) (*SkillProposalItem, error)
 	ListProposals(context.Context, uuid.UUID) ([]SkillProposalItem, error)
+	ListProposalsPage(context.Context, uuid.UUID, string, string, string, int32, int32) (*SkillProposalListResponse, error)
 }
 
 type skillAgentReader interface {
@@ -64,17 +67,20 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	g.GET("/skill-proposals", h.ListProposals)
 }
 
-// ListAll GET /skills。
+// ListAll GET /skills?q=&category=&sort=&page=&size=。
 func (h *Handler) ListAll(c echo.Context) error {
-	rows, err := h.svc.ListAll(c.Request().Context())
+	resp, err := h.svc.ListPage(
+		c.Request().Context(),
+		c.QueryParam("q"),
+		c.QueryParam("category"),
+		c.QueryParam("sort"),
+		queryInt32(c, "page", 1),
+		queryInt32(c, "size", 50),
+	)
 	if err != nil {
 		return err
 	}
-	items := make([]SkillItem, 0, len(rows))
-	for i := range rows {
-		items = append(items, toSkillItem(&rows[i]))
-	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
+	return c.JSON(http.StatusOK, resp)
 }
 
 // SetAgentSkills PATCH /creator/agents/:id/skills。
@@ -151,17 +157,25 @@ func (h *Handler) CreateProposal(c echo.Context) error {
 	return c.JSON(http.StatusCreated, item)
 }
 
-// ListProposals GET /creator/skill-proposals。
+// ListProposals GET /creator/skill-proposals?q=&status=&sort=&page=&size=。
 func (h *Handler) ListProposals(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
 	}
-	items, err := h.svc.ListProposals(c.Request().Context(), uid)
+	resp, err := h.svc.ListProposalsPage(
+		c.Request().Context(),
+		uid,
+		c.QueryParam("q"),
+		c.QueryParam("status"),
+		c.QueryParam("sort"),
+		queryInt32(c, "page", 1),
+		queryInt32(c, "size", 10),
+	)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, SkillProposalListResponse{Items: items})
+	return c.JSON(http.StatusOK, resp)
 }
 
 // toSkillItem db.Skill → API DTO。
@@ -196,4 +210,16 @@ func pathID(c echo.Context) (uuid.UUID, error) {
 		return uuid.Nil, httpx.BadRequest("id 不是合法 uuid")
 	}
 	return id, nil
+}
+
+func queryInt32(c echo.Context, name string, fallback int32) int32 {
+	raw := c.QueryParam(name)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return fallback
+	}
+	return int32(parsed)
 }

@@ -13,6 +13,17 @@ type SkillItem struct {
 	SortOrder   int32  `json:"sort_order"`
 }
 
+// SkillListResponse 是公开 Skill 目录列表响应。
+type SkillListResponse struct {
+	Items          []SkillItem `json:"items"`
+	Total          int64       `json:"total"`
+	Page           int32       `json:"page"`
+	Size           int32       `json:"size"`
+	Query          string      `json:"query,omitempty"`
+	CategoryFilter string      `json:"category_filter,omitempty"`
+	Sort           string      `json:"sort"`
+}
+
 // SetSkillsRequest 创作者绑定 skill 列表。
 type SetSkillsRequest struct {
 	// SkillIDs Agent 声明的 skill_id 列表，最多 5 个；重复 / 空串视为非法。
@@ -52,7 +63,13 @@ type SkillProposalItem struct {
 
 // SkillProposalListResponse 是创作者侧提案列表。
 type SkillProposalListResponse struct {
-	Items []SkillProposalItem `json:"items"`
+	Items        []SkillProposalItem `json:"items"`
+	Total        int64               `json:"total"`
+	Page         int32               `json:"page"`
+	Size         int32               `json:"size"`
+	Query        string              `json:"query,omitempty"`
+	StatusFilter string              `json:"status_filter,omitempty"`
+	Sort         string              `json:"sort"`
 }
 
 // AgentMatch 任务驱动推荐结果（供 2.4 task 模块直接使用）。
