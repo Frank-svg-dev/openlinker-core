@@ -138,6 +138,82 @@ func TestWorkflowCreateRejectsUncallableAgent(t *testing.T) {
 	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
 }
 
+func TestWorkflowCreateAllowsValidationTaggedAgent(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	userID := insertWorkflowUser(t, pool, "wf-validation-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-validation-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/validation")
+	setWorkflowAgentTags(t, pool, agentID, []string{"workflow", "validation"})
+
+	svc := workflow.NewService(pool, nil)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Validation tagged workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "validate", Title: "Validate", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, created)
+}
+
+func TestWorkflowCreateAllowsOwnPrivateAgent(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	userID := insertWorkflowUser(t, pool, "wf-private-owner")
+	agentID := insertWorkflowAgent(t, pool, userID, "https://example.com/private")
+	setWorkflowAgentVisibility(t, pool, agentID, "private")
+
+	svc := workflow.NewService(pool, nil)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Private own workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "own_private", Title: "Own Private", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, created)
+}
+
+func TestWorkflowCreateAllowsRuntimePullBeforeHeartbeatButStartRequiresOnline(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	ctx := context.Background()
+
+	userID := insertWorkflowUser(t, pool, "wf-runtime-create-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-runtime-create-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/not-used")
+	setWorkflowAgentRuntimePullMode(t, pool, agentID)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	token := insertWorkflowRuntimeToken(t, pool, agentID, creatorID)
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
+		Name: "Runtime pull staged workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, created)
+
+	run, err := svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "offline worker"},
+	})
+	require.Nil(t, run)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	_, err = runtimeSvc.HeartbeatAgent(ctx, token)
+	require.NoError(t, err)
+	run, err = svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "online worker"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, run)
+	require.Equal(t, "pending", run.Status)
+}
+
 func TestWorkflowStartRejectsAgentThatBecameUncallable(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 	userID := insertWorkflowUser(t, pool, "wf-stale-user")
@@ -1205,6 +1281,26 @@ func setWorkflowAgentUnreachable(t *testing.T, pool *pgxpool.Pool, agentID uuid.
 		     consecutive_failures=3
 		 WHERE agent_id=$1`,
 		agentID,
+	)
+	require.NoError(t, err)
+}
+
+func setWorkflowAgentTags(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, tags []string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE agents SET tags=$2 WHERE id=$1`,
+		agentID,
+		tags,
+	)
+	require.NoError(t, err)
+}
+
+func setWorkflowAgentVisibility(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, visibility string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE agents SET visibility=$2 WHERE id=$1`,
+		agentID,
+		visibility,
 	)
 	require.NoError(t, err)
 }

@@ -81,7 +81,7 @@ func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *Cre
 	if err := validateWorkflowGraphFromRequest(req.Nodes, edges); err != nil {
 		return nil, err
 	}
-	if err := s.validateWorkflowRequestAgentsCallable(ctx, req.Nodes); err != nil {
+	if err := s.validateWorkflowRequestAgentsAvailable(ctx, userID, req.Nodes, false); err != nil {
 		return nil, err
 	}
 	edgesJSON, err := json.Marshal(edges)
@@ -719,7 +719,7 @@ func (s *Service) prepareWorkflowExecution(
 	if err != nil {
 		return db.Workflow{}, nil, nil, nil, nil, 0, httpx.BadRequest("input 不是合法 JSON")
 	}
-	if err := s.validateWorkflowStoredAgentsCallable(ctx, nodes); err != nil {
+	if err := s.validateWorkflowStoredAgentsAvailable(ctx, userID, nodes, true); err != nil {
 		return db.Workflow{}, nil, nil, nil, nil, 0, err
 	}
 	return w, nodes, graph, input, inputJSON, maxAttempts, nil
@@ -1026,7 +1026,7 @@ func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.Workflow
 			return s.failWorkflowRun(ctx, run.ID, "清理重试 workflow steps 失败: "+err.Error())
 		}
 	}
-	if err := s.validateWorkflowStoredAgentsCallable(ctx, nodes); err != nil {
+	if err := s.validateWorkflowStoredAgentsAvailable(ctx, run.UserID, nodes, true); err != nil {
 		return s.failWorkflowRun(ctx, run.ID, err.Error())
 	}
 	_, err = s.executeWorkflowRun(ctx, w, nodes, graph, run, input)
@@ -1106,7 +1106,7 @@ type workflowAgentRef struct {
 	AgentID uuid.UUID
 }
 
-func (s *Service) validateWorkflowRequestAgentsCallable(ctx context.Context, nodes []WorkflowNodeRequest) error {
+func (s *Service) validateWorkflowRequestAgentsAvailable(ctx context.Context, userID uuid.UUID, nodes []WorkflowNodeRequest, requireRuntimeOnline bool) error {
 	refs := make([]workflowAgentRef, 0, len(nodes))
 	for _, node := range nodes {
 		refs = append(refs, workflowAgentRef{
@@ -1115,10 +1115,10 @@ func (s *Service) validateWorkflowRequestAgentsCallable(ctx context.Context, nod
 			AgentID: node.AgentID,
 		})
 	}
-	return s.validateWorkflowAgentsCallable(ctx, refs)
+	return s.validateWorkflowAgentsAvailable(ctx, userID, refs, requireRuntimeOnline)
 }
 
-func (s *Service) validateWorkflowStoredAgentsCallable(ctx context.Context, nodes []db.WorkflowNode) error {
+func (s *Service) validateWorkflowStoredAgentsAvailable(ctx context.Context, userID uuid.UUID, nodes []db.WorkflowNode, requireRuntimeOnline bool) error {
 	refs := make([]workflowAgentRef, 0, len(nodes))
 	for _, node := range nodes {
 		refs = append(refs, workflowAgentRef{
@@ -1127,10 +1127,10 @@ func (s *Service) validateWorkflowStoredAgentsCallable(ctx context.Context, node
 			AgentID: node.AgentID,
 		})
 	}
-	return s.validateWorkflowAgentsCallable(ctx, refs)
+	return s.validateWorkflowAgentsAvailable(ctx, userID, refs, requireRuntimeOnline)
 }
 
-func (s *Service) validateWorkflowAgentsCallable(ctx context.Context, refs []workflowAgentRef) error {
+func (s *Service) validateWorkflowAgentsAvailable(ctx context.Context, userID uuid.UUID, refs []workflowAgentRef, requireRuntimeOnline bool) error {
 	for _, ref := range refs {
 		if ref.AgentID == uuid.Nil {
 			return httpx.BadRequest("workflow node agent_id 不能为空")
@@ -1140,13 +1140,13 @@ func (s *Service) validateWorkflowAgentsCallable(ctx context.Context, refs []wor
 			if errors.Is(err, pgx.ErrNoRows) {
 				return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
 			}
-			log.Error().Err(err).Str("agent_id", ref.AgentID.String()).Msg("workflow.validateWorkflowAgentsCallable: GetAgentByID")
+			log.Error().Err(err).Str("agent_id", ref.AgentID.String()).Msg("workflow.validateWorkflowAgentsAvailable: GetAgentByID")
 			return httpx.Internal("校验 workflow Agent 失败")
 		}
-		if agentRow.LifecycleStatus != "active" || agentRow.Visibility != "public" || hasNonMarketTag(agentRow.Tags) {
+		if agentRow.LifecycleStatus != "active" || (agentRow.Visibility != "public" && agentRow.CreatorID != userID) {
 			return httpx.Conflict("workflow node Agent 当前不可用于工作流: " + workflowAgentRefLabel(ref))
 		}
-		callable, err := s.workflowAgentCallable(ctx, agentRow)
+		callable, err := s.workflowAgentCallable(ctx, agentRow, requireRuntimeOnline)
 		if err != nil {
 			return err
 		}
@@ -1157,7 +1157,7 @@ func (s *Service) validateWorkflowAgentsCallable(ctx context.Context, refs []wor
 	return nil
 }
 
-func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent) (bool, error) {
+func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
 	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1171,7 +1171,7 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent) 
 	if !callable {
 		return false, nil
 	}
-	if agentRow.ConnectionMode == "runtime_pull" || agentRow.ConnectionMode == "runtime_ws" {
+	if requireRuntimeOnline && (agentRow.ConnectionMode == "runtime_pull" || agentRow.ConnectionMode == "runtime_ws") {
 		hasRecentRuntimeToken, err := s.queries.HasRecentRuntimePullToken(ctx, agentRow.ID)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasRecentRuntimePullToken")
@@ -1192,18 +1192,6 @@ func workflowAgentRefLabel(ref workflowAgentRef) string {
 		return ref.NodeKey
 	}
 	return ref.AgentID.String()
-}
-
-func hasNonMarketTag(tags []string) bool {
-	for _, tag := range tags {
-		clean := strings.TrimSpace(tag)
-		lower := strings.ToLower(clean)
-		if lower == "internal" || lower == "test" || lower == "validation" ||
-			clean == "内部" || clean == "测试" || clean == "验收" {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *Service) failWorkflowRun(ctx context.Context, workflowRunID uuid.UUID, message string) error {
