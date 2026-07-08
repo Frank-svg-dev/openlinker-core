@@ -390,6 +390,26 @@ func TestRecommendPersistsPendingExplicitSkill(t *testing.T) {
 	assert.Empty(t, detail.Recommendations)
 }
 
+func TestRecommendPendingExplicitSkillLimitsRecommendationScope(t *testing.T) {
+	pool := setupTaskTestDB(t)
+	userID := insertTaskUser(t, pool)
+	fake := &fakeSkillRecommender{skills: testSkills()}
+	svc := task.NewService(pool, nil, fake)
+
+	resp, err := svc.Recommend(context.Background(), userID, &task.RecommendRequest{
+		Query:    "请帮我做 SQL 查询和数据分析，但是需要一个当前目录没有的新能力",
+		SkillIDs: []string{"ai/custom-capability"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ai/custom-capability"}, fake.gotSkillIDs)
+	assert.Contains(t, resp.ParsedSkills, "ai/custom-capability")
+	assert.Contains(t, resp.ParsedSkills, "data/sql-query")
+	assert.Contains(t, resp.ParsedSkills, "data/analysis")
+	assert.Empty(t, resp.Recommendations)
+	require.NotNil(t, resp.NextAction)
+	assert.Equal(t, "publish_task", resp.NextAction.Type)
+}
+
 func TestRecommendPreferredAgentSlugRanksFirst(t *testing.T) {
 	pool := setupTaskTestDB(t)
 	userID := insertTaskUser(t, pool)

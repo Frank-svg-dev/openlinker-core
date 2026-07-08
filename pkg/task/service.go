@@ -188,6 +188,10 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		parsed = ruleParse(query, skills)
 	}
 	parsed = mergeSkillIDs(explicitSkills, parsed, maxTaskSkillRefs)
+	recommendSkillIDs := parsed
+	if hasPendingExplicitSkillID(explicitSkills, skillByID) {
+		recommendSkillIDs = explicitSkills
+	}
 
 	// 2. 解析空 → 写入 task_query 但 recommendations 为空，便于离线追踪 miss
 	resp := &RecommendResponse{
@@ -199,7 +203,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		Recommendations: []Recommendation{},
 	}
 
-	if len(parsed) == 0 {
+	if len(recommendSkillIDs) == 0 {
 		taskID, err := s.persist(ctx, userID, query, parsed, mcpTools, nil)
 		if err != nil {
 			return nil, err
@@ -210,9 +214,9 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	}
 
 	// 3. 调 skill 推荐器
-	matches, err := s.skillSvc.RecommendAgentsBySkills(ctx, parsed, 3)
+	matches, err := s.skillSvc.RecommendAgentsBySkills(ctx, recommendSkillIDs, 3)
 	if err != nil {
-		log.Error().Err(err).Strs("skills", parsed).Msg("task.Recommend: RecommendAgentsBySkills")
+		log.Error().Err(err).Strs("skills", recommendSkillIDs).Msg("task.Recommend: RecommendAgentsBySkills")
 		return nil, httpx.Internal("推荐 Agent 失败")
 	}
 
@@ -245,7 +249,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 
 	// skill_id → 中文名（用于 Why 文案）
 	nameByID := skillNameByID(skills)
-	parsedCount := float32(len(parsed))
+	parsedCount := float32(len(recommendSkillIDs))
 	matchCountByAgentID := make(map[uuid.UUID]int32, len(matches))
 	for i := range matches {
 		matchCountByAgentID[matches[i].AgentID] = matches[i].MatchCount
@@ -263,7 +267,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			// 推荐了但回填不到（可能被下架）→ 跳过
 			continue
 		}
-		matchedSkills, err := s.matchedSkillRefs(ctx, agentID, parsed)
+		matchedSkills, err := s.matchedSkillRefs(ctx, agentID, recommendSkillIDs)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentID.String()).Msg("task.Recommend: ListAgentSkills")
 			return nil, httpx.Internal("加载 Agent Skill 详情失败")
@@ -282,7 +286,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 		recs = append(recs, Recommendation{
 			Agent:         toAgentSummary(row),
 			MatchScore:    score,
-			Why:           buildWhy(parsed, nameByID),
+			Why:           buildWhy(recommendSkillIDs, nameByID),
 			MatchedSkills: matchedSkills,
 		})
 	}
@@ -1097,6 +1101,15 @@ func normalizeExplicitSkillIDs(ids []string, byID map[string]db.Skill) ([]string
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func hasPendingExplicitSkillID(ids []string, byID map[string]db.Skill) bool {
+	for _, id := range ids {
+		if _, ok := byID[id]; !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func mergeSkillIDs(explicit []string, parsed []string, max int) []string {
