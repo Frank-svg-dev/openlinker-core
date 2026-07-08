@@ -774,6 +774,47 @@ func TestListMyAgentsPageStatusActiveFiltersDisabled(t *testing.T) {
 	require.EqualValues(t, 1, page.Counts.Total)
 }
 
+func TestListMyAgentsPageDefaultsToNewestFirst(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	uid := insertCreator(t, pool)
+	olderAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("older-page")))
+	require.NoError(t, err)
+	olderAgentID := uuid.MustParse(olderAgent.ID)
+	_, err = pool.Exec(ctx,
+		`INSERT INTO runs (
+			user_id, agent_id, input, output, status,
+			cost_cents, platform_fee_cents, creator_revenue_cents,
+			duration_ms, started_at, finished_at
+		) VALUES ($1, $2, '{}'::jsonb, '{}'::jsonb, 'success', 10, 2, 8, 12, NOW(), NOW())`,
+		uid, olderAgentID)
+	require.NoError(t, err)
+
+	time.Sleep(10 * time.Millisecond)
+	newerAgent, err := svc.CreateAgent(ctx, uid, validCreateReq(freshSlug("newer-page")))
+	require.NoError(t, err)
+
+	defaultPage, err := svc.ListMyAgentsPage(ctx, uid, agent.AgentListOptions{
+		Status: "active",
+		Limit:  1,
+	})
+	require.NoError(t, err)
+	require.EqualValues(t, 2, defaultPage.Total)
+	require.Len(t, defaultPage.Items, 1)
+	require.Equal(t, newerAgent.ID, defaultPage.Items[0].ID)
+
+	callsPage, err := svc.ListMyAgentsPage(ctx, uid, agent.AgentListOptions{
+		Status: "active",
+		SortBy: "calls_this_month",
+		Limit:  1,
+	})
+	require.NoError(t, err)
+	require.Len(t, callsPage.Items, 1)
+	require.Equal(t, olderAgent.ID, callsPage.Items[0].ID)
+}
+
 func TestListMyAgents_IncludesDeclaredSkillIDs(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)

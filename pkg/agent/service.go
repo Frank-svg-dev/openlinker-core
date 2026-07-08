@@ -927,7 +927,7 @@ func normalizeAgentListOptions(opts AgentListOptions) AgentListOptions {
 	opts.CertificationStatus = normalizeAgentListFilter(opts.CertificationStatus, creatorAgentListCertificationValues)
 	opts.SortBy = normalizeAgentListFilter(opts.SortBy, creatorAgentListSortValues)
 	if opts.SortBy == "" {
-		opts.SortBy = "calls_this_month"
+		opts.SortBy = "created_at"
 	}
 	if opts.Limit <= 0 {
 		opts.Limit = defaultAgentListLimit
