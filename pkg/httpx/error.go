@@ -11,15 +11,17 @@ import (
 type ErrorCode string
 
 const (
-	CodeBadRequest         ErrorCode = "BAD_REQUEST"
-	CodeUnauthorized       ErrorCode = "UNAUTHORIZED"
-	CodeForbidden          ErrorCode = "FORBIDDEN"
-	CodeNotFound           ErrorCode = "NOT_FOUND"
-	CodeConflict           ErrorCode = "CONFLICT"
-	CodeUnprocessable      ErrorCode = "VALIDATION_FAILED"
-	CodeRateLimited        ErrorCode = "RATE_LIMITED"
-	CodeInternal           ErrorCode = "INTERNAL_ERROR"
-	CodeServiceUnavailable ErrorCode = "SERVICE_UNAVAILABLE"
+	CodeBadRequest                          ErrorCode = "BAD_REQUEST"
+	CodeUnauthorized                        ErrorCode = "UNAUTHORIZED"
+	CodeForbidden                           ErrorCode = "FORBIDDEN"
+	CodePermissionDenied                    ErrorCode = "PERMISSION_DENIED"
+	CodePermissionExpansionRequiresNewToken ErrorCode = "PERMISSION_EXPANSION_REQUIRES_NEW_TOKEN"
+	CodeNotFound                            ErrorCode = "NOT_FOUND"
+	CodeConflict                            ErrorCode = "CONFLICT"
+	CodeUnprocessable                       ErrorCode = "VALIDATION_FAILED"
+	CodeRateLimited                         ErrorCode = "RATE_LIMITED"
+	CodeInternal                            ErrorCode = "INTERNAL_ERROR"
+	CodeServiceUnavailable                  ErrorCode = "SERVICE_UNAVAILABLE"
 )
 
 // ErrorResponse 统一错误响应体。
@@ -91,6 +93,25 @@ func Unauthorized(msg string) *HTTPError {
 func Forbidden(msg string) *HTTPError {
 	return NewError(http.StatusForbidden, CodeForbidden, msg)
 }
+func PermissionDenied(permission string, resource ...string) *HTTPError {
+	message := "权限不足"
+	if permission != "" {
+		message = "缺少权限: " + permission
+	}
+	details := map[string]any{"required_permission": permission}
+	if len(resource) > 0 && resource[0] != "" {
+		details["required_resource_type"] = resource[0]
+	}
+	if len(resource) > 1 && resource[1] != "" {
+		details["required_resource_id"] = resource[1]
+	}
+	return &HTTPError{
+		Status:  http.StatusForbidden,
+		Code:    CodePermissionDenied,
+		Message: message,
+		Details: details,
+	}
+}
 func NotFound(msg string) *HTTPError {
 	if msg == "" {
 		msg = "资源不存在"
@@ -123,10 +144,11 @@ func ServiceUnavailable(msg string) *HTTPError {
 type CtxKey string
 
 const (
-	CtxKeyUserID     CtxKey = "user_id"
-	CtxKeyAdmin      CtxKey = "is_admin"
-	CtxKeyAuthMethod CtxKey = "auth_method"
-	CtxKeyAuthScopes CtxKey = "auth_scopes"
+	CtxKeyUserID        CtxKey = "user_id"
+	CtxKeyAdmin         CtxKey = "is_admin"
+	CtxKeyAuthMethod    CtxKey = "auth_method"
+	CtxKeyAuthScopes    CtxKey = "auth_scopes"
+	CtxKeyAuthPrincipal CtxKey = "auth_principal"
 )
 
 // UserIDFrom 从 echo.Context 取出 user_id（鉴权中间件设置）。

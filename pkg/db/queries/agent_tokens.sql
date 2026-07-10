@@ -57,6 +57,12 @@ SELECT COUNT(*)::int AS total
 FROM agent_tokens
 WHERE creator_user_id = $1 AND agent_id = $2;
 
+-- name: GetAgentTokenByIDForCreator :one
+SELECT id, agent_id, creator_user_id, name, prefix, token_hash, scopes, status,
+       expires_at, redeemed_at, last_used_at, revoked_at, created_at
+FROM agent_tokens
+WHERE id = $1 AND creator_user_id = $2;
+
 -- name: ListActiveAgentTokensByPrefix :many
 SELECT id, agent_id, creator_user_id, name, prefix, token_hash, scopes, status,
        expires_at, redeemed_at, last_used_at, revoked_at, created_at

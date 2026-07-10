@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/google/uuid"
@@ -17,6 +18,12 @@ import (
 // 失败时返回固定错误（不暴露内部细节）。
 type ApiKeyVerifier interface {
 	Verify(ctx context.Context, plaintextToken string) (uuid.UUID, []string, error)
+}
+
+// PrincipalAPIKeyVerifier is implemented by Core's local User Token service.
+// The legacy Verify method remains temporarily for bridge compatibility.
+type PrincipalAPIKeyVerifier interface {
+	VerifyPrincipal(ctx context.Context, plaintextToken string) (*AuthPrincipal, error)
 }
 
 // HybridAuthMiddleware 同时接受网页登录会话与访问令牌。
@@ -45,35 +52,63 @@ func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifie
 			}
 			token := parts[1]
 
-			var userID string
-			var authMethod string
+			var principal *AuthPrincipal
 			if credential.HasAnyPrefix(token, credential.UserTokenPrefix) {
 				if verifier == nil {
 					// 配置错误：访问令牌验证器未注入
 					return httpx.Unauthorized("访问令牌鉴权未启用")
 				}
-				uid, scopes, err := verifier.Verify(c.Request().Context(), token)
-				if err != nil {
-					return httpx.Unauthorized("访问令牌无效或已撤销")
+				if principalVerifier, ok := verifier.(PrincipalAPIKeyVerifier); ok {
+					var err error
+					principal, err = principalVerifier.VerifyPrincipal(c.Request().Context(), token)
+					if err != nil {
+						return httpx.Unauthorized("访问令牌无效或已撤销")
+					}
+				} else {
+					uid, scopes, err := verifier.Verify(c.Request().Context(), token)
+					if err != nil {
+						return httpx.Unauthorized("访问令牌无效或已撤销")
+					}
+					grants := make([]Grant, 0, len(scopes))
+					for _, scope := range scopes {
+						grants = append(grants, Grant{Permission: scope, ResourceType: resourceTypeForLegacyScope(scope), Constraints: json.RawMessage(`{}`)})
+					}
+					principal = &AuthPrincipal{UserID: uid, AuthMethod: AuthMethodUserToken, Grants: grants}
 				}
-				userID = uid.String()
-				authMethod = "user_token"
-				c.Set(string(httpx.CtxKeyAuthScopes), scopes)
 			} else {
 				uid, err := ParseToken(token, jwtSecret)
 				if err != nil {
 					return httpx.Unauthorized("token 无效或已过期")
 				}
-				userID = uid
-				authMethod = "jwt"
+				parsed, err := uuid.Parse(uid)
+				if err != nil {
+					return httpx.Unauthorized("token 无效")
+				}
+				principal = &AuthPrincipal{UserID: parsed, AuthMethod: AuthMethodJWT, Grants: []Grant{}}
 			}
-			if err := ensureTokenUserEnabled(c.Request().Context(), users, userID); err != nil {
+			if principal == nil {
+				return httpx.Unauthorized("认证失败")
+			}
+			if err := ensureTokenUserEnabled(c.Request().Context(), users, principal.UserID.String()); err != nil {
 				return err
 			}
-
-			c.Set(string(httpx.CtxKeyUserID), userID)
-			c.Set(string(httpx.CtxKeyAuthMethod), authMethod)
+			SetPrincipal(c, principal)
 			return next(c)
 		}
+	}
+}
+
+func resourceTypeForLegacyScope(scope string) string {
+	switch {
+	case strings.HasPrefix(scope, "agents:"), strings.HasPrefix(scope, "agent-tokens:"):
+		return "agent"
+	case strings.HasPrefix(scope, "runs:"):
+		return "run"
+	case strings.HasPrefix(scope, "tasks:"):
+		return "task"
+	case strings.HasPrefix(scope, "workflows:"):
+		return "workflow"
+	default:
+		return "core"
 	}
 }

@@ -186,6 +186,24 @@ func (q *Queries) CountAgentTokensByCreatorAndAgent(ctx context.Context, arg Cou
 	return total, err
 }
 
+const getAgentTokenByIDForCreator = `-- name: GetAgentTokenByIDForCreator :one
+SELECT id, agent_id, creator_user_id, name, prefix, token_hash, scopes, status,
+       expires_at, redeemed_at, last_used_at, revoked_at, created_at
+FROM agent_tokens
+WHERE id = $1 AND creator_user_id = $2`
+
+type GetAgentTokenByIDForCreatorParams struct {
+	ID            uuid.UUID `db:"id" json:"id"`
+	CreatorUserID uuid.UUID `db:"creator_user_id" json:"creator_user_id"`
+}
+
+func (q *Queries) GetAgentTokenByIDForCreator(ctx context.Context, arg GetAgentTokenByIDForCreatorParams) (AgentToken, error) {
+	row := q.db.QueryRow(ctx, getAgentTokenByIDForCreator, arg.ID, arg.CreatorUserID)
+	var token AgentToken
+	err := scanAgentToken(row, &token)
+	return token, err
+}
+
 const listActiveAgentTokensByPrefix = `-- name: ListActiveAgentTokensByPrefix :many
 SELECT id, agent_id, creator_user_id, name, prefix, token_hash, scopes, status,
        expires_at, redeemed_at, last_used_at, revoked_at, created_at

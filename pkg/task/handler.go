@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -69,6 +70,9 @@ func (h *Handler) ListTaskTemplates(c echo.Context) error {
 
 // Recommend POST /tasks/recommend
 func (h *Handler) Recommend(c echo.Context) error {
+	if err := auth.RequirePermission(c, "tasks:create", "task", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -97,6 +101,9 @@ func (h *Handler) Choose(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
+	if err := auth.RequirePermission(c, "tasks:create", "task", &taskID); err != nil {
+		return err
+	}
 	var req ChooseRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
@@ -119,6 +126,9 @@ func (h *Handler) Publish(c echo.Context) error {
 	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	if err := auth.RequirePermission(c, "tasks:publish", "task", &taskID); err != nil {
+		return err
 	}
 	var req PublishRequest
 	if err := c.Bind(&req); err != nil {
@@ -144,6 +154,9 @@ func (h *Handler) Unpublish(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
+	if err := auth.RequirePermission(c, "tasks:publish", "task", &taskID); err != nil {
+		return err
+	}
 	resp, err := h.svc.Unpublish(c.Request().Context(), taskID, uid)
 	if err != nil {
 		return err
@@ -160,6 +173,9 @@ func (h *Handler) Claim(c echo.Context) error {
 	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	if err := auth.RequirePermission(c, "tasks:work", "task", &taskID); err != nil {
+		return err
 	}
 	var req ClaimRequest
 	if err := c.Bind(&req); err != nil {
@@ -185,6 +201,9 @@ func (h *Handler) Complete(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
+	if err := auth.RequirePermission(c, "tasks:work", "task", &taskID); err != nil {
+		return err
+	}
 	var req CompleteRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
@@ -208,6 +227,9 @@ func (h *Handler) Run(c echo.Context) error {
 	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	if err := auth.RequirePermission(c, "tasks:run", "task", &taskID); err != nil {
+		return err
 	}
 	var req RunTaskRequest
 	if err := c.Bind(&req); err != nil {
@@ -233,6 +255,9 @@ func (h *Handler) Accept(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
+	if err := auth.RequirePermission(c, "tasks:review", "task", &taskID); err != nil {
+		return err
+	}
 	resp, err := h.svc.AcceptDelivery(c.Request().Context(), taskID, uid)
 	if err != nil {
 		return err
@@ -250,6 +275,9 @@ func (h *Handler) RequestRevision(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
 	}
+	if err := auth.RequirePermission(c, "tasks:review", "task", &taskID); err != nil {
+		return err
+	}
 	var req RevisionRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
@@ -266,6 +294,9 @@ func (h *Handler) RequestRevision(c echo.Context) error {
 
 // ListMine GET /tasks/me?q=&status=&visibility=&sort=created_desc&page=1&size=20
 func (h *Handler) ListMine(c echo.Context) error {
+	if err := auth.RequirePermission(c, "tasks:read", "task", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -352,6 +383,9 @@ func (h *Handler) GetByID(c echo.Context) error {
 	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	if err := auth.RequirePermission(c, "tasks:read", "task", &taskID); err != nil {
+		return err
 	}
 	resp, err := h.svc.GetByID(c.Request().Context(), taskID, uid)
 	if err != nil {

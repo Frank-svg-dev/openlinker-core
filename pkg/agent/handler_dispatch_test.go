@@ -742,6 +742,13 @@ func (m *mockRegistrationService) RevokeAgentToken(_ context.Context, userID, to
 	return m.err
 }
 
+func (m *mockRegistrationService) AgentTokenResource(_ context.Context, userID, tokenID uuid.UUID) (*uuid.UUID, error) {
+	m.record("AgentTokenResource")
+	m.lastUserID = userID
+	m.lastTokenID = tokenID
+	return nil, m.err
+}
+
 func (m *mockRegistrationService) RegisterAgentViaToken(_ context.Context, req *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error) {
 	m.record("RegisterAgentViaToken")
 	m.lastRegisterReq = req

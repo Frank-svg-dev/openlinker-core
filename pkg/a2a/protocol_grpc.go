@@ -49,6 +49,9 @@ func (s *GRPCServer) SendMessage(ctx context.Context, req *a2apb.SendMessageRequ
 	if err != nil {
 		return nil, grpcErrorFromA2A(err)
 	}
+	if err := s.authorizeAgent(ctx, authInfo, "agents:run", slug); err != nil {
+		return nil, err
+	}
 	params := messageSendParamsFromProto(req)
 	attachProtocolServiceMetadata(params, a2aServiceParameters{Version: a2aProtocolVersionCurrent})
 	task, err := s.svc.SendProtocolMessage(ctx, authInfo.UserID, slug, params)
@@ -67,6 +70,9 @@ func (s *GRPCServer) SendStreamingMessage(req *a2apb.SendMessageRequest, stream 
 	slug, err := tenantSlug(req.GetTenant())
 	if err != nil {
 		return grpcErrorFromA2A(err)
+	}
+	if err := s.authorizeAgent(ctx, authInfo, "agents:run", slug); err != nil {
+		return err
 	}
 	params := messageSendParamsFromProto(req)
 	attachProtocolServiceMetadata(params, a2aServiceParameters{Version: a2aProtocolVersionCurrent})
@@ -142,7 +148,7 @@ func (s *GRPCServer) ListTasks(ctx context.Context, req *a2apb.ListTasksRequest)
 }
 
 func (s *GRPCServer) CancelTask(ctx context.Context, req *a2apb.CancelTaskRequest) (*a2apb.Task, error) {
-	authInfo, err := s.authenticate(ctx, "agents:run")
+	authInfo, err := s.authenticate(ctx, "runs:cancel")
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +262,7 @@ func (s *GRPCServer) ListTaskPushNotificationConfigs(ctx context.Context, req *a
 }
 
 func (s *GRPCServer) GetExtendedAgentCard(ctx context.Context, req *a2apb.GetExtendedAgentCardRequest) (*a2apb.AgentCard, error) {
-	if _, err := s.authenticate(ctx, "runs:read"); err != nil {
+	if _, err := s.authenticate(ctx, "agents:read"); err != nil {
 		return nil, err
 	}
 	if s.cardProvider == nil {
@@ -302,10 +308,33 @@ func (s *GRPCServer) authenticate(ctx context.Context, scope string) (*GRPCAuthI
 	if err != nil {
 		return nil, grpcErrorFromA2A(err)
 	}
-	if !grpcAuthHasScope(info, scope) {
-		return nil, grpcErrorFromA2A(httpx.Forbidden("访问令牌缺少 scope: " + scope))
+	// Agent-scoped grants can only be evaluated after the tenant slug has been
+	// resolved to the concrete Agent ID by the method handler.
+	if scope != "agents:run" && !grpcAuthAllows(info, scope, grpcResourceType(scope), nil) {
+		return nil, grpcErrorFromA2A(httpx.PermissionDenied(scope, grpcResourceType(scope)))
 	}
 	return info, nil
+}
+
+func (s *GRPCServer) authorizeAgent(ctx context.Context, info *GRPCAuthInfo, permission, slug string) error {
+	if grpcAuthAllows(info, permission, "agent", nil) {
+		return nil
+	}
+	if s.cardProvider == nil {
+		return grpcErrorFromA2A(httpx.PermissionDenied(permission, "agent"))
+	}
+	card, err := s.cardProvider.GetAgentCardBySlug(ctx, slug)
+	if err != nil {
+		return grpcErrorFromA2A(err)
+	}
+	agentID, err := uuid.Parse(card.OpenLinker.AgentID)
+	if err != nil {
+		return grpcErrorFromA2A(httpx.Internal("A2A Agent 资源标识无效"))
+	}
+	if !grpcAuthAllows(info, permission, "agent", &agentID) {
+		return grpcErrorFromA2A(httpx.PermissionDenied(permission, "agent", agentID.String()))
+	}
+	return nil
 }
 
 func requireGRPCA2AVersion(ctx context.Context) error {

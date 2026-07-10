@@ -3,6 +3,7 @@ package task
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,10 +15,44 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
+
+func TestTaskActionHonorsResourceSpecificGrant(t *testing.T) {
+	userID := uuid.New()
+	targetTaskID := uuid.New()
+	otherTaskID := uuid.New()
+	newContext := func(grantedTaskID uuid.UUID) echo.Context {
+		e := echo.New()
+		c := e.NewContext(
+			taskJSONRequest(http.MethodPost, "/api/v1/tasks/"+targetTaskID.String()+"/publish", `{`),
+			httptest.NewRecorder(),
+		)
+		c.SetParamNames("id")
+		c.SetParamValues(targetTaskID.String())
+		auth.SetPrincipal(c, &auth.AuthPrincipal{
+			UserID: userID, AuthMethod: auth.AuthMethodUserToken,
+			Grants: []auth.Grant{{
+				Permission: "tasks:publish", ResourceType: "task", ResourceID: &grantedTaskID,
+				Constraints: json.RawMessage(`{}`),
+			}},
+		})
+		return c
+	}
+
+	err := NewHandler(nil).Publish(newContext(otherTaskID))
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, httpx.CodePermissionDenied, httpErr.Code)
+
+	err = NewHandler(nil).Publish(newContext(targetTaskID))
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusBadRequest, httpErr.Status)
+	require.Equal(t, "请求体格式错误", httpErr.Message)
+}
 
 func TestTokenizeAndRuleParse(t *testing.T) {
 	tokens := tokenize("SQL2 数据分析, SQL2!")

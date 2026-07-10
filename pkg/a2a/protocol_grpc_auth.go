@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/google/uuid"
@@ -16,6 +17,7 @@ type GRPCAuthInfo struct {
 	UserID     uuid.UUID
 	AuthMethod string
 	Scopes     []string
+	Principal  *auth.AuthPrincipal
 }
 
 type GRPCAuthenticator interface {
@@ -25,10 +27,15 @@ type GRPCAuthenticator interface {
 type BearerGRPCAuthenticator struct {
 	jwtSecret string
 	verifier  auth.ApiKeyVerifier
+	users     auth.UserStatusChecker
 }
 
 func NewBearerGRPCAuthenticator(jwtSecret string, verifier auth.ApiKeyVerifier) *BearerGRPCAuthenticator {
 	return &BearerGRPCAuthenticator{jwtSecret: jwtSecret, verifier: verifier}
+}
+
+func NewBearerGRPCAuthenticatorWithUserStatus(jwtSecret string, verifier auth.ApiKeyVerifier, users auth.UserStatusChecker) *BearerGRPCAuthenticator {
+	return &BearerGRPCAuthenticator{jwtSecret: jwtSecret, verifier: verifier, users: users}
 }
 
 func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRPCAuthInfo, error) {
@@ -40,11 +47,28 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 		if a.verifier == nil {
 			return nil, httpx.Unauthorized("访问令牌鉴权未启用")
 		}
+		if principalVerifier, ok := a.verifier.(auth.PrincipalAPIKeyVerifier); ok {
+			principal, err := principalVerifier.VerifyPrincipal(ctx, token)
+			if err != nil {
+				return nil, httpx.Unauthorized("访问令牌无效或已撤销")
+			}
+			return &GRPCAuthInfo{
+				UserID: principal.UserID, AuthMethod: auth.AuthMethodUserToken,
+				Scopes: principal.Permissions(), Principal: principal,
+			}, nil
+		}
 		uid, scopes, err := a.verifier.Verify(ctx, token)
 		if err != nil {
 			return nil, httpx.Unauthorized("访问令牌无效或已撤销")
 		}
-		return &GRPCAuthInfo{UserID: uid, AuthMethod: "user_token", Scopes: scopes}, nil
+		grants := make([]auth.Grant, 0, len(scopes))
+		for _, scope := range scopes {
+			grants = append(grants, auth.Grant{
+				Permission: scope, ResourceType: grpcResourceType(scope), Constraints: json.RawMessage(`{}`),
+			})
+		}
+		principal := &auth.AuthPrincipal{UserID: uid, AuthMethod: auth.AuthMethodUserToken, Grants: grants}
+		return &GRPCAuthInfo{UserID: uid, AuthMethod: auth.AuthMethodUserToken, Scopes: scopes, Principal: principal}, nil
 	}
 	uid, err := auth.ParseToken(token, a.jwtSecret)
 	if err != nil {
@@ -54,7 +78,13 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 	if err != nil {
 		return nil, httpx.Unauthorized("token 无效")
 	}
-	return &GRPCAuthInfo{UserID: parsed, AuthMethod: "jwt"}, nil
+	if a.users != nil {
+		if err := a.users.EnsureUserEnabled(ctx, parsed); err != nil {
+			return nil, err
+		}
+	}
+	principal := &auth.AuthPrincipal{UserID: parsed, AuthMethod: auth.AuthMethodJWT, Grants: []auth.Grant{}}
+	return &GRPCAuthInfo{UserID: parsed, AuthMethod: auth.AuthMethodJWT, Principal: principal}, nil
 }
 
 func bearerTokenFromGRPCMetadata(ctx context.Context) (string, error) {
@@ -71,14 +101,35 @@ func bearerTokenFromGRPCMetadata(ctx context.Context) (string, error) {
 	return "", httpx.Unauthorized("Authorization 格式错误")
 }
 
-func grpcAuthHasScope(info *GRPCAuthInfo, scope string) bool {
-	if info == nil || info.AuthMethod != "user_token" {
+func grpcAuthAllows(info *GRPCAuthInfo, permission, resourceType string, resourceID *uuid.UUID) bool {
+	if info == nil {
+		return false
+	}
+	if info.Principal != nil {
+		return info.Principal.Allows(permission, resourceType, resourceID)
+	}
+	if info.AuthMethod != auth.AuthMethodUserToken {
 		return true
 	}
 	for _, item := range info.Scopes {
-		if item == scope {
+		if item == permission && resourceID == nil {
 			return true
 		}
 	}
 	return false
+}
+
+func grpcResourceType(permission string) string {
+	switch {
+	case strings.HasPrefix(permission, "agents:"), strings.HasPrefix(permission, "agent-tokens:"):
+		return "agent"
+	case strings.HasPrefix(permission, "runs:"):
+		return "run"
+	case strings.HasPrefix(permission, "tasks:"):
+		return "task"
+	case strings.HasPrefix(permission, "workflows:"):
+		return "workflow"
+	default:
+		return "core"
+	}
 }

@@ -31,7 +31,7 @@ func configureA2AGRPCAgentCard(cfg *config.Config, services *Services) {
 	services.AgentMarket.SetA2AGRPCInterface(publicURL)
 }
 
-func StartA2AGRPCServer(rootCtx context.Context, cfg *config.Config, services *Services, opts Options) (ShutdownFunc, error) {
+func StartA2AGRPCServer(rootCtx context.Context, cfg *config.Config, services *Services) (ShutdownFunc, error) {
 	if cfg == nil || !cfg.A2AGRPCEnabled {
 		return nil, nil
 	}
@@ -51,7 +51,7 @@ func StartA2AGRPCServer(rootCtx context.Context, cfg *config.Config, services *S
 	a2apb.RegisterA2AServiceServer(server, a2a.NewGRPCServer(
 		services.A2A,
 		services.AgentMarket,
-		a2a.NewBearerGRPCAuthenticator(cfg.JWTSecret, opts.APIKeyVerifier),
+		a2a.NewBearerGRPCAuthenticatorWithUserStatus(cfg.JWTSecret, services.UserToken, services.UserStatus),
 	))
 
 	serveDone := make(chan error, 1)

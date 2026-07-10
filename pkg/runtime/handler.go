@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
@@ -90,7 +91,36 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.GET("/runs/:id/artifacts", h.GetRunArtifacts, queryMw)
 	api.GET("/runs/:id/messages", h.GetRunMessages, queryMw)
 	api.GET("/runs/:id/stream", h.StreamRunEvents, queryMw)
+	api.POST("/runs/:id/cancel", h.CancelRun, queryMw)
 	api.POST("/runs/:id/events", h.PostRunEvent)
+}
+
+// CancelRun cancels an owned, cancellable run. The concrete Service already
+// implements this method; the narrow assertion keeps existing handler fakes
+// source-compatible.
+func (h *Handler) CancelRun(c echo.Context) error {
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	if err := requireAPIKeyScope(c, "runs:cancel", &runID); err != nil {
+		return err
+	}
+	canceler, ok := h.svc.(interface {
+		CancelRun(context.Context, uuid.UUID, uuid.UUID) (*RunResponse, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Run 取消能力不可用")
+	}
+	resp, err := canceler.CancelRun(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // RegisterAgentRuntime mounts Agent-bound access-token endpoints used by runtime_pull Agents.
@@ -111,7 +141,7 @@ func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 // Endpoint 连接模式会同步等待 Agent 返回；其他运行模式由各自的调度路径处理。
 // 失败 / 超时 / 取消 → status='failed' or 'timeout' or 'canceled'，已退款。
 func (h *Handler) PostRun(c echo.Context) error {
-	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+	if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -124,6 +154,10 @@ func (h *Handler) PostRun(c echo.Context) error {
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
+	}
+	agentID, _ := uuid.Parse(req.AgentID)
+	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
+		return err
 	}
 	resp, err := h.svc.Run(c.Request().Context(), uid, &req, sourceFromCtx(c))
 	if err != nil {
@@ -134,7 +168,7 @@ func (h *Handler) PostRun(c echo.Context) error {
 
 // PostRunAsync 启动异步调用，立即返回 run_id，调用结果通过 GET /runs/:id 或 SSE 查询。
 func (h *Handler) PostRunAsync(c echo.Context) error {
-	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+	if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -147,6 +181,10 @@ func (h *Handler) PostRunAsync(c echo.Context) error {
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
+	}
+	agentID, _ := uuid.Parse(req.AgentID)
+	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
+		return err
 	}
 	resp, err := h.svc.StartRun(c.Request().Context(), uid, &req, sourceFromCtx(c))
 	if err != nil {
@@ -518,13 +556,16 @@ func sourceFromCtx(c echo.Context) string {
 	}
 }
 
-func requireAPIKeyScope(c echo.Context, scope string) error {
-	// Runtime endpoints are intentionally dual-use: browser JWT sessions act as
-	// the first-party user, while User Token callers must prove the narrower scope.
-	if httpx.AuthMethodFrom(c) == "user_token" && !httpx.HasScope(c, scope) {
-		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
+func requireAPIKeyScope(c echo.Context, permission string, resourceIDs ...*uuid.UUID) error {
+	resourceType := "run"
+	if strings.HasPrefix(permission, "agents:") {
+		resourceType = "agent"
 	}
-	return nil
+	var resourceID *uuid.UUID
+	if len(resourceIDs) > 0 {
+		resourceID = resourceIDs[0]
+	}
+	return auth.RequirePermission(c, permission, resourceType, resourceID)
 }
 
 func runtimeBearerToken(header string) (string, error) {

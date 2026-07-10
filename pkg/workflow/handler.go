@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -75,6 +76,9 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 }
 
 func (h *Handler) Create(c echo.Context) error {
+	if err := auth.RequirePermission(c, "workflows:manage", "workflow", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -94,6 +98,9 @@ func (h *Handler) Create(c echo.Context) error {
 }
 
 func (h *Handler) List(c echo.Context) error {
+	if err := auth.RequirePermission(c, "workflows:read", "workflow", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -146,6 +153,9 @@ func (h *Handler) Get(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := auth.RequirePermission(c, "workflows:read", "workflow", &id); err != nil {
+		return err
+	}
 	resp, err := h.svc.GetWorkflow(c.Request().Context(), uid, id)
 	if err != nil {
 		return err
@@ -160,6 +170,9 @@ func (h *Handler) Run(c echo.Context) error {
 	}
 	id, err := pathUUID(c)
 	if err != nil {
+		return err
+	}
+	if err := auth.RequirePermission(c, "workflows:run", "workflow", &id); err != nil {
 		return err
 	}
 	var req RunWorkflowRequest
@@ -185,6 +198,9 @@ func (h *Handler) StartRun(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := auth.RequirePermission(c, "workflows:run", "workflow", &id); err != nil {
+		return err
+	}
 	var req RunWorkflowRequest
 	if err := c.Bind(&req); err != nil {
 		return httpx.BadRequest("请求体格式错误")
@@ -206,6 +222,9 @@ func (h *Handler) ListRuns(c echo.Context) error {
 	}
 	id, err := pathUUID(c)
 	if err != nil {
+		return err
+	}
+	if err := auth.RequirePermission(c, "workflows:read", "workflow", &id); err != nil {
 		return err
 	}
 	page := int32(1)
@@ -248,7 +267,7 @@ func (h *Handler) GetRun(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	resp, err := h.svc.GetWorkflowRun(c.Request().Context(), uid, id)
+	resp, err := h.requireWorkflowRunPermission(c, uid, id, "workflows:read")
 	if err != nil {
 		return err
 	}
@@ -262,6 +281,9 @@ func (h *Handler) RetryRun(c echo.Context) error {
 	}
 	id, err := pathUUID(c)
 	if err != nil {
+		return err
+	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:run"); err != nil {
 		return err
 	}
 	resp, err := h.svc.RetryWorkflowRun(c.Request().Context(), uid, id)
@@ -287,6 +309,9 @@ func (h *Handler) RerunStep(c echo.Context) error {
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:run"); err != nil {
+		return err
+	}
 	resp, err := h.svc.RerunWorkflowStep(c.Request().Context(), uid, id, &req)
 	if err != nil {
 		return err
@@ -307,6 +332,12 @@ func (h *Handler) CompareRuns(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("other_id 不是合法 uuid")
 	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:read"); err != nil {
+		return err
+	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, otherID, "workflows:read"); err != nil {
+		return err
+	}
 	resp, err := h.svc.CompareWorkflowRuns(c.Request().Context(), uid, id, otherID)
 	if err != nil {
 		return err
@@ -321,6 +352,9 @@ func (h *Handler) PauseRun(c echo.Context) error {
 	}
 	id, err := pathUUID(c)
 	if err != nil {
+		return err
+	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:run"); err != nil {
 		return err
 	}
 	resp, err := h.svc.PauseWorkflowRun(c.Request().Context(), uid, id)
@@ -339,6 +373,9 @@ func (h *Handler) ResumeRun(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:run"); err != nil {
+		return err
+	}
 	resp, err := h.svc.ResumeWorkflowRun(c.Request().Context(), uid, id)
 	if err != nil {
 		return err
@@ -355,11 +392,47 @@ func (h *Handler) CancelRun(c echo.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := h.requireWorkflowRunActionPermission(c, uid, id, "workflows:run"); err != nil {
+		return err
+	}
 	resp, err := h.svc.CancelWorkflowRun(c.Request().Context(), uid, id)
 	if err != nil {
 		return err
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) requireWorkflowRunPermission(c echo.Context, userID, runID uuid.UUID, permission string) (*WorkflowRunResponse, error) {
+	run, err := h.svc.GetWorkflowRun(c.Request().Context(), userID, runID)
+	if err != nil {
+		return nil, err
+	}
+	if run == nil {
+		return nil, httpx.NotFound("Workflow Run 不存在")
+	}
+	workflowID, err := uuid.Parse(run.WorkflowID)
+	if err != nil {
+		return nil, httpx.Internal("Workflow Run 资源标识无效")
+	}
+	if err := auth.RequirePermission(c, permission, "workflow", &workflowID); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func (h *Handler) requireWorkflowRunActionPermission(c echo.Context, userID, runID uuid.UUID, permission string) error {
+	principal := auth.PrincipalFrom(c)
+	if principal == nil {
+		return auth.RequirePermission(c, permission, "workflow", nil)
+	}
+	if principal.Allows(permission, "workflow", nil) {
+		return nil
+	}
+	if !principal.HasPermission(permission, "workflow") {
+		return auth.RequirePermission(c, permission, "workflow", nil)
+	}
+	_, err := h.requireWorkflowRunPermission(c, userID, runID, permission)
+	return err
 }
 
 func userIDFromCtx(c echo.Context) (uuid.UUID, error) {

@@ -13,8 +13,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
+
+const a2aTargetAgentIDContextKey = "a2a_target_agent_id"
 
 const (
 	jsonRPCParseError     = -32700
@@ -108,7 +111,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		}
 		return c.JSON(http.StatusOK, jsonRPCResultWithVersion(req.ID, resp, serviceParams.Version))
 	case "tasks/cancel":
-		if err := requireScope(c, "agents:run"); err != nil {
+		if err := requireScope(c, "runs:cancel"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
 		var params A2ATaskQueryParams
@@ -188,7 +191,7 @@ func (h *Handler) JSONRPC(c echo.Context) error {
 		}
 		return c.JSON(http.StatusOK, jsonRPCNullResult(req.ID))
 	case "agent/getExtendedCard":
-		if err := requireScope(c, "runs:read"); err != nil {
+		if err := requireScope(c, "agents:read"); err != nil {
 			return c.JSON(http.StatusOK, jsonRPCErrorFrom(req.ID, err))
 		}
 		card, err := h.extendedAgentCard(c)
@@ -221,7 +224,7 @@ func (h *Handler) GetExtendedAgentCardHTTP(c echo.Context) error {
 		return err
 	}
 	setA2AVersionHeader(c, serviceParams.Version)
-	if err := requireScope(c, "runs:read"); err != nil {
+	if err := requireScope(c, "agents:read"); err != nil {
 		return err
 	}
 	card, err := h.extendedAgentCard(c)
@@ -419,7 +422,7 @@ func (h *Handler) CancelTaskHTTP(c echo.Context) error {
 		return err
 	}
 	setA2AVersionHeader(c, serviceParams.Version)
-	if err := requireScope(c, "agents:run"); err != nil {
+	if err := requireScope(c, "runs:cancel"); err != nil {
 		return err
 	}
 	userID, err := userIDFromCtx(c)
@@ -752,11 +755,16 @@ func normalizeJSONRPCID(id json.RawMessage) json.RawMessage {
 	return id
 }
 
-func requireScope(c echo.Context, scope string) error {
-	if httpx.AuthMethodFrom(c) == "user_token" && !httpx.HasScope(c, scope) {
-		return httpx.Forbidden("访问令牌缺少 scope: " + scope)
+func requireScope(c echo.Context, permission string) error {
+	resourceType := "run"
+	var resourceID *uuid.UUID
+	if strings.HasPrefix(permission, "agents:") {
+		resourceType = "agent"
+		if value, ok := c.Get(a2aTargetAgentIDContextKey).(uuid.UUID); ok {
+			resourceID = &value
+		}
 	}
-	return nil
+	return auth.RequirePermission(c, permission, resourceType, resourceID)
 }
 
 func optionalIntQuery(raw string) (*int, error) {

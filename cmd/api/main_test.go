@@ -62,8 +62,8 @@ func TestValidateProductionConfig(t *testing.T) {
 		Env:                "production",
 		FrontendURL:        "https://app.example",
 		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
-	}); err == nil || !strings.Contains(err.Error(), "OPENLINKER_INTERNAL_TOKEN") {
-		t.Fatalf("missing verify secret error = %v", err)
+	}); err != nil {
+		t.Fatalf("deprecated verify URL must not affect local token auth: %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env:                "production",

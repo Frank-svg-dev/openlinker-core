@@ -437,6 +437,7 @@ type mockWorkflowService struct {
 	runWorkflowID uuid.UUID
 	runReq        *RunWorkflowRequest
 	runResp       *WorkflowRunResponse
+	runResponses  map[uuid.UUID]*WorkflowRunResponse
 
 	startUserID     uuid.UUID
 	startWorkflowID uuid.UUID
@@ -540,6 +541,9 @@ func (m *mockWorkflowService) ListWorkflowRunsPage(_ context.Context, userID, wo
 func (m *mockWorkflowService) GetWorkflowRun(_ context.Context, userID, workflowRunID uuid.UUID) (*WorkflowRunResponse, error) {
 	m.getRunUserID = userID
 	m.getRunID = workflowRunID
+	if m.runResponses != nil {
+		return m.runResponses[workflowRunID], m.err
+	}
 	return m.runResp, m.err
 }
 

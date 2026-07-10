@@ -1501,7 +1501,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		body:       `{"jsonrpc":"2.0","id":"card","method":"agent/getExtendedCard","params":{}}`,
 		userID:     userID.String(),
 		authMethod: "user_token",
-		scopes:     []string{"runs:read"},
+		scopes:     []string{"agents:read"},
 		params:     map[string]string{"slug": slug},
 	})
 	require.NoError(t, h.JSONRPC(c))
@@ -1516,7 +1516,7 @@ func TestA2AJSONRPCHandlerAdditionalErrorAndNullParamEdges(t *testing.T) {
 		{method: "message/stream", scope: "agents:run"},
 		{method: "tasks/get", scope: "runs:read"},
 		{method: "tasks/list", scope: "runs:read"},
-		{method: "tasks/cancel", scope: "agents:run"},
+		{method: "tasks/cancel", scope: "runs:cancel"},
 		{method: "tasks/resubscribe", scope: "runs:read"},
 		{method: "tasks/pushNotificationConfig/set", scope: "runs:read"},
 		{method: "tasks/pushNotificationConfig/get", scope: "runs:read"},
@@ -1603,7 +1603,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		{
 			name:   "tasks cancel",
 			body:   `{"jsonrpc":"2.0","id":"cancel","method":"CancelTask","params":{"id":"` + taskID + `"}}`,
-			scopes: []string{"agents:run"},
+			scopes: []string{"runs:cancel"},
 			assert: func(t *testing.T, svc *fakeA2AService, _ *fakeA2ACardProvider) {
 				if !svc.called("tasks/cancel") || svc.taskID != taskID {
 					t.Fatalf("tasks/cancel dispatch = calls=%v task=%q", svc.calls, svc.taskID)
@@ -1664,7 +1664,7 @@ func TestA2AJSONRPCHandlerDispatchesStandardMethods(t *testing.T) {
 		{
 			name:   "extended card",
 			body:   `{"jsonrpc":"2.0","id":"card","method":"GetExtendedAgentCard","params":{}}`,
-			scopes: []string{"runs:read"},
+			scopes: []string{"agents:read"},
 			assert: func(t *testing.T, _ *fakeA2AService, cards *fakeA2ACardProvider) {
 				if cards.extendedSlug != slug {
 					t.Fatalf("extended card slug = %q", cards.extendedSlug)
@@ -1804,7 +1804,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.GetExtendedAgentCardHTTP(c)
 			},
-			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/?version=v1", userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": slug}},
+			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/?version=v1", userID: userID.String(), authMethod: "user_token", scopes: []string{"agents:read"}, params: map[string]string{"slug": slug}},
 			want: http.StatusOK,
 			assert: func(t *testing.T, c echo.Context, _ *fakeA2AService, cards *fakeA2ACardProvider) {
 				if cards.extendedSlug != slug {
@@ -1898,7 +1898,7 @@ func TestA2AHTTPJSONHandlersDispatchStandardEndpoints(t *testing.T) {
 				target:     "/tasks/" + taskID + ":cancel?version=1.0",
 				userID:     userID.String(),
 				authMethod: "user_token",
-				scopes:     []string{"agents:run"},
+				scopes:     []string{"runs:cancel"},
 				params:     map[string]string{"slug": slug, "*": "tasks/" + taskID + ":cancel"},
 			},
 			want: http.StatusOK,
@@ -2175,7 +2175,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 			method: func(h *Handler, c echo.Context) error {
 				return h.CancelTaskHTTP(c)
 			},
-			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + ":cancel", userID: userID.String(), authMethod: "user_token", scopes: []string{"agents:run"}, params: map[string]string{"slug": slug, "taskID": taskID}},
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/tasks/" + taskID + ":cancel", userID: userID.String(), authMethod: "user_token", scopes: []string{"runs:cancel"}, params: map[string]string{"slug": slug, "taskID": taskID}},
 		},
 		{
 			name: "set push",
@@ -2221,7 +2221,7 @@ func TestA2AHTTPJSONHandlersPropagateServiceErrors(t *testing.T) {
 func TestA2AAgentCardHandlersUnavailableWithoutProvider(t *testing.T) {
 	h := NewHandler(newFakeA2AService(uuid.NewString()))
 	requireA2AHTTPStatus(t, h.GetPublicAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", params: map[string]string{"slug": "agent-one"}})), http.StatusServiceUnavailable)
-	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "user_token", scopes: []string{"runs:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusBadRequest)
+	requireA2AHTTPStatus(t, h.GetExtendedAgentCardHTTP(newA2ATestContext(&a2aHandlerRequest{method: http.MethodGet, target: "/", userID: uuid.NewString(), authMethod: "user_token", scopes: []string{"agents:read"}, params: map[string]string{"slug": "agent-one"}})), http.StatusBadRequest)
 }
 
 type noopTaskCallbackManager struct{}

@@ -456,7 +456,7 @@ If a human gives you this document plus an OpenLinker User Token, do this:
   - agents:read for search_agents and get_agent.
   - agents:run for run_agent.
   - runs:read for get_run and run event lookup.
-  - tasks:write for create_task.
+  - tasks:create for create_task.
 
 ## OpenLinker MCP server
 

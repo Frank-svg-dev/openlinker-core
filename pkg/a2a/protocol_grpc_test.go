@@ -2,11 +2,15 @@ package a2a
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	a2apb "github.com/OpenLinker-ai/openlinker-core/pkg/a2a/pb"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -15,6 +19,39 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
+
+type fakeGRPCUserStatusChecker struct {
+	err    error
+	userID uuid.UUID
+}
+
+func (c *fakeGRPCUserStatusChecker) EnsureUserEnabled(_ context.Context, userID uuid.UUID) error {
+	c.userID = userID
+	return c.err
+}
+
+func TestBearerGRPCAuthenticatorRejectsDisabledJWTUser(t *testing.T) {
+	const secret = "grpc-user-status-secret-32-chars"
+	userID := uuid.New()
+	token, err := auth.GenerateToken(userID.String(), secret, time.Hour)
+	require.NoError(t, err)
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"authorization", "Bearer "+token,
+	))
+	checker := &fakeGRPCUserStatusChecker{err: httpx.Unauthorized("账号已禁用")}
+
+	_, err = NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker).AuthenticateA2AGRPC(ctx)
+	var httpErr *httpx.HTTPError
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, httpx.CodeUnauthorized, httpErr.Code)
+	require.Equal(t, userID, checker.userID)
+
+	checker.err = nil
+	info, err := NewBearerGRPCAuthenticatorWithUserStatus(secret, nil, checker).AuthenticateA2AGRPC(ctx)
+	require.NoError(t, err)
+	require.Equal(t, userID, info.UserID)
+	require.Equal(t, auth.AuthMethodJWT, info.AuthMethod)
+}
 
 type staticGRPCAuth struct {
 	info *GRPCAuthInfo
@@ -224,4 +261,34 @@ func TestGRPCServerErrorsMapToGRPCStatus(t *testing.T) {
 	_, err = srv.GetTask(context.Background(), &a2apb.GetTaskRequest{Id: uuid.NewString()})
 	require.Error(t, err)
 	require.Equal(t, codes.InvalidArgument, status.Code(err))
+}
+
+func TestGRPCServerSpecificAgentGrantCannotCrossTenant(t *testing.T) {
+	userID := uuid.New()
+	agentA := uuid.New()
+	agentB := uuid.New()
+	principal := &auth.AuthPrincipal{
+		UserID: userID, AuthMethod: auth.AuthMethodUserToken,
+		Grants: []auth.Grant{{
+			Permission: "agents:run", ResourceType: "agent", ResourceID: &agentA,
+			Constraints: json.RawMessage(`{}`),
+		}},
+	}
+	info := &GRPCAuthInfo{UserID: userID, AuthMethod: auth.AuthMethodUserToken, Principal: principal}
+	req := &a2apb.SendMessageRequest{
+		Tenant:  "agent",
+		Message: &a2apb.Message{MessageId: "m1", Role: a2apb.Role_ROLE_USER},
+	}
+
+	allowedCard := &agent.AgentCardResponse{OpenLinker: agent.AgentCardOpenLinkerExt{AgentID: agentA.String()}}
+	allowed := NewGRPCServer(newFakeA2AService(uuid.NewString()), fakeGRPCAgentCardProvider{card: allowedCard}, staticGRPCAuth{info: info})
+	if _, err := allowed.SendMessage(context.Background(), req); err != nil {
+		t.Fatalf("specific Agent grant should allow matching tenant: %v", err)
+	}
+
+	deniedCard := &agent.AgentCardResponse{OpenLinker: agent.AgentCardOpenLinkerExt{AgentID: agentB.String()}}
+	denied := NewGRPCServer(newFakeA2AService(uuid.NewString()), fakeGRPCAgentCardProvider{card: deniedCard}, staticGRPCAuth{info: info})
+	_, err := denied.SendMessage(context.Background(), req)
+	require.Error(t, err)
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }

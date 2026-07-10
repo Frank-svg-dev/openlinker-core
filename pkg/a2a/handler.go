@@ -68,7 +68,7 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
 	publicProtocol := api.Group("/a2a/agents/:slug")
 	publicProtocol.GET("/.well-known/agent-card.json", h.GetPublicAgentCardHTTP)
-	protocol := api.Group("/a2a/agents/:slug", queryMiddleware, a2aHTTPErrorMiddleware)
+	protocol := api.Group("/a2a/agents/:slug", queryMiddleware, h.resolveA2ATargetAgent, a2aHTTPErrorMiddleware)
 	protocol.POST("", h.JSONRPC)
 	protocol.GET("/extendedAgentCard", h.GetExtendedAgentCardHTTP)
 	protocol.POST("/message:action", h.MessageHTTP)
@@ -88,6 +88,20 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	protocol.GET("/tasks/*", h.TaskActionHTTP)
 	protocol.POST("/tasks/*", h.TaskActionHTTP)
 	api.GET("/runs/:id/children", h.ListChildren, queryMiddleware)
+}
+
+func (h *Handler) resolveA2ATargetAgent(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		if h.cardProvider != nil {
+			card, err := h.cardProvider.GetAgentCardBySlug(c.Request().Context(), c.Param("slug"))
+			if err == nil && card != nil {
+				if agentID, parseErr := uuid.Parse(card.OpenLinker.AgentID); parseErr == nil {
+					c.Set(a2aTargetAgentIDContextKey, agentID)
+				}
+			}
+		}
+		return next(c)
+	}
 }
 
 func (h *Handler) CreateRuntimeToken(c echo.Context) error {
