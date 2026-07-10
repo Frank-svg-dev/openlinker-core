@@ -109,12 +109,8 @@ func main() {
 	if opts.LLMClient == nil {
 		log.Info().Msg("no llm client configured; task routing uses rule-based keyword fallback")
 	}
-	if verifier := auth.NewRemoteAPIKeyVerifier(cfg.UserTokenVerifyURL, cfg.InternalToken); verifier != nil {
-		opts.APIKeyVerifier = verifier
-		log.Info().Str("endpoint", cfg.UserTokenVerifyURL).Msg("optional external user token verifier configured")
-	}
 	services := coreapi.Register(rootCtx, e, pool, cfg, opts)
-	shutdownA2AGRPC, err := coreapi.StartA2AGRPCServer(rootCtx, cfg, services, opts)
+	shutdownA2AGRPC, err := coreapi.StartA2AGRPCServer(rootCtx, cfg, services)
 	if err != nil {
 		log.Fatal().Err(err).Msg("start a2a grpc server failed")
 	}
@@ -253,9 +249,6 @@ func validateProductionConfig(cfg *config.Config) error {
 	}
 	if strings.TrimSpace(cfg.FrontendURL) == "" {
 		return fmt.Errorf("FRONTEND_URL is required in production")
-	}
-	if strings.TrimSpace(cfg.UserTokenVerifyURL) != "" && strings.TrimSpace(cfg.InternalToken) == "" {
-		return fmt.Errorf("OPENLINKER_INTERNAL_TOKEN is required in production when USER_TOKEN_VERIFY_URL is configured")
 	}
 	return nil
 }

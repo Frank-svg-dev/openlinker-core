@@ -28,6 +28,32 @@ type User struct {
 	DeletedAt       *time.Time `db:"deleted_at" json:"deleted_at"`
 }
 
+// UserToken is a Core-owned user credential. TokenHash is never serialized.
+type UserToken struct {
+	ID         uuid.UUID  `db:"id" json:"id"`
+	UserID     uuid.UUID  `db:"user_id" json:"user_id"`
+	Name       string     `db:"name" json:"name"`
+	Prefix     string     `db:"prefix" json:"prefix"`
+	TokenHash  string     `db:"token_hash" json:"-"`
+	Scopes     []string   `db:"scopes" json:"scopes"`
+	ExpiresAt  *time.Time `db:"expires_at" json:"expires_at"`
+	LastUsedAt *time.Time `db:"last_used_at" json:"last_used_at"`
+	RevokedAt  *time.Time `db:"revoked_at" json:"revoked_at"`
+	CreatedAt  time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt  time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// UserTokenCoreGrant narrows one Core permission to an optional resource.
+type UserTokenCoreGrant struct {
+	ID           uuid.UUID  `db:"id" json:"id"`
+	TokenID      uuid.UUID  `db:"token_id" json:"token_id"`
+	Permission   string     `db:"permission" json:"permission"`
+	ResourceType string     `db:"resource_type" json:"resource_type"`
+	ResourceID   *uuid.UUID `db:"resource_id" json:"resource_id"`
+	Constraints  []byte     `db:"constraints" json:"constraints"`
+	CreatedAt    time.Time  `db:"created_at" json:"created_at"`
+}
+
 // Agent 对应 agents 表（Phase 2 缺口 2 后的三维状态机模型）。
 //
 // lifecycle_status     active | disabled                              （docs/29 §三）

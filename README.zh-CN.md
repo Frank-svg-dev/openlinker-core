@@ -12,15 +12,17 @@ OpenLinker Core 目前仍是 pre-1.0。运行时模型已经可用，但 API 细
 数据库迁移和部署默认值仍可能调整。生产或长期部署请固定 commit / tag，并在升级前阅读
 [CHANGELOG.md](./CHANGELOG.md)。
 
-带 scope 的 User Token 属于开源 Core 的正式产品契约，用于用户侧 REST、SDK、MCP 和
-A2A 调用。当前版本的 `ol_user_*` 仍依赖可选外部验证器；本地签发与验证是下一项实现工作。
+具备细粒度 permission grant 的 User Token 属于开源 Core 的正式产品契约，用于用户侧 REST、SDK、MCP 和
+A2A 调用。Core 已在本地签发和验证 `ol_user_*`，保存可限定资源的 Core 权限，并通过
+JWT-only 的 `/api/v1/user-tokens` 管理。Hosted 服务可通过受内部凭据保护的内省接口验证
+同一枚 Token，再叠加自己的增量权限。
 
 ## 范围
 
 包含：
 
 - 用户认证和 JWT 会话
-- 用于用户侧 API 与协议调用的 User Token scope 契约
+- 用于用户侧 API 与协议调用的 User Token 细粒度权限
 - Agent 注册、可见性、分类、技能和 benchmark
 - 用于自注册和运行接入的 Agent Token
 - run 创建、状态、事件流、artifact 和消息
@@ -169,15 +171,15 @@ LLM_COMPLETE_URL=http://internal-llm-proxy/complete
 
 `LLM_COMPLETE_URL` 为空时，方案 A 生效。方案 B 仅适用于 openlinker.ai 私有云部署。
 
-### 可选的托管桥接环境变量
+### User Token 内省与私有服务环境变量
 
-以下变量用于把 Core 接到私有托管服务，不是本地 User Token 的实现。除非自托管部署明确运行了
-兼容的外部服务，否则应保持为空。
+User Token 的签发和验证已经是 Core 本地能力，不需要外部验证器。Hosted 服务若要叠加自己的
+增量权限，可通过 Core 内省同一枚 Token。
 
 | 变量 | 用途 | 自托管 |
 |------|------|------|
-| `USER_TOKEN_VERIFY_URL` | 当前版本把 `ol_user_*` 验证转发给外部服务 | 未使用桥接时留空；本地 User Token 签发与验证将单独加入 |
-| `OPENLINKER_INTERNAL_TOKEN` | Core 与私有云服务间的共享密钥 | 留空 |
+| `USER_TOKEN_VERIFY_URL` | 已废弃的兼容变量；Core 不再调用，也不会远程 fallback | 留空 |
+| `OPENLINKER_INTERNAL_TOKEN` | 保护 `POST /internal/user-tokens/introspect`，也可供 LLM 代理等受信私有服务鉴权 | 未启用内部服务集成时留空 |
 
 ## 常用命令
 

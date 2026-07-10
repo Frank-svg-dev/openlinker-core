@@ -169,7 +169,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 	if services.Auth == nil || services.Admin == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
 		services.Runtime == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil ||
 		services.Registry == nil || services.Benchmark == nil || services.Task == nil || services.MCP == nil ||
-		services.Delivery == nil {
+		services.Delivery == nil || services.UserToken == nil {
 		t.Fatalf("Register returned incomplete services: %#v", services)
 	}
 
@@ -183,6 +183,11 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"GET /api/v1/creator/dashboard",
 		"GET /api/v1/creator/agents/:id/runs",
 		"GET /api/v1/me",
+		"POST /api/v1/user-tokens",
+		"GET /api/v1/user-tokens/:id",
+		"PATCH /api/v1/user-tokens/:id",
+		"DELETE /api/v1/user-tokens/:id",
+		"POST /internal/user-tokens/introspect",
 		"GET /api/v1/agents",
 		"POST /api/v1/creator/agents",
 		"GET /api/v1/admin/summary",
@@ -198,6 +203,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"GET /api/v1/agent-runtime/runs/claim",
 		"GET /api/v1/agent-runtime/ws",
 		"POST /api/v1/agent-runtime/call-agent",
+		"POST /api/v1/runs/:id/cancel",
 		"POST /api/v1/a2a/agents/:slug",
 		"GET /api/v1/a2a/agents/:slug/.well-known/agent-card.json",
 		"GET /api/v1/a2a/agents/:slug/tasks/:taskID/subscribe",

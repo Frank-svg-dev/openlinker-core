@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -42,6 +43,9 @@ func (h *Handler) registerRoutes(g *echo.Group) {
 }
 
 func (h *Handler) ListRuns(c echo.Context) error {
+	if err := auth.RequirePermission(c, "runs:read", "run", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -56,6 +60,9 @@ func (h *Handler) ListRuns(c echo.Context) error {
 }
 
 func (h *Handler) ListCallRecords(c echo.Context) error {
+	if err := auth.RequirePermission(c, "runs:read", "run", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -81,6 +88,9 @@ func (h *Handler) ListCallRecords(c echo.Context) error {
 }
 
 func (h *Handler) ListCreatorAgentRuns(c echo.Context) error {
+	if err := auth.RequirePermission(c, "agents:read", "agent", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -99,6 +109,9 @@ func (h *Handler) ListCreatorAgentRuns(c echo.Context) error {
 }
 
 func (h *Handler) GetDashboard(c echo.Context) error {
+	if err := auth.RequirePermission(c, "runs:read", "run", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err
@@ -111,6 +124,9 @@ func (h *Handler) GetDashboard(c echo.Context) error {
 }
 
 func (h *Handler) GetCreatorDashboard(c echo.Context) error {
+	if err := auth.RequirePermission(c, "agents:read", "agent", nil); err != nil {
+		return err
+	}
 	uid, err := userIDFromCtx(c)
 	if err != nil {
 		return err

@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
@@ -190,7 +192,7 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		resp, err := h.svc.GetAgent(c.Request().Context(), &req)
 		return toolResult(resp, err), nil
 	case "run_agent":
-		if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+		if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
 			return toolError(err), nil
 		}
 		uid, err := userIDFromCtx(c)
@@ -203,6 +205,10 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		}
 		if err := h.validator.Struct(&req); err != nil {
 			return mcpToolResult{}, &rpcError{Code: -32602, Message: "Invalid arguments: " + err.Error()}
+		}
+		agentID, _ := uuid.Parse(req.AgentID)
+		if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
+			return toolError(err), nil
 		}
 		resp, err := h.svc.RunAgent(c.Request().Context(), uid, &req)
 		return toolResult(resp, err), nil
@@ -228,7 +234,7 @@ func (h *Handler) callTool(c echo.Context, name string, args json.RawMessage) (m
 		resp, err := h.svc.GetRun(c.Request().Context(), uid, runID)
 		return toolResult(resp, err), nil
 	case "create_task":
-		if err := requireAPIKeyScope(c, "tasks:write"); err != nil {
+		if err := requireAPIKeyScope(c, "tasks:create"); err != nil {
 			return toolError(err), nil
 		}
 		uid, err := userIDFromCtx(c)
@@ -286,7 +292,7 @@ func (h *Handler) PostGetAgent(c echo.Context) error {
 
 // PostRunAgent 同步调用。把 source 设为 'mcp'。
 func (h *Handler) PostRunAgent(c echo.Context) error {
-	if err := requireAPIKeyScope(c, "agents:run"); err != nil {
+	if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -299,6 +305,10 @@ func (h *Handler) PostRunAgent(c echo.Context) error {
 	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
+	}
+	agentID, _ := uuid.Parse(req.AgentID)
+	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
+		return err
 	}
 	resp, err := h.svc.RunAgent(c.Request().Context(), uid, &req)
 	if err != nil {
@@ -336,7 +346,7 @@ func (h *Handler) PostGetRun(c echo.Context) error {
 
 // PostCreateTask 把自然语言任务转 task.Recommend，返回 Top 3 Agent 推荐。
 func (h *Handler) PostCreateTask(c echo.Context) error {
-	if err := requireAPIKeyScope(c, "tasks:write"); err != nil {
+	if err := requireAPIKeyScope(c, "tasks:create"); err != nil {
 		return err
 	}
 	uid, err := userIDFromCtx(c)
@@ -379,28 +389,24 @@ func assertAPIKeyAuth(c echo.Context) error {
 	return nil
 }
 
-func requireAPIKeyScope(c echo.Context, scope string) error {
+func requireAPIKeyScope(c echo.Context, permission string, resourceIDs ...*uuid.UUID) error {
 	if err := assertAPIKeyAuth(c); err != nil {
 		return err
 	}
-	if !httpx.HasScope(c, scope) {
-		return &httpx.HTTPError{
-			Status:  http.StatusForbidden,
-			Code:    httpx.CodeForbidden,
-			Message: "User Token 缺少 scope: " + scope,
-			Details: map[string]interface{}{
-				"required_scopes": []string{scope},
-				"next_action": map[string]string{
-					"type":   "open_user_token_settings",
-					"label":  "查看所需的 User Token scope",
-					"hint":   "当前 Token 必须包含 " + scope + "。本地签发与 scope 管理将在下一实现切片补齐。",
-					"href":   "/settings/user-tokens",
-					"reason": "当前 User Token 权限不足，不能执行这个 MCP 工具调用。",
-				},
-			},
-		}
+	resourceType := "agent"
+	switch {
+	case strings.HasPrefix(permission, "runs:"):
+		resourceType = "run"
+	case strings.HasPrefix(permission, "tasks:"):
+		resourceType = "task"
+	case strings.HasPrefix(permission, "workflows:"):
+		resourceType = "workflow"
 	}
-	return nil
+	var resourceID *uuid.UUID
+	if len(resourceIDs) > 0 {
+		resourceID = resourceIDs[0]
+	}
+	return auth.RequirePermission(c, permission, resourceType, resourceID)
 }
 
 func userIDFromCtx(c echo.Context) (uuid.UUID, error) {

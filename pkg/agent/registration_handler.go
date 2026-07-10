@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
+	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
@@ -23,6 +24,7 @@ type registrationService interface {
 	CreateAgentToken(context.Context, uuid.UUID, *CreateAgentTokenRequest) (*AgentTokenResponse, error)
 	ListAgentTokens(context.Context, uuid.UUID, *uuid.UUID, ListAgentTokensOptions) (*AgentTokenListResponse, error)
 	RevokeAgentToken(context.Context, uuid.UUID, uuid.UUID) error
+	AgentTokenResource(context.Context, uuid.UUID, uuid.UUID) (*uuid.UUID, error)
 	RegisterAgentViaToken(context.Context, *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error)
 }
 
@@ -38,8 +40,8 @@ func NewRegistrationHandler(svc registrationService) *RegistrationHandler {
 //	POST   /api/v1/creator/agent-tokens
 //	GET    /api/v1/creator/agent-tokens
 //	DELETE /api/v1/creator/agent-tokens/:id
-func (h *RegistrationHandler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	g := api.Group("/creator/agent-tokens", jwtMiddleware)
+func (h *RegistrationHandler) RegisterProtected(api *echo.Group, authMiddleware echo.MiddlewareFunc) {
+	g := api.Group("/creator/agent-tokens", authMiddleware)
 	g.POST("", h.CreateAgentToken)
 	g.GET("", h.ListAgentTokens)
 	g.DELETE("/:id", h.RevokeAgentToken)
@@ -66,6 +68,19 @@ func (h *RegistrationHandler) CreateAgentToken(c echo.Context) error {
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
+	var agentID *uuid.UUID
+	if strings.TrimSpace(req.AgentID) != "" {
+		parsed, _ := uuid.Parse(strings.TrimSpace(req.AgentID))
+		agentID = &parsed
+	}
+	if err := auth.RequirePermission(c, "agent-tokens:issue", "agent", agentID); err != nil {
+		return err
+	}
+	if agentID == nil {
+		if err := auth.RequirePermission(c, "agents:create", "agent", nil); err != nil {
+			return err
+		}
+	}
 	resp, err := h.svc.CreateAgentToken(c.Request().Context(), uid, &req)
 	if err != nil {
 		return err
@@ -87,6 +102,9 @@ func (h *RegistrationHandler) ListAgentTokens(c echo.Context) error {
 		}
 		agentID = &parsed
 	}
+	if err := auth.RequirePermission(c, "agent-tokens:read", "agent", agentID); err != nil {
+		return err
+	}
 	opts, err := parseAgentTokenListOptions(c)
 	if err != nil {
 		return err
@@ -106,6 +124,13 @@ func (h *RegistrationHandler) RevokeAgentToken(c echo.Context) error {
 	}
 	tokenID, err := pathID(c)
 	if err != nil {
+		return err
+	}
+	agentID, err := h.svc.AgentTokenResource(c.Request().Context(), uid, tokenID)
+	if err != nil {
+		return err
+	}
+	if err := auth.RequirePermission(c, "agent-tokens:revoke", "agent", agentID); err != nil {
 		return err
 	}
 	if err := h.svc.RevokeAgentToken(c.Request().Context(), uid, tokenID); err != nil {

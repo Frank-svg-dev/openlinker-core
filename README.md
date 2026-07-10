@@ -16,17 +16,18 @@ details, SDK contracts, migrations, and operational defaults can still change.
 Pin commits or release tags for deployments, and read `CHANGELOG.md` before
 upgrading.
 
-Scoped User Tokens are part of the open-source Core product contract for
-user-initiated REST, SDK, MCP, and A2A calls. This revision still relies on the
-optional external verifier for `ol_user_*` tokens; local issuance and
-verification are the next implementation slice.
+User Tokens with fine-grained permission grants are part of the open-source Core product contract for
+user-initiated REST, SDK, MCP, and A2A calls. Core issues and verifies
+`ol_user_*` locally, stores resource-aware Core grants, and exposes JWT-only
+management under `/api/v1/user-tokens`. Hosted services can validate the same
+token through Core's authenticated internal introspection endpoint.
 
 ## Scope
 
 Included:
 
 - user authentication and JWT sessions
-- scoped User Token contract for user-side API and protocol calls
+- fine-grained User Token permissions for user-side API and protocol calls
 - Agent registry, visibility, categories, skills, and benchmarks
 - Agent Tokens for self-registration and runtime access
 - run creation, run state, event streams, artifacts, and messages
@@ -180,16 +181,16 @@ LLM_COMPLETE_URL=http://internal-llm-proxy/complete
 Option A takes effect when `LLM_COMPLETE_URL` is empty. Option B is only useful
 for the private cloud deployment of openlinker.ai.
 
-### Optional hosted-bridge environment variables
+### User Token introspection and private-service variables
 
-These variables connect Core to private hosted services. They are not the local
-User Token implementation. Self-hosted deployments should leave them empty
-unless they intentionally operate a compatible external service.
+User Token issuance and verification are local Core capabilities and require no
+external verifier. Hosted services that add their own incremental permissions
+can introspect the same token through Core.
 
 | Variable | Purpose | Self-host |
 |----------|---------|----------|
-| `USER_TOKEN_VERIFY_URL` | Delegates `ol_user_*` verification to an external service in the current revision | Leave empty unless using that bridge; local User Token issuance and verification are being added separately |
-| `OPENLINKER_INTERNAL_TOKEN` | Shared secret between Core and private cloud services (LLM proxy, token verifier) | Leave empty |
+| `USER_TOKEN_VERIFY_URL` | Deprecated compatibility variable; Core no longer calls it or falls back remotely | Leave empty |
+| `OPENLINKER_INTERNAL_TOKEN` | Protects `POST /internal/user-tokens/introspect`; it may also authenticate trusted private services such as an LLM proxy | Leave empty unless exposing an internal service integration |
 
 ## Common Commands
 

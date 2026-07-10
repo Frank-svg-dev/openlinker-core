@@ -30,12 +30,12 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/userdash"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/usertoken"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/webhook"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
 )
 
 type Options struct {
-	APIKeyVerifier  auth.ApiKeyVerifier
 	LLMClient       corellm.Client
 	AdminMiddleware echo.MiddlewareFunc
 	UserProvisioner auth.UserProvisioner
@@ -57,6 +57,8 @@ type Services struct {
 	Task        *task.Service
 	MCP         *mcp.Service
 	Delivery    *delivery.Service
+	UserToken   *usertoken.Service
+	UserStatus  auth.UserStatusChecker
 }
 
 // Register mounts all core-owned HTTP routes and starts core-owned workers.
@@ -69,16 +71,23 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	authSvc.SetUserProvisioner(opts.UserProvisioner)
 	authHandler := auth.NewHandler(authSvc, cfg)
 	userStatusQueries := db.New(pool)
+	userStatusChecker := auth.NewDBUserStatusChecker(pool)
 	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusQueries)
 	authHandler.Register(api)
 	authHandler.RegisterProtected(api, jwtMiddleware)
+	userTokenSvc := usertoken.NewService(pool)
+	usertoken.NewHandler(userTokenSvc).Register(api, jwtMiddleware)
+	usertoken.NewIntrospectionHandler(userTokenSvc, cfg.InternalToken).Register(e)
+	// ol_user_* is always verified locally. USER_TOKEN_VERIFY_URL is retained in
+	// config for one compatibility release but is not a fallback path.
+	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, userTokenSvc, userStatusQueries)
 	var adminSvc *coreadmin.Service
 	if opts.AdminMiddleware != nil {
 		adminSvc = coreadmin.NewService(pool)
 		coreadmin.NewHandler(adminSvc).Register(api, jwtMiddleware, opts.AdminMiddleware)
 	}
 	userDashHandler := userdash.NewHandler(userdash.NewService(pool))
-	userDashHandler.RegisterCoreAPI(api, jwtMiddleware)
+	userDashHandler.RegisterCoreAPI(api, hybridMw)
 
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
@@ -95,7 +104,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	registrationSvc := agent.NewRegistrationService(pool, cfg)
 	registrationHandler := agent.NewRegistrationHandler(registrationSvc)
-	registrationHandler.RegisterProtected(api, jwtMiddleware)
+	registrationHandler.RegisterProtected(api, hybridMw)
 	registrationHandler.RegisterPublic(api)
 
 	approvalSvc := agent.NewApprovalService(pool, cfg)
@@ -114,8 +123,6 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	skillHandler := skill.NewHandler(skillSvc, pool)
 	skillHandler.Register(api)
 	skillHandler.RegisterProtected(api, jwtMiddleware)
-
-	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, opts.APIKeyVerifier, userStatusQueries)
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
@@ -164,7 +171,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowHandler := workflow.NewHandler(workflowSvc)
-	workflowHandler.RegisterProtected(api, jwtMiddleware)
+	workflowHandler.RegisterProtected(api, hybridMw)
 	if cfg.WorkflowRunWorkerEnabled {
 		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
 			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
@@ -191,7 +198,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	taskSvc := task.NewService(pool, opts.LLMClient, skillAdapter{inner: skillSvc})
 	taskSvc.SetRunStarter(runtimeSvc)
 	taskHandler := task.NewHandler(taskSvc)
-	taskHandler.RegisterProtected(api, jwtMiddleware)
+	taskHandler.RegisterProtected(api, hybridMw)
 
 	mcpSvc := mcp.NewService(agentMarketSvc, runtimeSvc, taskSvc)
 	mcpHandler := mcp.NewHandler(mcpSvc)
@@ -218,6 +225,8 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		Task:        taskSvc,
 		MCP:         mcpSvc,
 		Delivery:    deliverySvc,
+		UserToken:   userTokenSvc,
+		UserStatus:  userStatusChecker,
 	}
 }
 

@@ -45,7 +45,11 @@ func JWTMiddlewareWithUserStatus(secret string, users userStatusQuerier) echo.Mi
 			if err := ensureTokenUserEnabled(c.Request().Context(), users, userID); err != nil {
 				return err
 			}
-			c.Set(string(httpx.CtxKeyUserID), userID)
+			uid, err := uuid.Parse(userID)
+			if err != nil {
+				return httpx.Unauthorized("token 无效")
+			}
+			SetPrincipal(c, &AuthPrincipal{UserID: uid, AuthMethod: AuthMethodJWT, Grants: []Grant{}})
 			return next(c)
 		}
 	}

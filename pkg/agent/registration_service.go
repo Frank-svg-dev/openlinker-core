@@ -216,6 +216,22 @@ func (s *RegistrationService) RevokeAgentToken(ctx context.Context, creatorID, t
 	return nil
 }
 
+// AgentTokenResource returns the owned Agent bound to a token. Pending
+// registration tokens intentionally return nil and therefore require a
+// wildcard agent-tokens grant.
+func (s *RegistrationService) AgentTokenResource(ctx context.Context, creatorID, tokenID uuid.UUID) (*uuid.UUID, error) {
+	token, err := s.queries.GetAgentTokenByIDForCreator(ctx, db.GetAgentTokenByIDForCreatorParams{
+		ID: tokenID, CreatorUserID: creatorID,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, httpx.NotFound("Agent Token 不存在")
+	}
+	if err != nil {
+		return nil, httpx.Internal("查询 Agent Token 失败")
+	}
+	return token.AgentID, nil
+}
+
 // RegisterAgentViaToken 用 pending Agent Token 完成 Agent 注册。
 func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *RegisterAgentViaTokenRequest) (*RegisterAgentViaTokenResponse, error) {
 	matched, err := s.verifyPendingAgentToken(ctx, req.AgentToken)
