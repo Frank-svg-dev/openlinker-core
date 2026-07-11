@@ -15,7 +15,6 @@ import (
 	"net/url"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -39,15 +38,8 @@ const maxAgentResponseEvents = 50
 const maxAgentResponseBodyBytes = 4 << 20
 const taskCallbackSecretByteLen = 32
 const maxRunMessageContentLen = 10000
-const runtimePullClaimTTL = 5 * time.Minute
-const runtimePullEmptyClaimRetryAfter = 5 * time.Second
-const runtimePullHeartbeatInterval = 60 * time.Second
-const runtimePullMaxLongPollWait = 30 * time.Second
-const runtimePullLongPollTick = 5 * time.Second
-const runtimePullResponseContextTimeout = 2 * time.Second
 const runtimeBestEffortWriteTimeout = 10 * time.Second
 const runtimeBestEffortWriteConcurrency = 32
-const runtimeTokenTouchMinInterval = 30 * time.Second
 const maxA2AContextIDLen = 200
 const maxConversationHistoryRuns int32 = 50
 const maxConversationHistoryMessages = 120
@@ -107,30 +99,26 @@ type Service struct {
 	webhookSvc      WebhookEnqueuer
 	taskCallbackSvc TaskCallbackEnqueuer
 	deliverySvc     DeliveryEnqueuer
-	wsHub           *runtimeWSHub
-	pullNotifier    *runtimePullNotifier
 	eventStore      *EventStore
 	resultFinalizer *ResultFinalizer
 	cancellationV2  *RuntimeCancellationCoordinator
 	effectWorker    *RunEffectWorker
 	bestEffortDBSem chan struct{}
-	tokenTouchMu    sync.Mutex
-	tokenTouchAt    map[uuid.UUID]time.Time
 }
 
 type runInvocation struct {
-	runID                uuid.UUID
-	userID               uuid.UUID
-	agent                db.Agent
-	req                  *RunRequest
-	taskCallback         *RunTaskCallbackResponse
-	delegation           *Delegation
-	runtimePullAvailable bool
+	runID            uuid.UUID
+	userID           uuid.UUID
+	agent            db.Agent
+	req              *RunRequest
+	taskCallback     *RunTaskCallbackResponse
+	delegation       *Delegation
+	runtimeAvailable bool
 }
 
 type createRunOptions struct {
-	delegation                   *Delegation
-	allowOfflineRuntimePullQueue bool
+	delegation                *Delegation
+	allowOfflineQueuedRuntime bool
 	// beforeCreate runs inside the same transaction, immediately before the
 	// child Run is inserted. Runtime-scoped delegation uses it to revalidate
 	// the accepted parent Attempt under durable locks; a successful return is
@@ -152,24 +140,6 @@ type Delegation struct {
 	ParentRunID   uuid.UUID
 	CallerAgentID uuid.UUID
 	Reason        string
-}
-
-// RuntimePullClaimOptions lets newer workers avoid tight empty polling while
-// keeping the existing GET /claim behavior compatible for older workers.
-type RuntimePullClaimOptions struct {
-	Wait time.Duration
-}
-
-// RuntimePullRunTimeoutConfig controls how long runtime_pull runs may stay
-// pending or claimed before the platform converts them to a terminal timeout.
-type RuntimePullRunTimeoutConfig struct {
-	DispatchTimeout time.Duration
-	ResultTimeout   time.Duration
-	BatchSize       int32
-}
-
-type runtimeHeartbeatOptions struct {
-	asyncTokenTouch bool
 }
 
 const legacyRuntimeContractID = "legacy.pre-v2"
@@ -228,15 +198,12 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		requirements: queries,
 		pool:         pool,
 		cfg:          cfg,
-		wsHub:        newRuntimeWSHub(),
-		pullNotifier: newRuntimePullNotifier(),
 		eventStore:   NewEventStore(pool),
 		bestEffortDBSem: make(
 			chan struct{},
 			runtimeBestEffortWriteConcurrency,
 		),
-		tokenTouchAt: map[uuid.UUID]time.Time{},
-		httpClient:   endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
+		httpClient: endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
 	svc.cancellationV2 = NewRuntimeCancellationCoordinator(pool)
@@ -759,13 +726,11 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 	if invocation == nil {
 		return resp, nil
 	}
-	if s.isRuntimePull(invocation) {
+	if s.isQueuedRuntime(invocation) {
 		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 			"connection_mode": invocation.agent.ConnectionMode,
 			"agent_id":        invocation.agent.ID.String(),
 		})
-		s.notifyRuntimePullRun(invocation.agent.ID)
-		s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		return resp, nil
 	}
 	return s.executeRun(ctx, invocation), nil
@@ -774,7 +739,7 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 // StartRun 创建 running run 并在后台执行；调用方可用 GetRun/ListRunEvents/SSE 查询进度。
 func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
 	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, createRunOptions{
-		allowOfflineRuntimePullQueue: true,
+		allowOfflineQueuedRuntime: true,
 	})
 	if err != nil {
 		return nil, err
@@ -782,16 +747,14 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	if invocation == nil {
 		return resp, nil
 	}
-	if s.isRuntimePull(invocation) {
-		if invocation.runtimePullAvailable {
+	if s.isQueuedRuntime(invocation) {
+		if invocation.runtimeAvailable {
 			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 				"connection_mode": invocation.agent.ConnectionMode,
 				"agent_id":        invocation.agent.ID.String(),
 			})
-			s.notifyRuntimePullRun(invocation.agent.ID)
-			s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		} else {
-			resp.NextAction = runtimePullWaitingNextAction(resp.RunID, invocation.agent.ID)
+			resp.NextAction = queuedRuntimeWaitingNextAction(resp.RunID, invocation.agent.ID)
 			s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.waiting_runtime", map[string]interface{}{
 				"connection_mode":    invocation.agent.ConnectionMode,
 				"agent_id":           invocation.agent.ID.String(),
@@ -799,7 +762,6 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 				"recommended_action": "start_worker",
 				"next_action":        resp.NextAction,
 			})
-			s.notifyRuntimePullRun(invocation.agent.ID)
 		}
 		return resp, nil
 	}
@@ -807,32 +769,7 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	return resp, nil
 }
 
-// RunDelegated lets an authenticated Agent call another Agent through the platform.
-// Delegated runs do not create a separate cost record until an explicit,
-// user-approved settlement contract exists.
-func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation Delegation, req *RunRequest) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, "api", createRunOptions{
-		delegation: &delegation,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if invocation == nil {
-		return resp, nil
-	}
-	if s.isRuntimePull(invocation) {
-		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
-			"connection_mode": invocation.agent.ConnectionMode,
-			"agent_id":        invocation.agent.ID.String(),
-		})
-		s.notifyRuntimePullRun(invocation.agent.ID)
-		s.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
-		return resp, nil
-	}
-	return s.executeRun(ctx, invocation), nil
-}
-
-func (s *Service) isRuntimePull(invocation *runInvocation) bool {
+func (s *Service) isQueuedRuntime(invocation *runInvocation) bool {
 	return invocation != nil && isQueuedRuntimeMode(invocation.agent.ConnectionMode)
 }
 
@@ -900,7 +837,7 @@ func (s *Service) createRunningRun(
 	if agent.ConnectionMode == "" {
 		agent.ConnectionMode = connectionModeDirectHTTP
 	}
-	runtimePullAvailable := true
+	runtimeAvailable := true
 	if !isQueuedRuntimeMode(agent.ConnectionMode) {
 		allowLocalHTTP := s.cfg != nil && s.cfg.AllowLocalHTTPEndpoints
 		if err := endpointurl.Validate(agent.EndpointURL, allowLocalHTTP); err != nil {
@@ -913,10 +850,10 @@ func (s *Service) createRunningRun(
 			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasRecentRuntimePullToken")
 			return nil, nil, httpx.Internal("检查 Agent runtime 状态失败")
 		}
-		if !available && !opts.allowOfflineRuntimePullQueue {
+		if !available && !opts.allowOfflineQueuedRuntime {
 			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
 		}
-		runtimePullAvailable = available
+		runtimeAvailable = available
 	}
 	if agent.ConnectionMode == connectionModeMCPServer && (agent.MCPToolName == nil || strings.TrimSpace(*agent.MCPToolName) == "") {
 		log.Warn().Str("agent_id", agent.ID.String()).Msg("runtime.Run: missing mcp tool")
@@ -1143,13 +1080,13 @@ func (s *Service) createRunningRun(
 	}
 
 	invocation := &runInvocation{
-		runID:                runID,
-		userID:               userID,
-		agent:                agent,
-		req:                  req,
-		taskCallback:         taskCallbackResp,
-		delegation:           opts.delegation,
-		runtimePullAvailable: runtimePullAvailable,
+		runID:            runID,
+		userID:           userID,
+		agent:            agent,
+		req:              req,
+		taskCallback:     taskCallbackResp,
+		delegation:       opts.delegation,
+		runtimeAvailable: runtimeAvailable,
 	}
 	resp := &RunResponse{
 		RunID:        runID.String(),
@@ -1471,9 +1408,9 @@ func (s *Service) callAgent(
 	case connectionModeMCPServer:
 		return s.callMCPServer(ctx, agent, runID, userID, req, delegation)
 	case connectionModeRuntimePull:
-		return nil, nil, nil, errors.New("runtime_pull run must be claimed by agent runtime")
+		return nil, nil, nil, errors.New("runtime_pull run must be assigned through runtime v2")
 	case connectionModeRuntimeWS:
-		return nil, nil, nil, errors.New("runtime_ws run must be assigned over agent runtime websocket or claimed by fallback long-poll")
+		return nil, nil, nil, errors.New("runtime_ws run must be assigned through runtime v2")
 	default:
 		return nil, nil, &AgentError{Code: "UNSUPPORTED_CONNECTION_MODE", Message: "Agent connection_mode 不支持"}, nil
 	}
@@ -1851,312 +1788,6 @@ func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token str
 	return &resp, nil
 }
 
-// ClaimRuntimePullRun lets a private / IPv4 Agent actively pull the next pending run.
-// runtime_ws Agents may use this as the fallback path after WebSocket loss.
-func (s *Service) ClaimRuntimePullRun(ctx context.Context, plaintextToken string, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
-	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
-	if err != nil {
-		return nil, err
-	}
-	return s.ClaimRuntimePullRunForToken(ctx, token, opts...)
-}
-
-// ClaimRuntimePullRunForToken claims a queued runtime run after the handler or
-// WebSocket layer has already verified the runtime token and scope.
-func (s *Service) ClaimRuntimePullRunForToken(ctx context.Context, token db.AgentRuntimeToken, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
-	connectionMode := strings.TrimSpace(token.ConnectionMode)
-	if connectionMode == "" {
-		agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("Agent 不存在")
-		}
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
-			return nil, httpx.Internal("查询 Agent 失败")
-		}
-		connectionMode = agent.ConnectionMode
-	}
-	if !isQueuedRuntimeMode(connectionMode) {
-		return nil, httpx.Conflict("Agent 不是队列型 runtime 接入模式")
-	}
-	claimOpts := normalizeRuntimePullClaimOptions(opts...)
-	notifyC := (<-chan struct{})(nil)
-	if claimOpts.Wait > 0 && s.pullNotifier != nil {
-		var unsubscribe func()
-		notifyC, unsubscribe = s.pullNotifier.subscribe(token.AgentID)
-		defer unsubscribe()
-	}
-	startedWaiting := time.Now()
-	for {
-		resp, err := s.claimRuntimePullRunOnce(ctx, token, connectionMode)
-		if err != nil || resp != nil || claimOpts.Wait <= 0 || time.Since(startedWaiting) >= claimOpts.Wait {
-			return resp, err
-		}
-		sleepFor := runtimePullLongPollTick
-		if remaining := claimOpts.Wait - time.Since(startedWaiting); remaining < sleepFor {
-			sleepFor = remaining
-		}
-		if sleepFor <= 0 {
-			return nil, nil
-		}
-		timer := time.NewTimer(sleepFor)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-notifyC:
-			timer.Stop()
-		case <-timer.C:
-		}
-	}
-}
-
-func normalizeRuntimePullClaimOptions(opts ...RuntimePullClaimOptions) RuntimePullClaimOptions {
-	if len(opts) == 0 {
-		return RuntimePullClaimOptions{}
-	}
-	normalized := opts[0]
-	if normalized.Wait < 0 {
-		normalized.Wait = 0
-	}
-	if normalized.Wait > runtimePullMaxLongPollWait {
-		normalized.Wait = runtimePullMaxLongPollWait
-	}
-	return normalized
-}
-
-func (s *Service) claimRuntimePullRunOnce(ctx context.Context, token db.AgentRuntimeToken, connectionMode string) (*RuntimePullRunResponse, error) {
-	run, err := s.queries.GetClaimedRuntimePullRunByToken(ctx, db.GetClaimedRuntimePullRunByTokenParams{
-		AgentID:        token.AgentID,
-		RuntimeTokenID: token.ID,
-	})
-	if err == nil {
-		s.touchRuntimeTokenAsync(ctx, token.ID)
-		return s.runtimePullRunResponse(ctx, token, run)
-	}
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.GetClaimedRuntimePullRunByToken")
-		return nil, httpx.Internal("领取任务失败")
-	}
-
-	run, err = s.queries.ClaimRuntimePullRun(ctx, db.ClaimRuntimePullRunParams{
-		AgentID:        token.AgentID,
-		RuntimeTokenID: token.ID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		run, err = s.queries.ClaimStaleRuntimePullRun(ctx, db.ClaimStaleRuntimePullRunParams{
-			AgentID:        token.AgentID,
-			RuntimeTokenID: token.ID,
-			ClaimedBefore:  time.Now().Add(-runtimePullClaimTTL),
-		})
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
-		}
-		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.ClaimRuntimePullRun")
-		return nil, httpx.Internal("领取任务失败")
-	}
-	s.touchRuntimeTokenAsync(ctx, token.ID)
-	claimedPayload := map[string]interface{}{
-		"agent_id":         token.AgentID.String(),
-		"runtime_token_id": token.ID.String(),
-	}
-	if strings.TrimSpace(connectionMode) != "" {
-		claimedPayload["connection_mode"] = strings.TrimSpace(connectionMode)
-	}
-	s.recordRunEventBestEffort(ctx, run.ID, "run.dispatch.claimed", claimedPayload)
-	return s.runtimePullRunResponse(ctx, token, run)
-}
-
-func (s *Service) runtimePullRunResponse(ctx context.Context, token db.AgentRuntimeToken, run db.Run) (*RuntimePullRunResponse, error) {
-	input := map[string]interface{}{}
-	if len(run.Input) > 0 {
-		_ = json.Unmarshal(run.Input, &input)
-	}
-	decorateCtx, cancel := context.WithTimeout(ctx, runtimePullResponseContextTimeout)
-	defer cancel()
-	return &RuntimePullRunResponse{
-		RunID:          run.ID.String(),
-		AgentID:        run.AgentID.String(),
-		Input:          input,
-		ResultEndpoint: "/api/v1/agent-runtime/runs/" + run.ID.String() + "/result",
-		ResultMethod:   "POST",
-		ResultRequired: true,
-		Metadata: map[string]interface{}{
-			"claim_ttl_seconds":                    int(runtimePullClaimTTL.Seconds()),
-			"recommended_next_claim_after_seconds": 0,
-			"recommended_heartbeat_after_seconds":  int(runtimePullHeartbeatInterval.Seconds()),
-			"max_long_poll_wait_seconds":           int(runtimePullMaxLongPollWait.Seconds()),
-			"empty_claim_retry_after_seconds":      int(runtimePullEmptyClaimRetryAfter.Seconds()),
-			"result_required":                      true,
-			"result_status_values":                 []string{"success", "failed", "timeout"},
-			"result_timeout_seconds":               int(defaultRuntimePullResultTimeout.Seconds()),
-		},
-		Source:       run.Source,
-		A2A:          s.agentA2AContextForRun(decorateCtx, run.ID),
-		Conversation: s.conversationContextForRun(decorateCtx, run.ID),
-	}, nil
-}
-
-// CompleteRuntimePullRun accepts the result of a run previously claimed by the same access token.
-func (s *Service) CompleteRuntimePullRun(ctx context.Context, plaintextToken string, runID uuid.UUID, req *RuntimePullResultRequest) (*RunResponse, error) {
-	token, err := s.verifyRuntimeToken(ctx, plaintextToken, "agent:pull")
-	if err != nil {
-		return nil, err
-	}
-	return s.completeRuntimePullRunForToken(ctx, token, nil, runID, req)
-}
-
-func (s *Service) completeRuntimePullRunForToken(ctx context.Context, token db.AgentRuntimeToken, agent *db.Agent, runID uuid.UUID, req *RuntimePullResultRequest) (*RunResponse, error) {
-	if req == nil {
-		return nil, httpx.BadRequest("请求体不能为空")
-	}
-	state, err := s.queries.GetRuntimePullRunState(ctx, runID)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && state.AgentID != token.AgentID) {
-		return nil, httpx.NotFound("调用记录不存在")
-	}
-	if err != nil {
-		return nil, httpx.Internal("查询调用记录失败")
-	}
-	if state.Status != "running" {
-		return nil, httpx.Conflict("run 已结束，不能重复回传")
-	}
-	if state.ClaimedByRuntimeTokenID == nil || *state.ClaimedByRuntimeTokenID != token.ID {
-		return nil, httpx.Conflict("run 未被当前访问令牌领取")
-	}
-	if agent == nil {
-		agentRow, err := s.queries.GetAgentByID(ctx, token.AgentID)
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("Agent 不存在")
-		}
-		if err != nil {
-			return nil, httpx.Internal("查询 Agent 失败")
-		}
-		agent = &agentRow
-	}
-	if agent.ID != token.AgentID {
-		return nil, httpx.NotFound("Agent 不存在")
-	}
-	if !isQueuedRuntimeMode(agent.ConnectionMode) {
-		return nil, httpx.Conflict("Agent 不是队列型 runtime 接入模式")
-	}
-
-	duration := req.DurationMs
-	if duration <= 0 {
-		duration = clampDurationMillisToInt32(time.Since(state.StartedAt))
-	}
-	var resp *RunResponse
-	var successOutput map[string]interface{}
-	success := false
-	switch req.Status {
-	case "success":
-		output := req.Output
-		if output == nil {
-			output = map[string]interface{}{}
-		}
-		resp = s.handleSuccess(ctx, runID, token.AgentID, output, req.Events, duration, false)
-		successOutput = output
-		success = true
-	case "failed":
-		agentErr := req.Error
-		if agentErr == nil {
-			agentErr = &AgentError{Code: "AGENT_REPORTED_FAILURE", Message: "Agent runtime reported failed"}
-		}
-		resp = s.handleFailure(ctx, runID, token.AgentID, duration, nil, agentErr, false)
-	case "timeout":
-		message := "Agent runtime reported timeout"
-		if req.Error != nil && strings.TrimSpace(req.Error.Message) != "" {
-			message = req.Error.Message
-		}
-		agentErr := &AgentError{Code: "TIMEOUT", Message: message}
-		resp = s.handleFailure(ctx, runID, token.AgentID, duration, nil, agentErr, false)
-	default:
-		return nil, httpx.BadRequest("status 取值非法")
-	}
-	s.touchRuntimeTokenAsync(ctx, token.ID)
-	postCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	s.decorateDelegationCompletion(postCtx, runID, token.AgentID, resp)
-	s.attachRunRequirementEvidence(postCtx, runID, resp)
-	s.triggerRuntimePullCompletionDelivery(runID, token.AgentID, successOutput, success)
-	return resp, nil
-}
-
-// TimeoutStaleRuntimePullRuns converts abandoned queued runtime runs into timeout
-// terminal states so users and upstream callers never wait forever.
-func (s *Service) TimeoutStaleRuntimePullRuns(ctx context.Context, cfg RuntimePullRunTimeoutConfig) (int32, error) {
-	cfg = normalizeRuntimePullRunTimeoutConfig(cfg)
-	now := time.Now()
-	var staleRuns []db.ListStaleRuntimePullRunsRow
-
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		rows, err := q.ListStaleRuntimePullRuns(ctx, db.ListStaleRuntimePullRunsParams{
-			DispatchStaleBefore: now.Add(-cfg.DispatchTimeout),
-			ResultStaleBefore:   now.Add(-cfg.ResultTimeout),
-			Limit:               cfg.BatchSize,
-		})
-		if err != nil {
-			return err
-		}
-		staleRuns = rows
-		for _, run := range rows {
-			code := run.ErrorCode
-			message := run.ErrorMessage
-			duration := clampDurationMillisToInt32(now.Sub(run.StartedAt))
-			if err := q.MarkRunFailed(ctx, db.MarkRunFailedParams{
-				ID:           run.ID,
-				Status:       "timeout",
-				ErrorCode:    &code,
-				ErrorMessage: &message,
-				DurationMs:   duration,
-			}); err != nil {
-				return err
-			}
-			if _, err := q.MarkAgentAvailabilityFailure(ctx, run.AgentID); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("runtime.TimeoutStaleRuntimePullRuns")
-		return 0, err
-	}
-
-	for _, run := range staleRuns {
-		duration := clampDurationMillisToInt32(now.Sub(run.StartedAt))
-		s.recordRunEventBestEffort(ctx, run.ID, "run.failed", map[string]interface{}{
-			"status":        "timeout",
-			"error_code":    run.ErrorCode,
-			"error_message": run.ErrorMessage,
-			"duration_ms":   duration,
-		})
-		resp := &RunResponse{
-			RunID:      run.ID.String(),
-			Status:     "timeout",
-			ErrorCode:  run.ErrorCode,
-			ErrorMsg:   run.ErrorMessage,
-			DurationMs: duration,
-		}
-		s.decorateDelegationCompletion(ctx, run.ID, run.AgentID, resp)
-		if s.shouldTriggerExternalDelivery(ctx, run.ID) {
-			s.triggerWebhookByRun(run.ID)
-			s.triggerDelivery(run.ID)
-		}
-	}
-	return clampLenToInt32(len(staleRuns)), nil
-}
-
 // TimeoutStaleEndpointRuns converts abandoned direct_http / mcp_server runs
 // into timeout terminal states. Normal endpoint calls are completed by the
 // in-process goroutine; this worker is only a crash / restart / DB outage
@@ -2225,22 +1856,6 @@ func (s *Service) TimeoutStaleEndpointRuns(ctx context.Context, cfg EndpointRunT
 	return clampLenToInt32(len(staleRuns)), nil
 }
 
-func normalizeRuntimePullRunTimeoutConfig(cfg RuntimePullRunTimeoutConfig) RuntimePullRunTimeoutConfig {
-	if cfg.DispatchTimeout <= 0 {
-		cfg.DispatchTimeout = 2 * time.Minute
-	}
-	if cfg.ResultTimeout <= 0 {
-		cfg.ResultTimeout = 15 * time.Minute
-	}
-	if cfg.ResultTimeout < runtimePullClaimTTL {
-		cfg.ResultTimeout = runtimePullClaimTTL
-	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = 50
-	}
-	return cfg
-}
-
 func normalizeEndpointRunTimeoutConfig(cfg EndpointRunTimeoutConfig) EndpointRunTimeoutConfig {
 	if cfg.StaleAfter <= 0 {
 		cfg.StaleAfter = defaultEndpointRunTimeout
@@ -2249,76 +1864,6 @@ func normalizeEndpointRunTimeoutConfig(cfg EndpointRunTimeoutConfig) EndpointRun
 		cfg.BatchSize = defaultEndpointRunBatchSize
 	}
 	return cfg
-}
-
-// HeartbeatAgent lets an Agent proactively mark its bound access-token owner alive.
-func (s *Service) HeartbeatAgent(ctx context.Context, plaintextToken string) (*AgentHeartbeatResponse, error) {
-	token, err := s.verifyRuntimeTokenAny(ctx, plaintextToken, "agent:pull", "agent:call")
-	if err != nil {
-		return nil, err
-	}
-	return s.HeartbeatAgentForToken(ctx, token)
-}
-
-// HeartbeatAgentForToken records runtime heartbeat after token validation has
-// already happened at the endpoint boundary.
-func (s *Service) HeartbeatAgentForToken(ctx context.Context, token db.AgentRuntimeToken) (*AgentHeartbeatResponse, error) {
-	agent, err := s.queries.GetAgentByID(ctx, token.AgentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("Agent 不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: GetAgentByID")
-		return nil, httpx.Internal("查询 Agent 失败")
-	}
-	if agent.LifecycleStatus != "active" {
-		return nil, httpx.Forbidden("Agent 未启用")
-	}
-	return s.heartbeatRuntimeAgentForToken(ctx, token, &agent)
-}
-
-func (s *Service) heartbeatRuntimeAgentForToken(ctx context.Context, token db.AgentRuntimeToken, agent *db.Agent) (*AgentHeartbeatResponse, error) {
-	return s.heartbeatRuntimeAgentForTokenWithOptions(ctx, token, agent, runtimeHeartbeatOptions{})
-}
-
-func (s *Service) heartbeatRuntimeAgentForTokenWithOptions(ctx context.Context, token db.AgentRuntimeToken, agent *db.Agent, opts runtimeHeartbeatOptions) (*AgentHeartbeatResponse, error) {
-	if agent == nil {
-		return nil, httpx.NotFound("Agent 不存在")
-	}
-	if agent.LifecycleStatus != "active" {
-		return nil, httpx.Forbidden("Agent 未启用")
-	}
-	snapshot, err := s.queries.MarkAgentAvailabilityHeartbeat(ctx, token.AgentID)
-	if err != nil {
-		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: MarkAgentAvailabilityHeartbeat")
-		return nil, httpx.Internal("记录 Agent heartbeat 失败")
-	}
-	pendingRunCount, err := s.queries.CountClaimableRuntimePullRuns(ctx, token.AgentID)
-	if err != nil {
-		log.Error().Err(err).Str("agent_id", token.AgentID.String()).Msg("runtime.HeartbeatAgent: CountClaimableRuntimePullRuns")
-		return nil, httpx.Internal("查询待领取任务失败")
-	}
-	nextClaimAfterSeconds := int32(runtimePullEmptyClaimRetryAfter.Seconds())
-	claimNow := pendingRunCount > 0
-	if claimNow {
-		nextClaimAfterSeconds = 0
-	}
-	if opts.asyncTokenTouch {
-		s.touchRuntimeTokenAsync(ctx, token.ID)
-	} else {
-		_ = s.queries.TouchAgentRuntimeToken(ctx, token.ID)
-	}
-	return &AgentHeartbeatResponse{
-		AgentID:                          snapshot.AgentID.String(),
-		AvailabilityStatus:               snapshot.AvailabilityStatus,
-		LastCheckedAt:                    snapshot.LastCheckedAt,
-		ConsecutiveFailures:              snapshot.ConsecutiveFailures,
-		PendingRunCount:                  pendingRunCount,
-		ClaimNow:                         claimNow,
-		NextClaimAfterSeconds:            nextClaimAfterSeconds,
-		RecommendedHeartbeatAfterSeconds: int32(runtimePullHeartbeatInterval.Seconds()),
-		MaxClaimWaitSeconds:              int32(runtimePullMaxLongPollWait.Seconds()),
-	}, nil
 }
 
 func (s *Service) decorateDelegationCompletion(ctx context.Context, runID, targetAgentID uuid.UUID, resp *RunResponse) {
@@ -3597,22 +3142,6 @@ func (s *Service) shouldTriggerExternalDelivery(ctx context.Context, runID uuid.
 	return true
 }
 
-func (s *Service) triggerRuntimePullCompletionDelivery(runID, agentID uuid.UUID, output map[string]interface{}, success bool) {
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		if !s.shouldTriggerExternalDelivery(bgCtx, runID) {
-			return
-		}
-		if success {
-			s.triggerWebhook(runID, agentID, output)
-		} else {
-			s.triggerWebhookByRun(runID)
-		}
-		s.triggerDelivery(runID)
-	}()
-}
-
 // runToResponse 把 db.Run 转成 RunResponse（GetRun 用）。
 //
 // 失败的 run 也展示原始 cost_cents=0 还是 cost_cents=原值由产品决定；
@@ -3726,7 +3255,7 @@ func decorateNextAction(resp *RunResponse) {
 	}
 }
 
-func runtimePullWaitingNextAction(runID string, agentID uuid.UUID) *RunNextAction {
+func queuedRuntimeWaitingNextAction(runID string, agentID uuid.UUID) *RunNextAction {
 	return &RunNextAction{
 		Type:          "start_runtime_worker",
 		Label:         "启动 Agent runtime",
@@ -3774,7 +3303,7 @@ func nextActionForFailure(status, code, message string) *RunNextAction {
 	hint := "运行失败。请检查输入、Agent endpoint 或认证配置，然后重新运行。"
 	if status == "timeout" {
 		label = "检查超时并重试"
-		hint = "Agent 没有在超时时间内返回。请确认 endpoint 响应时间、网络连通性，或改用 runtime_ws/runtime_pull。"
+		hint = "Agent 没有在超时时间内返回。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的 runtime v2 队列执行。"
 	}
 	props := map[string]interface{}{}
 	if code != "" {
@@ -3960,33 +3489,6 @@ func (s *Service) runUsesLegacyTerminalPipeline(ctx context.Context, runID uuid.
 		return false
 	}
 	return contractID == legacyRuntimeContractID
-}
-
-func (s *Service) touchRuntimeTokenAsync(ctx context.Context, tokenID uuid.UUID) {
-	if !s.shouldTouchRuntimeToken(tokenID, time.Now()) {
-		return
-	}
-	s.runBestEffortDBAsync(ctx, runtimeBestEffortWriteTimeout, func(touchCtx context.Context) {
-		if err := s.queries.TouchAgentRuntimeToken(touchCtx, tokenID); err != nil {
-			log.Error().Err(err).Str("token_id", tokenID.String()).Msg("runtime.touchRuntimeTokenAsync")
-		}
-	})
-}
-
-func (s *Service) shouldTouchRuntimeToken(tokenID uuid.UUID, now time.Time) bool {
-	if s == nil || tokenID == uuid.Nil {
-		return false
-	}
-	s.tokenTouchMu.Lock()
-	defer s.tokenTouchMu.Unlock()
-	if s.tokenTouchAt == nil {
-		s.tokenTouchAt = map[uuid.UUID]time.Time{}
-	}
-	if last, ok := s.tokenTouchAt[tokenID]; ok && now.Sub(last) < runtimeTokenTouchMinInterval {
-		return false
-	}
-	s.tokenTouchAt[tokenID] = now
-	return true
 }
 
 func (s *Service) recordRunSuccessStatsBestEffort(ctx context.Context, runID, agentID uuid.UUID, revenue int32) {

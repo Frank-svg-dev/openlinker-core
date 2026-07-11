@@ -2,8 +2,6 @@ package runtime
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,11 +25,10 @@ const ssePollInterval = time.Second
 
 // Handler 调用执行 HTTP 入口。
 type Handler struct {
-	svc            runtimeService
-	validator      *validator.Validate
-	cfg            *config.Config
-	runtimeLimiter EndpointLimiter
-	runtimeV2      *RuntimeV2HTTPController
+	svc       runtimeService
+	validator *validator.Validate
+	cfg       *config.Config
+	runtimeV2 *RuntimeV2HTTPController
 }
 
 type runtimeService interface {
@@ -43,22 +40,15 @@ type runtimeService interface {
 	ListRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]RunArtifactResponse, error)
 	ListRunMessages(context.Context, uuid.UUID, uuid.UUID) ([]RunMessageResponse, error)
 	ReportRunEvent(context.Context, uuid.UUID, string, *ReportRunEventRequest) (*RunEventResponse, error)
-	ClaimRuntimePullRun(context.Context, string, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
-	ClaimRuntimePullRunForToken(context.Context, db.AgentRuntimeToken, ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error)
 	ValidateRuntimeToken(context.Context, string, ...string) (db.AgentRuntimeToken, error)
-	HeartbeatAgent(context.Context, string) (*AgentHeartbeatResponse, error)
-	HeartbeatAgentForToken(context.Context, db.AgentRuntimeToken) (*AgentHeartbeatResponse, error)
-	CompleteRuntimePullRun(context.Context, string, uuid.UUID, *RuntimePullResultRequest) (*RunResponse, error)
-	ServeRuntimeWebSocket(http.ResponseWriter, *http.Request, string) error
 }
 
 // NewHandler 构造 Handler。cfg 可选（测试可省略）。
 func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	h := &Handler{
-		svc:            svc,
-		validator:      validator.New(validator.WithRequiredStructEnabled()),
-		runtimeLimiter: newRuntimeEndpointLimiter(),
-		runtimeV2:      newRuntimeV2HTTPControllerForService(svc),
+		svc:       svc,
+		validator: validator.New(validator.WithRequiredStructEnabled()),
+		runtimeV2: newRuntimeV2HTTPControllerForService(svc),
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]
@@ -66,11 +56,10 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	return h
 }
 
-func (h *Handler) SetEndpointLimiter(limiter EndpointLimiter) {
-	if limiter != nil {
-		h.runtimeLimiter = limiter
-	}
-}
+// SetEndpointLimiter is retained until coreapi drops the pre-v2 wiring. Runtime
+// v2 is authenticated by mTLS and scoped capabilities, so no endpoint limiter
+// participates in its transport.
+func (h *Handler) SetEndpointLimiter(EndpointLimiter) {}
 
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
 //
@@ -126,12 +115,15 @@ func (h *Handler) CancelRun(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-// RegisterAgentRuntime mounts Agent-bound access-token endpoints used by runtime_pull Agents.
+// RegisterAgentRuntime mounts runtime v2 plus explicit tombstones for every
+// pre-v2 transport. Tombstones intentionally run without authentication or
+// request decoding so old clients cannot mutate current runtime state.
 //
-//	POST /agent-runtime/heartbeat        Agent 主动上报存活
-//	GET  /agent-runtime/runs/claim       Agent 拉取一个 pending run
-//	POST /agent-runtime/runs/:id/result  Agent 回传终态结果
-//	GET  /agent-runtime/ws               Agent 出站 WebSocket，平台实时下发 run
+//	POST /agent-runtime/heartbeat        retired v1 heartbeat
+//	GET  /agent-runtime/runs/claim       retired v1 long-poll claim
+//	POST /agent-runtime/runs/:id/result  retired v1 result submission
+//	GET  /agent-runtime/ws               retired v1 WebSocket
+//	POST /agent-runtime/call-agent       retired v1 delegation
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 	api.POST("/agent-runtime/heartbeat", RuntimeClientUpgradeRequired)
 	api.GET("/agent-runtime/runs/claim", RuntimeClientUpgradeRequired)
@@ -520,150 +512,6 @@ func (h *Handler) PostRunEvent(c echo.Context) error {
 	return c.JSON(http.StatusCreated, event)
 }
 
-func (h *Handler) ClaimRuntimePullRun(c echo.Context) (err error) {
-	var wait time.Duration
-	defer func() {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			setRuntimePullEmptyClaimHeaders(c, wait)
-			if !c.Response().Committed {
-				c.Response().WriteHeader(http.StatusNoContent)
-			}
-			err = nil
-		}
-	}()
-	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
-	if err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
-			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
-		}
-		return err
-	}
-	verifiedToken, err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull")
-	if err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterEndpointTokenKey(token, "claim")); retry > 0 {
-			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
-		}
-		return err
-	}
-	wait, err = runtimePullClaimWait(c.QueryParam("wait"))
-	if err != nil {
-		return err
-	}
-	tokenKey := runtimeLimiterTokenKey(token)
-	retry, finishClaim := h.runtimeLimiter.beginClaim(tokenKey, wait)
-	if retry > 0 {
-		return runtimeRateLimitError(c, retry, "runtime claim 过于频繁，请按 Retry-After 退避")
-	}
-	defer finishClaim()
-	resp, err := h.svc.ClaimRuntimePullRunForToken(c.Request().Context(), verifiedToken, RuntimePullClaimOptions{Wait: wait})
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			setRuntimePullEmptyClaimHeaders(c, wait)
-			c.Response().WriteHeader(http.StatusNoContent)
-			return nil
-		}
-		return err
-	}
-	if resp == nil {
-		h.runtimeLimiter.markEmptyClaim(tokenKey, wait)
-		setRuntimePullEmptyClaimHeaders(c, wait)
-		return c.NoContent(http.StatusNoContent)
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-func setRuntimePullEmptyClaimHeaders(c echo.Context, wait time.Duration) {
-	c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(int(runtimePullEmptyClaimRetryAfterForWait(wait).Seconds())))
-	c.Response().Header().Set("X-OpenLinker-Max-Claim-Wait-Seconds", strconv.Itoa(int(runtimePullMaxLongPollWait.Seconds())))
-}
-
-func runtimePullEmptyClaimRetryAfterForWait(wait time.Duration) time.Duration {
-	if wait > 0 {
-		return 0
-	}
-	return runtimePullEmptyClaimRetryAfter
-}
-
-func runtimePullClaimWait(raw string) (time.Duration, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return 0, nil
-	}
-	seconds, err := strconv.Atoi(raw)
-	if err != nil || seconds < 0 {
-		return 0, httpx.BadRequest("wait 必须是非负秒数")
-	}
-	wait := time.Duration(seconds) * time.Second
-	if wait > runtimePullMaxLongPollWait {
-		wait = runtimePullMaxLongPollWait
-	}
-	return wait, nil
-}
-
-func (h *Handler) PostAgentHeartbeat(c echo.Context) error {
-	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
-	if err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
-			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
-		}
-		return err
-	}
-	verifiedToken, err := h.svc.ValidateRuntimeToken(c.Request().Context(), token, "agent:pull", "agent:call")
-	if err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterEndpointTokenKey(token, "heartbeat")); retry > 0 {
-			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
-		}
-		return err
-	}
-	if retry := h.runtimeLimiter.allowHeartbeat(runtimeLimiterTokenKey(token)); retry > 0 {
-		return runtimeRateLimitError(c, retry, "runtime heartbeat 过于频繁，请按 Retry-After 退避")
-	}
-	resp, err := h.svc.HeartbeatAgentForToken(c.Request().Context(), verifiedToken)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-func (h *Handler) PostRuntimePullResult(c echo.Context) error {
-	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
-	if err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
-			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
-		}
-		return err
-	}
-	runID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	var req RuntimePullResultRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.CompleteRuntimePullRun(c.Request().Context(), token, runID, &req)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// RuntimeWebSocket keeps an outbound Agent connection open so the platform can
-// assign queued runs without waiting for the next long-poll claim.
-func (h *Handler) RuntimeWebSocket(c echo.Context) error {
-	token, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
-	if err != nil {
-		if retry := h.runtimeLimiter.allowMalformedAuth(runtimeLimiterIPKey(c)); retry > 0 {
-			return runtimeRateLimitError(c, retry, "runtime 访问令牌请求过于频繁，请稍后再试")
-		}
-		return err
-	}
-	return h.svc.ServeRuntimeWebSocket(c.Response().Writer, c.Request(), token)
-}
-
 // userIDFromCtx 从 echo.Context 取出当前登录用户 uuid。
 // JWT 中间件已写入 c.Get(httpx.CtxKeyUserID)。
 func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
@@ -710,44 +558,6 @@ func runtimeBearerToken(header string) (string, error) {
 		return "", httpx.Unauthorized("缺少访问令牌")
 	}
 	return strings.TrimSpace(parts[1]), nil
-}
-
-func runtimeLimiterTokenKey(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return "rt:" + hex.EncodeToString(sum[:8])
-}
-
-func runtimeLimiterEndpointTokenKey(token, endpoint string) string {
-	sum := sha256.Sum256([]byte(token + ":" + endpoint))
-	return "rt:" + endpoint + ":" + hex.EncodeToString(sum[:8])
-}
-
-func runtimeLimiterIPKey(c echo.Context) string {
-	ip := strings.TrimSpace(c.RealIP())
-	if ip == "" {
-		ip = "unknown"
-	}
-	return "ip:" + ip
-}
-
-func runtimeRateLimitError(c echo.Context, retryAfter time.Duration, message string) error {
-	seconds := retryAfterSeconds(retryAfter)
-	c.Response().Header().Set(echo.HeaderRetryAfter, strconv.Itoa(seconds))
-	return httpx.RateLimited(message)
-}
-
-func retryAfterSeconds(d time.Duration) int {
-	if d <= 0 {
-		return 1
-	}
-	seconds := int(d / time.Second)
-	if d%time.Second != 0 {
-		seconds++
-	}
-	if seconds < 1 {
-		return 1
-	}
-	return seconds
 }
 
 func parseOptionalInt32(raw string) (int32, error) {

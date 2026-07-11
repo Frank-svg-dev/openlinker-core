@@ -107,9 +107,6 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 			t.Fatalf("terminal Run query missing %q", fragment)
 		}
 	}
-	if !strings.Contains(listStaleRuntimePullRuns, "r.runtime_contract_id <> 'openlinker.runtime.v2'") {
-		t.Fatal("legacy stale runtime pull query can still consume runtime v2 Runs")
-	}
 }
 
 func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {

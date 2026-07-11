@@ -2,8 +2,6 @@ package workflow_test
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,10 +14,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
@@ -188,47 +184,6 @@ func TestWorkflowCreateAllowsOwnPrivateAgent(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NotNil(t, created)
-}
-
-func TestWorkflowCreateAllowsRuntimePullBeforeHeartbeatButStartRequiresOnline(t *testing.T) {
-	pool := setupWorkflowTestDB(t)
-	ctx := context.Background()
-
-	userID := insertWorkflowUser(t, pool, "wf-runtime-create-user")
-	creatorID := insertWorkflowUser(t, pool, "wf-runtime-create-creator")
-	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/not-used")
-	setWorkflowAgentRuntimePullMode(t, pool, agentID)
-
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
-	token := insertWorkflowRuntimeToken(t, pool, agentID, creatorID)
-	svc := workflow.NewService(pool, runtimeSvc)
-
-	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
-		Name: "Runtime pull staged workflow",
-		Nodes: []workflow.WorkflowNodeRequest{
-			{Key: "worker", Title: "Worker", AgentID: agentID},
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, created)
-
-	run, err := svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
-		Input: map[string]interface{}{"topic": "offline worker"},
-	})
-	require.Nil(t, run)
-	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
-
-	_, err = runtimeSvc.HeartbeatAgent(ctx, token)
-	require.NoError(t, err)
-	run, err = svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
-		Input: map[string]interface{}{"topic": "online worker"},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, run)
-	require.Equal(t, "pending", run.Status)
 }
 
 func TestWorkflowStartRejectsAgentThatBecameUncallable(t *testing.T) {
@@ -728,157 +683,6 @@ func TestStartRunWorkerProcessesPendingRunsInBurst(t *testing.T) {
 	require.False(t, claimed)
 }
 
-func TestWorkflowRunWaitsForRuntimePullCompletion(t *testing.T) {
-	pool := setupWorkflowTestDB(t)
-	ctx := context.Background()
-
-	userID := insertWorkflowUser(t, pool, "wf-runtime-pull-user")
-	creatorID := insertWorkflowUser(t, pool, "wf-runtime-pull-creator")
-	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/not-used")
-	setWorkflowAgentRuntimePullMode(t, pool, agentID)
-
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
-	token := insertWorkflowRuntimeToken(t, pool, agentID, creatorID)
-	_, err := runtimeSvc.HeartbeatAgent(ctx, token)
-	require.NoError(t, err)
-	svc := workflow.NewService(pool, runtimeSvc)
-
-	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
-		Name: "Runtime pull workflow",
-		Nodes: []workflow.WorkflowNodeRequest{
-			{Key: "worker", Title: "Worker", AgentID: agentID},
-		},
-	})
-	require.NoError(t, err)
-
-	type workflowRunResult struct {
-		run *workflow.WorkflowRunResponse
-		err error
-	}
-	resultC := make(chan workflowRunResult, 1)
-	go func() {
-		run, runErr := svc.RunWorkflow(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
-			Input: map[string]interface{}{"topic": "runtime pull"},
-		})
-		resultC <- workflowRunResult{run: run, err: runErr}
-	}()
-
-	claimed, err := claimWorkflowRuntimeRun(t, runtimeSvc, token)
-	require.NoError(t, err)
-	require.NotNil(t, claimed)
-	require.Equal(t, agentID.String(), claimed.AgentID)
-	require.Equal(t, "worker", claimed.Input["node_key"])
-	workflowInput, ok := claimed.Input["workflow_input"].(map[string]interface{})
-	require.True(t, ok)
-	require.Equal(t, "runtime pull", workflowInput["topic"])
-	require.NotNil(t, claimed.A2A)
-	require.Equal(t, claimed.RunID, claimed.A2A.CurrentRunID)
-
-	childRunID := uuid.MustParse(claimed.RunID)
-	completed, err := runtimeSvc.CompleteRuntimePullRun(ctx, token, childRunID, &runtimemod.RuntimePullResultRequest{
-		Status: "success",
-		Output: map[string]interface{}{
-			"answer": "done by runtime pull",
-			"step":   claimed.Input["node_key"],
-		},
-		Events: []runtimemod.AgentEvent{{
-			EventType: "run.message.delta",
-			Payload:   map[string]interface{}{"text": "runtime pull step done"},
-		}},
-	})
-	require.NoError(t, err)
-	require.Equal(t, "success", completed.Status)
-
-	var result workflowRunResult
-	select {
-	case result = <-resultC:
-	case <-time.After(3 * time.Second):
-		t.Fatal("workflow run did not finish after runtime pull result")
-	}
-	require.NoError(t, result.err)
-	require.NotNil(t, result.run)
-	require.Equal(t, "success", result.run.Status)
-	require.Len(t, result.run.Steps, 1)
-	require.Equal(t, "success", result.run.Steps[0].Status)
-	require.Equal(t, claimed.RunID, result.run.Steps[0].RunID)
-	require.Equal(t, "done by runtime pull", result.run.Steps[0].Output["answer"])
-	require.Equal(t, "done by runtime pull", result.run.Output["answer"])
-}
-
-func TestWorkflowRunPropagatesRuntimePullFailure(t *testing.T) {
-	pool := setupWorkflowTestDB(t)
-	ctx := context.Background()
-
-	userID := insertWorkflowUser(t, pool, "wf-runtime-pull-fail-user")
-	creatorID := insertWorkflowUser(t, pool, "wf-runtime-pull-fail-creator")
-	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/not-used")
-	setWorkflowAgentRuntimePullMode(t, pool, agentID)
-
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
-	token := insertWorkflowRuntimeToken(t, pool, agentID, creatorID)
-	_, err := runtimeSvc.HeartbeatAgent(ctx, token)
-	require.NoError(t, err)
-	svc := workflow.NewService(pool, runtimeSvc)
-
-	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
-		Name: "Runtime pull failure workflow",
-		Nodes: []workflow.WorkflowNodeRequest{
-			{Key: "worker", Title: "Worker", AgentID: agentID},
-		},
-	})
-	require.NoError(t, err)
-
-	errC := make(chan error, 1)
-	go func() {
-		_, runErr := svc.RunWorkflow(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
-			Input: map[string]interface{}{"topic": "runtime pull failure"},
-		})
-		errC <- runErr
-	}()
-
-	claimed, err := claimWorkflowRuntimeRun(t, runtimeSvc, token)
-	require.NoError(t, err)
-	require.NotNil(t, claimed)
-
-	childRunID := uuid.MustParse(claimed.RunID)
-	failed, err := runtimeSvc.CompleteRuntimePullRun(ctx, token, childRunID, &runtimemod.RuntimePullResultRequest{
-		Status: "failed",
-		Error:  &runtimemod.AgentError{Code: "WORKER_FAILED", Message: "runtime worker failed"},
-	})
-	require.NoError(t, err)
-	require.Equal(t, "failed", failed.Status)
-
-	select {
-	case err = <-errC:
-	case <-time.After(3 * time.Second):
-		t.Fatal("workflow run did not fail after runtime pull failure")
-	}
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "runtime worker failed")
-
-	history, err := svc.ListWorkflowRuns(ctx, userID, uuid.MustParse(created.ID), 10)
-	require.NoError(t, err)
-	require.Equal(t, int32(1), history.Total)
-	require.Len(t, history.Items, 1)
-	require.Equal(t, "failed", history.Items[0].Status)
-	require.Contains(t, history.Items[0].Error, "runtime worker failed")
-	require.Len(t, history.Items[0].Steps, 1)
-	require.Equal(t, "failed", history.Items[0].Steps[0].Status)
-	require.Equal(t, claimed.RunID, history.Items[0].Steps[0].RunID)
-	require.Contains(t, history.Items[0].Steps[0].Error, "runtime worker failed")
-
-	retry, err := svc.RetryWorkflowRun(ctx, userID, uuid.MustParse(history.Items[0].ID))
-	require.NoError(t, err)
-	require.Equal(t, "pending", retry.Status)
-	require.Equal(t, uuid.MustParse(created.ID).String(), retry.WorkflowID)
-}
-
 func TestPauseResumeWorkflowRunControlsWorkerClaim(t *testing.T) {
 	pool := setupWorkflowTestDB(t)
 
@@ -1023,79 +827,6 @@ func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {
 	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
 	require.NoError(t, err)
 	require.False(t, claimed)
-}
-
-func TestCancelRuntimePullWorkflowRunAllowsLateResult(t *testing.T) {
-	pool := setupWorkflowTestDB(t)
-	ctx := context.Background()
-
-	userID := insertWorkflowUser(t, pool, "wf-cancel-runtime-user")
-	creatorID := insertWorkflowUser(t, pool, "wf-cancel-runtime-creator")
-	agentID := insertWorkflowAgent(t, pool, creatorID, "https://example.com/not-used")
-	setWorkflowAgentRuntimePullMode(t, pool, agentID)
-
-	runtimeSvc := runtimemod.NewService(pool, &config.Config{
-		RunTimeoutSeconds:       5,
-		AllowLocalHTTPEndpoints: true,
-	})
-	token := insertWorkflowRuntimeToken(t, pool, agentID, creatorID)
-	_, err := runtimeSvc.HeartbeatAgent(ctx, token)
-	require.NoError(t, err)
-	svc := workflow.NewService(pool, runtimeSvc)
-
-	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
-		Name: "Cancelable runtime pull workflow",
-		Nodes: []workflow.WorkflowNodeRequest{
-			{Key: "worker", Title: "Worker", AgentID: agentID},
-		},
-	})
-	require.NoError(t, err)
-	queued, err := svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
-		Input: map[string]interface{}{"topic": "cancel runtime pull"},
-	})
-	require.NoError(t, err)
-
-	workerDone := make(chan error, 1)
-	go func() {
-		_, claimErr := svc.ClaimAndRunPendingWorkflow(ctx)
-		workerDone <- claimErr
-	}()
-
-	claimed, err := claimWorkflowRuntimeRun(t, runtimeSvc, token)
-	require.NoError(t, err)
-	require.NotNil(t, claimed)
-
-	canceled, err := svc.CancelWorkflowRun(ctx, userID, uuid.MustParse(queued.ID))
-	require.NoError(t, err)
-	require.Equal(t, "canceled", canceled.Status)
-
-	childRunID := uuid.MustParse(claimed.RunID)
-	completed, err := runtimeSvc.CompleteRuntimePullRun(ctx, token, childRunID, &runtimemod.RuntimePullResultRequest{
-		Status: "success",
-		Output: map[string]interface{}{
-			"answer": "late runtime pull success",
-			"step":   claimed.Input["node_key"],
-		},
-	})
-	require.NoError(t, err)
-	require.Equal(t, "success", completed.Status)
-
-	select {
-	case err := <-workerDone:
-		require.NoError(t, err)
-	case <-time.After(3 * time.Second):
-		t.Fatal("workflow worker did not finish after late runtime result")
-	}
-
-	final, err := svc.GetWorkflowRun(ctx, userID, uuid.MustParse(queued.ID))
-	require.NoError(t, err)
-	require.Equal(t, "canceled", final.Status)
-	require.Len(t, final.Steps, 1)
-	require.Equal(t, "success", final.Steps[0].Status)
-
-	child, err := runtimeSvc.GetRun(ctx, userID, childRunID)
-	require.NoError(t, err)
-	require.Equal(t, "success", child.Status)
 }
 
 func TestWorkflowWorkerRequeuesStaleRunAndCleansRetrySteps(t *testing.T) {
@@ -1398,59 +1129,6 @@ func setWorkflowAgentVisibility(t *testing.T, pool *pgxpool.Pool, agentID uuid.U
 		visibility,
 	)
 	require.NoError(t, err)
-}
-
-func setWorkflowAgentRuntimePullMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
-	t.Helper()
-	_, err := pool.Exec(context.Background(),
-		`UPDATE agents
-		 SET connection_mode='runtime_pull',
-		     endpoint_url=$2
-		 WHERE id=$1`,
-		agentID,
-		"openlinker-runtime-pull://"+agentID.String(),
-	)
-	require.NoError(t, err)
-}
-
-func insertWorkflowRuntimeToken(t *testing.T, pool *pgxpool.Pool, agentID, creatorID uuid.UUID) string {
-	t.Helper()
-	raw := make([]byte, 32)
-	_, err := rand.Read(raw)
-	require.NoError(t, err)
-	plaintext := "ol_agent_" + hex.EncodeToString(raw)
-	hash, err := bcrypt.GenerateFromPassword([]byte(credential.BcryptTokenInput(plaintext)), bcrypt.DefaultCost)
-	require.NoError(t, err)
-	_, err = pool.Exec(context.Background(),
-		`INSERT INTO agent_tokens (
-			agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
-		) VALUES ($1, $2, 'workflow-agent', $3, $4, $5, 'active_runtime', NOW())`,
-		agentID,
-		creatorID,
-		plaintext[:12],
-		string(hash),
-		[]string{"agent:call", "agent:pull"},
-	)
-	require.NoError(t, err)
-	return plaintext
-}
-
-func claimWorkflowRuntimeRun(t *testing.T, svc *runtimemod.Service, token string) (*runtimemod.RuntimePullRunResponse, error) {
-	t.Helper()
-	deadline := time.After(2 * time.Second)
-	tick := time.NewTicker(20 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		claimed, err := svc.ClaimRuntimePullRun(context.Background(), token)
-		if err != nil || claimed != nil {
-			return claimed, err
-		}
-		select {
-		case <-deadline:
-			return nil, nil
-		case <-tick.C:
-		}
-	}
 }
 
 func waitForWorkflowRunStatus(t *testing.T, svc *workflow.Service, userID, runID uuid.UUID, status string) *workflow.WorkflowRunResponse {

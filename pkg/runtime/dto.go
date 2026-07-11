@@ -259,19 +259,6 @@ type RunMessageResponse struct {
 	CreatedAt     time.Time              `json:"created_at"`
 }
 
-// AgentHeartbeatResponse confirms that an Agent-bound access token owner is alive.
-type AgentHeartbeatResponse struct {
-	AgentID                          string     `json:"agent_id"`
-	AvailabilityStatus               string     `json:"availability_status"`
-	LastCheckedAt                    *time.Time `json:"last_checked_at,omitempty"`
-	ConsecutiveFailures              int32      `json:"consecutive_failures"`
-	PendingRunCount                  int32      `json:"pending_run_count"`
-	ClaimNow                         bool       `json:"claim_now"`
-	NextClaimAfterSeconds            int32      `json:"next_claim_after_seconds"`
-	RecommendedHeartbeatAfterSeconds int32      `json:"recommended_heartbeat_after_seconds"`
-	MaxClaimWaitSeconds              int32      `json:"max_claim_wait_seconds"`
-}
-
 // AgentRequest 平台 → 创作者 endpoint 的请求体。
 //
 // RunID 让创作者侧可对账 / 排查；Metadata 原样转发。
@@ -330,69 +317,4 @@ type ReportRunEventRequest struct {
 type AgentError struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
-}
-
-// RuntimePullRunResponse 是内网 / IPv4 / NAT Agent 主动拉任务时拿到的 payload。
-type RuntimePullRunResponse struct {
-	RunID          string                 `json:"run_id"`
-	AgentID        string                 `json:"agent_id"`
-	Input          map[string]interface{} `json:"input"`
-	Metadata       map[string]interface{} `json:"metadata,omitempty"`
-	Source         string                 `json:"source"`
-	ResultEndpoint string                 `json:"result_endpoint"`
-	ResultMethod   string                 `json:"result_method"`
-	ResultRequired bool                   `json:"result_required"`
-	A2A            *AgentA2AContext       `json:"a2a,omitempty"`
-	Conversation   *ConversationContext   `json:"conversation,omitempty"`
-}
-
-// RuntimePullResultRequest 是 runtime_pull Agent 执行完任务后回传的结果。
-//
-// Status 支持 success / failed / timeout；success 必须带 output，失败建议带 error。
-type RuntimePullResultRequest struct {
-	Status     string                 `json:"status" validate:"required,oneof=success failed timeout"`
-	Output     map[string]interface{} `json:"output,omitempty"`
-	Events     []AgentEvent           `json:"events,omitempty"`
-	Error      *AgentError            `json:"error,omitempty"`
-	DurationMs int32                  `json:"duration_ms,omitempty"`
-}
-
-// RuntimeWSClientMessage is sent by a NAT/private Agent over
-// /api/v1/agent-runtime/ws. The same runtime token and run state checks used by
-// runtime_pull are reused for result and event writes.
-type RuntimeWSClientMessage struct {
-	Type       string                 `json:"type"`
-	ID         string                 `json:"id,omitempty"`
-	RunID      string                 `json:"run_id,omitempty"`
-	EventType  string                 `json:"event_type,omitempty"`
-	Payload    map[string]interface{} `json:"payload,omitempty"`
-	Status     string                 `json:"status,omitempty"`
-	Output     map[string]interface{} `json:"output,omitempty"`
-	Events     []AgentEvent           `json:"events,omitempty"`
-	Error      *AgentError            `json:"error,omitempty"`
-	DurationMs int32                  `json:"duration_ms,omitempty"`
-}
-
-// RuntimeWSServerMessage is sent by OpenLinker over the Agent WebSocket.
-// run.assigned is intentionally flattened so simple JS workers can consume it
-// without understanding nested protocol objects.
-type RuntimeWSServerMessage struct {
-	Type              string                  `json:"type"`
-	ID                string                  `json:"id,omitempty"`
-	RunID             string                  `json:"run_id,omitempty"`
-	AgentID           string                  `json:"agent_id,omitempty"`
-	Input             map[string]interface{}  `json:"input,omitempty"`
-	Metadata          map[string]interface{}  `json:"metadata,omitempty"`
-	Source            string                  `json:"source,omitempty"`
-	ResultEndpoint    string                  `json:"result_endpoint,omitempty"`
-	ResultMethod      string                  `json:"result_method,omitempty"`
-	ResultRequired    bool                    `json:"result_required,omitempty"`
-	A2A               *AgentA2AContext        `json:"a2a,omitempty"`
-	Conversation      *ConversationContext    `json:"conversation,omitempty"`
-	Status            string                  `json:"status,omitempty"`
-	Result            *RunResponse            `json:"result,omitempty"`
-	Event             *RunEventResponse       `json:"event,omitempty"`
-	Heartbeat         *AgentHeartbeatResponse `json:"heartbeat,omitempty"`
-	Error             *AgentError             `json:"error,omitempty"`
-	RetryAfterSeconds int32                   `json:"retry_after_seconds,omitempty"`
 }

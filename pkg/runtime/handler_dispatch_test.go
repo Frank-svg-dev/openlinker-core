@@ -46,10 +46,6 @@ func TestLegacyRuntimeRoutesRequireV2WithoutCallingService(t *testing.T) {
 	}
 
 	require.Empty(t, svc.validateRuntimeTokenPlaintext)
-	require.Empty(t, svc.heartbeatToken)
-	require.Empty(t, svc.claimToken)
-	require.Empty(t, svc.completeToken)
-	require.Empty(t, svc.wsToken)
 }
 
 func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
@@ -91,28 +87,6 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 		Payload:   map[string]interface{}{"text": "done"},
 		CreatedAt: now,
 	}
-	heartbeatResp := &AgentHeartbeatResponse{
-		AgentID:                          agentID.String(),
-		AvailabilityStatus:               "healthy",
-		LastCheckedAt:                    &now,
-		PendingRunCount:                  1,
-		ClaimNow:                         true,
-		RecommendedHeartbeatAfterSeconds: 60,
-		MaxClaimWaitSeconds:              30,
-	}
-	claimResp := &RuntimePullRunResponse{
-		RunID:          runID.String(),
-		AgentID:        agentID.String(),
-		Input:          map[string]interface{}{"q": "hi"},
-		Source:         "api",
-		ResultEndpoint: "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
-		ResultMethod:   http.MethodPost,
-		ResultRequired: true,
-		A2A: &AgentA2AContext{
-			CurrentRunID: runID.String(),
-		},
-	}
-
 	t.Run("run lifecycle reads and events", func(t *testing.T) {
 		mock := &mockRuntimeService{
 			runResp:       runResp,
@@ -250,102 +224,6 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 		}
 	})
 
-	t.Run("runtime pull endpoints", func(t *testing.T) {
-		mock := &mockRuntimeService{
-			heartbeatResp: heartbeatResp,
-			claimResp:     claimResp,
-			completeResp:  &RunResponse{RunID: runID.String(), Status: "success"},
-		}
-		h := NewHandler(mock)
-
-		heartbeatCtx, heartbeatRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodPost,
-			target:  "/api/v1/agent-runtime/heartbeat",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-		})
-		if err := h.PostAgentHeartbeat(heartbeatCtx); err != nil {
-			t.Fatalf("PostAgentHeartbeat error = %v", err)
-		}
-		if heartbeatRec.Code != http.StatusOK ||
-			mock.validateRuntimeTokenPlaintext != "ol_agent_secret" ||
-			mock.heartbeatToken != "" ||
-			mock.verifiedHeartbeatToken.ID == uuid.Nil {
-			t.Fatalf("heartbeat code=%d validated=%q plaintext-token=%q verified=%s",
-				heartbeatRec.Code, mock.validateRuntimeTokenPlaintext, mock.heartbeatToken, mock.verifiedHeartbeatToken.ID)
-		}
-
-		claimCtx, claimRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodGet,
-			target:  "/api/v1/agent-runtime/runs/claim?wait=90",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-		})
-		if err := h.ClaimRuntimePullRun(claimCtx); err != nil {
-			t.Fatalf("ClaimRuntimePullRun error = %v", err)
-		}
-		if claimRec.Code != http.StatusOK ||
-			mock.validateRuntimeTokenPlaintext != "ol_agent_secret" ||
-			mock.claimToken != "" ||
-			mock.verifiedClaimToken.ID == uuid.Nil ||
-			mock.claimWait != runtimePullMaxLongPollWait {
-			t.Fatalf("claim code=%d validated=%q plaintext-token=%q verified=%s wait=%s",
-				claimRec.Code, mock.validateRuntimeTokenPlaintext, mock.claimToken, mock.verifiedClaimToken.ID, mock.claimWait)
-		}
-
-		mock.claimResp = nil
-		emptyCtx, emptyRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodGet,
-			target:  "/api/v1/agent-runtime/runs/claim",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_empty"},
-		})
-		if err := h.ClaimRuntimePullRun(emptyCtx); err != nil {
-			t.Fatalf("ClaimRuntimePullRun empty error = %v", err)
-		}
-		if emptyRec.Code != http.StatusNoContent || emptyRec.Header().Get(echo.HeaderRetryAfter) == "" {
-			t.Fatalf("empty claim code=%d retry-after=%q", emptyRec.Code, emptyRec.Header().Get(echo.HeaderRetryAfter))
-		}
-
-		completeCtx, completeRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodPost,
-			target:  "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-			body:    `{"status":"success","output":{"answer":"done"}}`,
-			params:  map[string]string{"id": runID.String()},
-		})
-		if err := h.PostRuntimePullResult(completeCtx); err != nil {
-			t.Fatalf("PostRuntimePullResult error = %v", err)
-		}
-		if completeRec.Code != http.StatusOK || mock.completeToken != "ol_agent_secret" || mock.completeRunID != runID || mock.completeReq.Status != "success" {
-			t.Fatalf("complete code=%d token=%q run=%s req=%#v", completeRec.Code, mock.completeToken, mock.completeRunID, mock.completeReq)
-		}
-
-		wsCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodGet,
-			target:  "/api/v1/agent-runtime/ws",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_ws"},
-		})
-		if err := h.RuntimeWebSocket(wsCtx); err != nil {
-			t.Fatalf("RuntimeWebSocket error = %v", err)
-		}
-		if mock.wsToken != "ol_agent_ws" {
-			t.Fatalf("websocket token=%q", mock.wsToken)
-		}
-	})
-}
-
-func TestRuntimePullClaimContextCancelReturnsNoContent(t *testing.T) {
-	mock := &mockRuntimeService{err: context.Canceled}
-	h := NewHandler(mock)
-	ctx, rec := newRuntimeDispatchContext(&runtimeDispatchRequest{
-		method:  http.MethodGet,
-		target:  "/api/v1/agent-runtime/runs/claim",
-		headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_canceled"},
-	})
-	if err := h.ClaimRuntimePullRun(ctx); err != nil {
-		t.Fatalf("ClaimRuntimePullRun canceled error = %v", err)
-	}
-	if rec.Code != http.StatusNoContent || rec.Header().Get(echo.HeaderRetryAfter) == "" {
-		t.Fatalf("canceled claim code=%d retry-after=%q", rec.Code, rec.Header().Get(echo.HeaderRetryAfter))
-	}
 }
 
 func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
@@ -447,44 +325,6 @@ func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 				body:    `{"event_type":"run.message.delta"}`,
 				params:  map[string]string{"id": runID.String()},
 				headers: map[string]string{"X-OpenLinker-Token": "agent-secret"},
-			}),
-		},
-		{
-			name: "heartbeat",
-			call: (*Handler).PostAgentHeartbeat,
-			ctx: mustRuntimeDispatchContext(&runtimeDispatchRequest{
-				method:  http.MethodPost,
-				target:  "/api/v1/agent-runtime/heartbeat",
-				headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-			}),
-		},
-		{
-			name: "claim",
-			call: (*Handler).ClaimRuntimePullRun,
-			ctx: mustRuntimeDispatchContext(&runtimeDispatchRequest{
-				method:  http.MethodGet,
-				target:  "/api/v1/agent-runtime/runs/claim",
-				headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-			}),
-		},
-		{
-			name: "complete",
-			call: (*Handler).PostRuntimePullResult,
-			ctx: mustRuntimeDispatchContext(&runtimeDispatchRequest{
-				method:  http.MethodPost,
-				target:  "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
-				headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-				body:    `{"status":"success","output":{"answer":"done"}}`,
-				params:  map[string]string{"id": runID.String()},
-			}),
-		},
-		{
-			name: "websocket",
-			call: (*Handler).RuntimeWebSocket,
-			ctx: mustRuntimeDispatchContext(&runtimeDispatchRequest{
-				method:  http.MethodGet,
-				target:  "/api/v1/agent-runtime/ws",
-				headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
 			}),
 		},
 	}
@@ -758,150 +598,6 @@ func TestWriteSSEEventsDoesNotMoveCursorBackward(t *testing.T) {
 	}
 }
 
-func TestRuntimeHandlerRuntimeAuthAndResultValidationEdges(t *testing.T) {
-	runID := uuid.New()
-	runtimeCalls := []struct {
-		name string
-		call func(*Handler, echo.Context) error
-		ctx  *runtimeDispatchRequest
-	}{
-		{
-			name: "heartbeat",
-			call: (*Handler).PostAgentHeartbeat,
-			ctx: &runtimeDispatchRequest{
-				method:  http.MethodPost,
-				target:  "/api/v1/agent-runtime/heartbeat",
-				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
-			},
-		},
-		{
-			name: "claim",
-			call: (*Handler).ClaimRuntimePullRun,
-			ctx: &runtimeDispatchRequest{
-				method:  http.MethodGet,
-				target:  "/api/v1/agent-runtime/runs/claim",
-				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
-			},
-		},
-		{
-			name: "result",
-			call: (*Handler).PostRuntimePullResult,
-			ctx: &runtimeDispatchRequest{
-				method:  http.MethodPost,
-				target:  "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
-				params:  map[string]string{"id": runID.String()},
-				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
-			},
-		},
-		{
-			name: "websocket",
-			call: (*Handler).RuntimeWebSocket,
-			ctx: &runtimeDispatchRequest{
-				method:  http.MethodGet,
-				target:  "/api/v1/agent-runtime/ws",
-				headers: map[string]string{echo.HeaderAuthorization: "Basic nope"},
-			},
-		},
-	}
-	for _, tt := range runtimeCalls {
-		t.Run(tt.name, func(t *testing.T) {
-			h := NewHandler(&mockRuntimeService{})
-			ctx := mustRuntimeDispatchContext(tt.ctx)
-			requireRuntimeHTTPStatus(t, tt.call(h, ctx), http.StatusUnauthorized)
-			requireRuntimeHTTPStatus(t, tt.call(h, ctx), http.StatusTooManyRequests)
-		})
-	}
-
-	badJSONCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-		method:  http.MethodPost,
-		target:  "/api/v1/agent-runtime/runs/" + runID.String() + "/result",
-		body:    `{`,
-		params:  map[string]string{"id": runID.String()},
-		headers: map[string]string{echo.HeaderAuthorization: "Bearer ol_agent_secret"},
-	})
-	requireRuntimeHTTPStatus(t, NewHandler(&mockRuntimeService{}).PostRuntimePullResult(badJSONCtx), http.StatusBadRequest)
-}
-
-func TestRuntimeHandlerRuntimeTokenValidationPrecedesBusinessRateLimits(t *testing.T) {
-	revokedErr := httpx.Unauthorized("访问令牌无效或已撤销")
-
-	t.Run("heartbeat", func(t *testing.T) {
-		token := "ol_agent_revoked_heartbeat"
-		mock := &mockRuntimeService{
-			heartbeatResp: &AgentHeartbeatResponse{AgentID: uuid.NewString()},
-		}
-		h := NewHandler(mock)
-
-		firstCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodPost,
-			target:  "/api/v1/agent-runtime/heartbeat",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-		})
-		if err := h.PostAgentHeartbeat(firstCtx); err != nil {
-			t.Fatalf("initial heartbeat error = %v", err)
-		}
-
-		mock.validateRuntimeTokenErr = revokedErr
-		revokedCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodPost,
-			target:  "/api/v1/agent-runtime/heartbeat",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-		})
-		requireRuntimeHTTPStatus(t, h.PostAgentHeartbeat(revokedCtx), http.StatusUnauthorized)
-	})
-
-	t.Run("claim", func(t *testing.T) {
-		token := "ol_agent_revoked_claim"
-		mock := &mockRuntimeService{}
-		h := NewHandler(mock)
-
-		firstCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodGet,
-			target:  "/api/v1/agent-runtime/runs/claim",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-		})
-		if err := h.ClaimRuntimePullRun(firstCtx); err != nil {
-			t.Fatalf("initial claim error = %v", err)
-		}
-
-		mock.validateRuntimeTokenErr = revokedErr
-		revokedCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodGet,
-			target:  "/api/v1/agent-runtime/runs/claim",
-			headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-		})
-		requireRuntimeHTTPStatus(t, h.ClaimRuntimePullRun(revokedCtx), http.StatusUnauthorized)
-	})
-}
-
-func TestRuntimeHandlerInvalidRuntimeTokenLimitIsPerEndpoint(t *testing.T) {
-	token := "ol_agent_revoked_shared"
-	revokedErr := httpx.Unauthorized("访问令牌无效或已撤销")
-	mock := &mockRuntimeService{validateRuntimeTokenErr: revokedErr}
-	h := NewHandler(mock)
-
-	heartbeatCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-		method:  http.MethodPost,
-		target:  "/api/v1/agent-runtime/heartbeat",
-		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-	})
-	requireRuntimeHTTPStatus(t, h.PostAgentHeartbeat(heartbeatCtx), http.StatusUnauthorized)
-
-	claimCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-		method:  http.MethodGet,
-		target:  "/api/v1/agent-runtime/runs/claim",
-		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-	})
-	requireRuntimeHTTPStatus(t, h.ClaimRuntimePullRun(claimCtx), http.StatusUnauthorized)
-
-	repeatedClaimCtx := mustRuntimeDispatchContext(&runtimeDispatchRequest{
-		method:  http.MethodGet,
-		target:  "/api/v1/agent-runtime/runs/claim",
-		headers: map[string]string{echo.HeaderAuthorization: "Bearer " + token},
-	})
-	requireRuntimeHTTPStatus(t, h.ClaimRuntimePullRun(repeatedClaimCtx), http.StatusTooManyRequests)
-}
-
 type mockRuntimeService struct {
 	err error
 
@@ -939,25 +635,9 @@ type mockRuntimeService struct {
 	reportReq   *ReportRunEventRequest
 	reportResp  *RunEventResponse
 
-	claimToken         string
-	claimWait          time.Duration
-	claimResp          *RuntimePullRunResponse
-	verifiedClaimToken db.AgentRuntimeToken
-
 	validateRuntimeTokenErr       error
 	validateRuntimeTokenPlaintext string
 	validateRuntimeTokenScopes    []string
-
-	heartbeatToken         string
-	heartbeatResp          *AgentHeartbeatResponse
-	verifiedHeartbeatToken db.AgentRuntimeToken
-
-	completeToken string
-	completeRunID uuid.UUID
-	completeReq   *RuntimePullResultRequest
-	completeResp  *RunResponse
-
-	wsToken string
 }
 
 func (m *mockRuntimeService) Run(_ context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
@@ -1035,22 +715,6 @@ func (m *mockRuntimeService) ReportRunEvent(_ context.Context, runID uuid.UUID, 
 	return m.reportResp, m.err
 }
 
-func (m *mockRuntimeService) ClaimRuntimePullRun(_ context.Context, token string, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
-	m.claimToken = token
-	if len(opts) > 0 {
-		m.claimWait = opts[0].Wait
-	}
-	return m.claimResp, m.err
-}
-
-func (m *mockRuntimeService) ClaimRuntimePullRunForToken(_ context.Context, token db.AgentRuntimeToken, opts ...RuntimePullClaimOptions) (*RuntimePullRunResponse, error) {
-	m.verifiedClaimToken = token
-	if len(opts) > 0 {
-		m.claimWait = opts[0].Wait
-	}
-	return m.claimResp, m.err
-}
-
 func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token string, scopes ...string) (db.AgentRuntimeToken, error) {
 	m.validateRuntimeTokenPlaintext = token
 	m.validateRuntimeTokenScopes = append([]string(nil), scopes...)
@@ -1061,28 +725,6 @@ func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token strin
 		return db.AgentRuntimeToken{}, m.err
 	}
 	return db.AgentRuntimeToken{ID: uuid.New(), AgentID: uuid.New(), ConnectionMode: "runtime_pull"}, nil
-}
-
-func (m *mockRuntimeService) HeartbeatAgent(_ context.Context, token string) (*AgentHeartbeatResponse, error) {
-	m.heartbeatToken = token
-	return m.heartbeatResp, m.err
-}
-
-func (m *mockRuntimeService) HeartbeatAgentForToken(_ context.Context, token db.AgentRuntimeToken) (*AgentHeartbeatResponse, error) {
-	m.verifiedHeartbeatToken = token
-	return m.heartbeatResp, m.err
-}
-
-func (m *mockRuntimeService) CompleteRuntimePullRun(_ context.Context, token string, runID uuid.UUID, req *RuntimePullResultRequest) (*RunResponse, error) {
-	m.completeToken = token
-	m.completeRunID = runID
-	m.completeReq = req
-	return m.completeResp, m.err
-}
-
-func (m *mockRuntimeService) ServeRuntimeWebSocket(_ http.ResponseWriter, _ *http.Request, token string) error {
-	m.wsToken = token
-	return m.err
 }
 
 type pollingRuntimeService struct {

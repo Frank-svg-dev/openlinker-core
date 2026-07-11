@@ -25,22 +25,6 @@ func (s *Service) SetTaskCallbackManager(manager taskCallbackManager) {
 	s.taskCallbackManager = manager
 }
 
-func taskCallbackConfigFromCallRequest(req *CallAgentRequest) *A2APushNotificationConfig {
-	if req == nil {
-		return nil
-	}
-	if req.TaskCallback != nil {
-		return req.TaskCallback
-	}
-	if req.PushNotification != nil {
-		return req.PushNotification
-	}
-	if req.PushNotificationAlias != nil {
-		return req.PushNotificationAlias
-	}
-	return req.PushNotificationConfig
-}
-
 func runtimeTaskCallbackFromA2A(cfg *A2APushNotificationConfig) *runtime.TaskCallbackConfig {
 	if cfg == nil {
 		return nil

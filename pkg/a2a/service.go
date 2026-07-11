@@ -18,10 +18,8 @@ import (
 )
 
 const (
-	runtimeTokenPrefixLen = credential.PrefixLen
 	maxRuntimeTokens      = 10
 	maxDelegationDepth    = 8
-	maxRunningDelegations = 500
 	defaultParentPage     = 1
 	defaultParentPageSize = 10
 	maxParentPageSize     = 50
@@ -29,27 +27,20 @@ const (
 )
 
 type Service struct {
-	queries               *db.Queries
-	pool                  *pgxpool.Pool
-	runtime               *runtime.Service
-	taskCallbackManager   taskCallbackManager
-	maxDelegationDepth    int
-	maxRunningDelegations int
+	queries             *db.Queries
+	pool                *pgxpool.Pool
+	runtime             *runtime.Service
+	taskCallbackManager taskCallbackManager
+	maxDelegationDepth  int
 }
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
 	return &Service{
-		queries:               db.New(pool),
-		pool:                  pool,
-		runtime:               runtimeSvc,
-		maxDelegationDepth:    maxDelegationDepth,
-		maxRunningDelegations: maxRunningDelegations,
+		queries:            db.New(pool),
+		pool:               pool,
+		runtime:            runtimeSvc,
+		maxDelegationDepth: maxDelegationDepth,
 	}
-}
-
-func (s *Service) SetDelegationLimits(maxDepth, maxRunning int) {
-	s.maxDelegationDepth = maxDepth
-	s.maxRunningDelegations = maxRunning
 }
 
 func (s *Service) CreateRuntimeToken(ctx context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error) {
@@ -375,305 +366,6 @@ func (s *Service) UpdateCallPolicy(ctx context.Context, userID, agentID uuid.UUI
 	}, nil
 }
 
-func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *CallAgentRequest) (*runtime.RunResponse, error) {
-	callerToken, err := s.verifyRuntimeToken(ctx, plaintextToken)
-	if err != nil {
-		return nil, err
-	}
-	if req == nil {
-		return nil, httpx.Unprocessable("请求体不能为空")
-	}
-	parentRunID, err := currentRunIDFromRequest(req)
-	if err != nil {
-		return nil, err
-	}
-	idempotencyKeyHash, err := runtime.HashIdempotencyKey(req.IdempotencyKey)
-	if err != nil {
-		return nil, a2aIdempotencyValidationError(err)
-	}
-	if req.Input == nil {
-		return nil, httpx.Unprocessable("input 不能为空")
-	}
-	if len([]rune(strings.TrimSpace(req.Reason))) > 500 {
-		return nil, httpx.Unprocessable("reason 不能超过 500 个字符")
-	}
-	targetAgentID, err := uuid.Parse(req.TargetAgentID)
-	if err != nil {
-		return nil, httpx.Unprocessable("target_agent_id 不是合法 uuid")
-	}
-	if targetAgentID == callerToken.AgentID {
-		return nil, httpx.Unprocessable("Agent 不能通过 A2A 调用自己")
-	}
-
-	parent, err := s.queries.GetRunByID(ctx, parentRunID)
-	if errors.Is(err, pgx.ErrNoRows) || (err == nil && parent.AgentID != callerToken.AgentID) {
-		return nil, httpx.NotFound("父运行不存在或不属于调用 Agent")
-	}
-	if err != nil {
-		return nil, httpx.Internal("查询父运行失败")
-	}
-
-	_, identityErr := s.queries.GetRunIdempotencyRecord(ctx, db.GetRunIdempotencyRecordParams{
-		UserID:             parent.UserID,
-		IdempotencyKeyHash: idempotencyKeyHash[:],
-	})
-	hasCommittedIdentity := identityErr == nil
-	if identityErr != nil && !errors.Is(identityErr, pgx.ErrNoRows) {
-		return nil, httpx.Internal("查询幂等调用记录失败")
-	}
-	if !hasCommittedIdentity {
-		if parent.Status != "running" {
-			return nil, httpx.Conflict("父运行已结束，不能发起新的 Agent 委派")
-		}
-		caller, callerErr := s.queries.GetAgentByID(ctx, callerToken.AgentID)
-		if callerErr != nil {
-			return nil, httpx.NotFound("调用 Agent 不存在")
-		}
-		target, targetErr := s.queries.GetAgentByID(ctx, targetAgentID)
-		if errors.Is(targetErr, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("目标 Agent 不存在")
-		}
-		if targetErr != nil {
-			return nil, httpx.Internal("查询目标 Agent 失败")
-		}
-		policy, policyErr := s.queries.GetAgentCallPolicy(ctx, targetAgentID)
-		if policyErr != nil {
-			return nil, httpx.Internal("查询目标 Agent 调用策略失败")
-		}
-		if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
-			return nil, httpx.Forbidden("目标 Agent 不接受当前 Agent 的调用")
-		}
-		if err := s.enforceDelegationLimits(ctx, parentRunID, targetAgentID); err != nil {
-			return nil, err
-		}
-	}
-	taskCallbackConfig := taskCallbackConfigFromCallRequest(req)
-	childContext, err := s.childRunA2AContext(ctx, parentRunID, parent, callerToken.AgentID, targetAgentID, req)
-	if err != nil {
-		return nil, err
-	}
-	metadata := copyDelegatedBusinessMetadata(req.Metadata)
-	if childContext != nil {
-		metadata["a2a"] = map[string]interface{}{
-			"protocol_context_id": childContext.ProtocolContextID,
-			"root_context_id":     childContext.RootContextID,
-			"parent_context_id":   childContext.ParentContextID,
-			"parent_task_id":      childContext.ParentTaskID,
-			"reference_task_ids":  childContext.ReferenceTaskIDs,
-		}
-	}
-
-	_ = s.queries.TouchAgentRuntimeToken(ctx, callerToken.ID)
-	resp, err := s.runtime.RunDelegated(ctx, parent.UserID, runtime.Delegation{
-		ParentRunID:   parentRunID,
-		CallerAgentID: callerToken.AgentID,
-		Reason:        strings.TrimSpace(req.Reason),
-	}, delegatedRuntimeRunRequest(req, targetAgentID, metadata, childContext, taskCallbackConfig))
-	if err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
-func delegatedRuntimeRunRequest(
-	req *CallAgentRequest,
-	targetAgentID uuid.UUID,
-	metadata map[string]interface{},
-	childContext *runtime.RunA2AContextRequest,
-	taskCallback *A2APushNotificationConfig,
-) *runtime.RunRequest {
-	return &runtime.RunRequest{
-		AgentID:          targetAgentID.String(),
-		Input:            req.Input,
-		Metadata:         metadata,
-		A2AContext:       childContext,
-		IdempotencyKey:   req.IdempotencyKey,
-		CreationProtocol: "openlinker-a2a",
-		CreationMethod:   "call-agent",
-		TaskCallback:     runtimeTaskCallbackFromA2A(taskCallback),
-	}
-}
-
-func (s *Service) enforceDelegationLimits(ctx context.Context, parentRunID, targetAgentID uuid.UUID) error {
-	if s.maxDelegationDepth > 0 {
-		lineage, err := s.delegationLineage(ctx, parentRunID)
-		if err != nil {
-			log.Error().Err(err).Str("parent_run_id", parentRunID.String()).Msg("a2a.enforceDelegationLimits: lineage")
-			return httpx.Internal("检查 Agent 调用链失败")
-		}
-		for _, agentID := range lineage {
-			if agentID == targetAgentID {
-				return httpx.Unprocessable("A2A 调用链不能形成循环")
-			}
-		}
-		if len(lineage) > s.maxDelegationDepth {
-			return httpx.Unprocessable("A2A 调用链深度超过限制")
-		}
-	}
-	if s.maxRunningDelegations > 0 {
-		count, err := s.runningDelegationCount(ctx)
-		if err != nil {
-			log.Error().Err(err).Msg("a2a.enforceDelegationLimits: running count")
-			return httpx.Internal("检查 Agent 委派并发失败")
-		}
-		if count >= s.maxRunningDelegations {
-			return httpx.RateLimited("A2A 委派并发已达上限，请稍后再试")
-		}
-	}
-	return nil
-}
-
-func (s *Service) delegationLineage(ctx context.Context, runID uuid.UUID) ([]uuid.UUID, error) {
-	return s.queries.ListDelegationLineage(ctx, db.ListDelegationLineageParams{
-		RunID:    runID,
-		MaxDepth: clampIntToInt32(s.maxDelegationDepth + 1),
-	})
-}
-
-func (s *Service) runningDelegationCount(ctx context.Context) (int, error) {
-	count, err := s.queries.CountRunningDelegations(ctx)
-	return int(count), err
-}
-
-func currentRunIDFromRequest(req *CallAgentRequest) (uuid.UUID, error) {
-	current := strings.TrimSpace(req.CurrentRunID)
-	legacyParent := strings.TrimSpace(req.ParentRunID)
-	if current == "" {
-		current = legacyParent
-	}
-	if current == "" {
-		return uuid.Nil, httpx.Unprocessable("current_run_id 或 parent_run_id 必填")
-	}
-	if legacyParent != "" && req.CurrentRunID != "" && legacyParent != current {
-		return uuid.Nil, httpx.Unprocessable("current_run_id 与 parent_run_id 不一致")
-	}
-	parsed, err := uuid.Parse(current)
-	if err != nil {
-		return uuid.Nil, httpx.Unprocessable("current_run_id 不是合法 uuid")
-	}
-	return parsed, nil
-}
-
-func (s *Service) childRunA2AContext(
-	ctx context.Context,
-	parentRunID uuid.UUID,
-	parent db.Run,
-	callerAgentID uuid.UUID,
-	targetAgentID uuid.UUID,
-	req *CallAgentRequest,
-) (*runtime.RunA2AContextRequest, error) {
-	explicitContextID := strings.TrimSpace(req.ContextID)
-	if explicitContextID == "" {
-		explicitContextID = strings.TrimSpace(req.ContextIDAlias)
-	}
-	explicitTraceID := strings.TrimSpace(req.TraceID)
-	if explicitTraceID == "" {
-		explicitTraceID = strings.TrimSpace(req.TraceIDAlias)
-	}
-	referenceTaskIDs := callRequestReferenceTaskIDs(req)
-
-	parentContextID := a2aContextIDFromRunInput(parent.Input)
-	parentTaskID := parentRunID.String()
-	rootContextID := parentContextID
-	traceID := ""
-	mapping, err := s.queries.GetA2AContextMappingByRun(ctx, parentRunID)
-	if err == nil {
-		parentContextID = mapping.ProtocolContextID
-		parentTaskID = mapping.ProtocolTaskID
-		rootContextID = mapping.RootContextID
-		traceID = mapping.TraceID
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		log.Warn().Err(err).Str("parent_run_id", parentRunID.String()).Msg("a2a.childRunA2AContext: parent mapping")
-	}
-	if parentTaskID == "" {
-		parentTaskID = parentRunID.String()
-	}
-	contextID := explicitContextID
-	if contextID == "" {
-		if parentContextID != "" {
-			contextID = parentContextID
-		} else if rootContextID != "" {
-			contextID = rootContextID
-		} else {
-			contextID = "ctx-" + parentRunID.String()
-		}
-	}
-	if rootContextID == "" {
-		rootContextID = contextID
-	}
-	if explicitTraceID != "" {
-		traceID = explicitTraceID
-	}
-	if traceID == "" {
-		traceID = rootContextID
-	}
-	referenceTaskIDs = appendUniqueString(referenceTaskIDs, parentTaskID)
-	referenceTaskIDs = normalizeProtocolReferenceTaskIDs(referenceTaskIDs)
-
-	return &runtime.RunA2AContextRequest{
-		ProtocolContextID: contextID,
-		RootContextID:     rootContextID,
-		ParentContextID:   parentContextID,
-		ParentTaskID:      parentTaskID,
-		ParentRunID:       parentRunID.String(),
-		CallerAgentID:     callerAgentID.String(),
-		TargetAgentID:     targetAgentID.String(),
-		TraceID:           traceID,
-		ReferenceTaskIDs:  referenceTaskIDs,
-		Source:            "agent_delegation",
-	}, nil
-}
-
-func callRequestReferenceTaskIDs(req *CallAgentRequest) []string {
-	if req == nil {
-		return nil
-	}
-	values := req.ReferenceTaskIDs
-	if len(values) == 0 {
-		values = req.ReferenceTaskIDsAlias
-	}
-	return normalizeProtocolReferenceTaskIDs(values)
-}
-
-func appendUniqueString(values []string, value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return values
-	}
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
-	}
-	return append(values, value)
-}
-
-var delegatedMetadataControlFields = map[string]struct{}{
-	"caller_agent_id":    {},
-	"context_id":         {},
-	"contextId":          {},
-	"current_run_id":     {},
-	"idempotency_key":    {},
-	"parent_run_id":      {},
-	"reference_task_ids": {},
-	"referenceTaskIds":   {},
-	"target_agent_id":    {},
-	"trace":              {},
-	"trace_id":           {},
-	"traceId":            {},
-}
-
-func copyDelegatedBusinessMetadata(metadata map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(metadata)+1)
-	for key, value := range metadata {
-		if _, reserved := delegatedMetadataControlFields[key]; reserved {
-			continue
-		}
-		out[key] = value
-	}
-	return out
-}
-
 func (s *Service) ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error) {
 	maxDepth := s.maxDelegationDepth
 	if maxDepth <= 0 {
@@ -846,24 +538,6 @@ func (s *Service) ownerAgent(ctx context.Context, userID, agentID uuid.UUID) (db
 		return db.Agent{}, httpx.Internal("查询 Agent 失败")
 	}
 	return agent, nil
-}
-
-func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext string) (db.AgentRuntimeToken, error) {
-	plaintext = strings.TrimSpace(plaintext)
-	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||
-		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
-	}
-	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
-	if err != nil {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
-	}
-	for _, token := range tokens {
-		if credential.VerifyTokenHash(token.TokenHash, plaintext) && hasScope(token.Scopes, "agent:call") {
-			return token, nil
-		}
-	}
-	return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
 }
 
 func hasScope(scopes []string, expected string) bool {

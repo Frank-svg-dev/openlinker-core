@@ -1293,67 +1293,6 @@ func TestCancelRun_RejectsNonOwnerMissingAndFinishedRuns(t *testing.T) {
 	assertHTTPStatus(t, err, http.StatusConflict)
 }
 
-func TestRunDelegated_RecordsFreeChildRunAndParentEvents(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	callerCreatorID := insertCreator(t, pool)
-	targetCreatorID := insertCreator(t, pool)
-	callerAgentID := insertAgent(t, pool, callerCreatorID, "https://example.com/caller", 10, "approved")
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"delegated ok"}}`))
-	targetAgentID := insertAgent(t, pool, targetCreatorID, endpoint, 25, "approved")
-	parentRunID := insertRunningRun(t, pool, userID, callerAgentID)
-
-	resp, err := svc.RunDelegated(ctx, userID, runtime.Delegation{
-		ParentRunID:   parentRunID,
-		CallerAgentID: callerAgentID,
-		Reason:        "delegate to specialist",
-	}, makeRunReq(targetAgentID, map[string]any{"q": "finish child"}))
-	require.NoError(t, err)
-	require.NotNil(t, resp)
-	assert.Equal(t, "success", resp.Status)
-	assert.Equal(t, "delegated ok", resp.Output["answer"])
-	assert.Equal(t, int32(0), resp.CostCents)
-	assert.Equal(t, parentRunID.String(), resp.ParentRunID)
-	assert.Equal(t, callerAgentID.String(), resp.CallerAgentID)
-	assert.Equal(t, "free_delegation", resp.BillingMode)
-
-	childRunID := mustParseUUID(t, resp.RunID)
-	var delegationCount int
-	err = pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM run_delegations
-		 WHERE parent_run_id=$1 AND child_run_id=$2 AND caller_agent_id=$3 AND reason=$4`,
-		parentRunID, childRunID, callerAgentID, "delegate to specialist").
-		Scan(&delegationCount)
-	require.NoError(t, err)
-	assert.Equal(t, 1, delegationCount)
-
-	child := readRun(t, pool, childRunID)
-	assert.Equal(t, "success", child.Status)
-	assert.Equal(t, int32(0), child.CostCents)
-	assert.Equal(t, int32(0), child.PlatformFeeCents)
-	assert.Equal(t, int32(0), child.CreatorRevenueCents)
-
-	parentEvents := readRunEvents(t, pool, parentRunID)
-	require.Len(t, parentEvents, 2)
-	assert.Equal(t, "run.child.created", parentEvents[0].EventType)
-	assert.Equal(t, resp.RunID, parentEvents[0].Payload["child_run_id"])
-	assert.Equal(t, "free_delegation", parentEvents[0].Payload["billing_mode"])
-	assert.Equal(t, "run.child.completed", parentEvents[1].EventType)
-	assert.Equal(t, "success", parentEvents[1].Payload["status"])
-
-	childEvents := readRunEvents(t, pool, childRunID)
-	require.Len(t, childEvents, 4)
-	assert.Equal(t, "run.created", childEvents[0].EventType)
-	require.NotNil(t, childEvents[0].ParentRunID)
-	assert.Equal(t, parentRunID, *childEvents[0].ParentRunID)
-	assert.Equal(t, "free_delegation", childEvents[0].Payload["billing_mode"])
-	assert.Equal(t, "run.status.changed", childEvents[2].EventType)
-	assert.Equal(t, "run.completed", childEvents[3].EventType)
-}
-
 func TestReportRunEvent_HappyPath(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
@@ -1663,37 +1602,14 @@ func TestGetRun_NotOwner(t *testing.T) {
 	require.Equal(t, agentID.String(), got.AgentID)
 }
 
-func TestGetRun_MissingAndDelegatedChildContext(t *testing.T) {
+func TestGetRun_Missing(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	userID := insertRuntimeUser(t, pool)
-	callerCreatorID := insertCreator(t, pool)
-	targetCreatorID := insertCreator(t, pool)
-	callerAgentID := insertAgent(t, pool, callerCreatorID, "https://example.com/caller", 10, "approved")
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"delegated ok"}}`))
-	targetAgentID := insertAgent(t, pool, targetCreatorID, endpoint, 25, "approved")
-	parentRunID := insertRunningRun(t, pool, userID, callerAgentID)
-
 	_, err := svc.GetRun(ctx, userID, uuid.New())
 	assertHTTPStatus(t, err, http.StatusNotFound)
-
-	resp, err := svc.RunDelegated(ctx, userID, runtime.Delegation{
-		ParentRunID:   parentRunID,
-		CallerAgentID: callerAgentID,
-		Reason:        "delegate to specialist",
-	}, makeRunReq(targetAgentID, map[string]any{"q": "finish child"}))
-	require.NoError(t, err)
-
-	got, err := svc.GetRun(ctx, userID, mustParseUUID(t, resp.RunID))
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, parentRunID.String(), got.ParentRunID)
-	assert.Equal(t, callerAgentID.String(), got.CallerAgentID)
-	assert.Equal(t, "free_delegation", got.BillingMode)
-	require.NotNil(t, got.NextAction)
-	assert.Equal(t, "none", got.EvidenceSummary.CoverageStatus)
 }
 
 func TestListRunEvents_NotOwner(t *testing.T) {

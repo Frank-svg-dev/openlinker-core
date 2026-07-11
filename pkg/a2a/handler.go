@@ -12,7 +12,6 @@ import (
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 type Handler struct {
@@ -29,7 +28,6 @@ type service interface {
 	GetRuntimeWorkbench(ctx context.Context, userID, agentID uuid.UUID) (*RuntimeWorkbenchResponse, error)
 	GetCallPolicy(ctx context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error)
 	UpdateCallPolicy(ctx context.Context, userID, agentID uuid.UUID, req *UpdateCallPolicyRequest) (*CallPolicyResponse, error)
-	CallAgent(ctx context.Context, plaintextToken string, req *CallAgentRequest) (*runtime.RunResponse, error)
 	ListChildren(ctx context.Context, userID, parentRunID uuid.UUID) ([]ChildRunResponse, error)
 	ListParentRuns(ctx context.Context, userID uuid.UUID, page, size int32, search string) (*ParentRunListResponse, error)
 	SendProtocolMessage(ctx context.Context, userID uuid.UUID, slug string, params *A2AMessageSendParams) (*A2ATask, error)
@@ -64,7 +62,6 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	creator.GET("/a2a-policy", h.GetCallPolicy)
 	creator.PUT("/a2a-policy", h.UpdateCallPolicy)
 
-	api.POST("/agent-runtime/call-agent", runtime.RuntimeClientUpgradeRequired)
 	api.GET("/a2a/parents", h.ListParentRuns, queryMiddleware)
 	publicProtocol := api.Group("/a2a/agents/:slug")
 	publicProtocol.GET("/.well-known/agent-card.json", h.GetPublicAgentCardHTTP)
@@ -213,40 +210,6 @@ func (h *Handler) UpdateCallPolicy(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-func (h *Handler) CallAgent(c echo.Context) error {
-	token, err := bearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
-	if err != nil {
-		return err
-	}
-	var req CallAgentRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if req.ParentRunID == "" && req.CurrentRunID == "" {
-		req.CurrentRunID = strings.TrimSpace(c.Request().Header.Get("X-OpenLinker-Run-Id"))
-	}
-	if _, err := runtime.HashIdempotencyKey(req.IdempotencyKey); err != nil {
-		return a2aIdempotencyValidationError(err)
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	if req.ParentRunID == "" && req.CurrentRunID == "" {
-		return httpx.Unprocessable("current_run_id 或 parent_run_id 必填")
-	}
-	resp, err := h.svc.CallAgent(c.Request().Context(), token, &req)
-	if err != nil {
-		return err
-	}
-	status := http.StatusCreated
-	if resp.Replayed {
-		status = http.StatusOK
-		c.Response().Header().Set("Idempotency-Replayed", "true")
-	}
-	c.Response().Header().Set(echo.HeaderLocation, "/api/v1/runs/"+resp.RunID)
-	return c.JSON(status, resp)
-}
-
 func (h *Handler) ListChildren(c echo.Context) error {
 	userID, err := userIDFromCtx(c)
 	if err != nil {
@@ -298,14 +261,6 @@ func parseSearchQuery(c echo.Context) string {
 		return value
 	}
 	return strings.TrimSpace(c.QueryParam("search"))
-}
-
-func bearerToken(header string) (string, error) {
-	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
-	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || parts[1] == "" {
-		return "", httpx.Unauthorized("缺少访问令牌")
-	}
-	return parts[1], nil
 }
 
 func userIDFromCtx(c echo.Context) (uuid.UUID, error) {

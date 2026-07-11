@@ -190,13 +190,11 @@ func (s *RuntimeV2DelegationService) CallAgent(
 		)
 	}
 	if invocation != nil {
-		if s.runtime.isRuntimePull(invocation) {
+		if s.runtime.isQueuedRuntime(invocation) {
 			s.runtime.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 				"connection_mode": invocation.agent.ConnectionMode,
 				"agent_id":        invocation.agent.ID.String(),
 			})
-			s.runtime.notifyRuntimePullRun(invocation.agent.ID)
-			s.runtime.dispatchRuntimeWSRunAsync(ctx, invocation.agent)
 		} else {
 			s.runtime.executeRunAsync(invocation)
 		}

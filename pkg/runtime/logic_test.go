@@ -66,24 +66,6 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	_, err = runtimeBearerToken("Basic abc")
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, http.StatusUnauthorized, httpErr.Status)
-	require.Equal(t, runtimeLimiterTokenKey("secret"), runtimeLimiterTokenKey("secret"))
-	require.NotEqual(t, runtimeLimiterTokenKey("secret"), runtimeLimiterTokenKey("other"))
-	require.Equal(t, runtimeLimiterEndpointTokenKey("secret", "claim"), runtimeLimiterEndpointTokenKey("secret", "claim"))
-	require.NotEqual(t, runtimeLimiterEndpointTokenKey("secret", "claim"), runtimeLimiterEndpointTokenKey("secret", "heartbeat"))
-	require.NotEqual(t, runtimeLimiterEndpointTokenKey("secret", "claim"), runtimeLimiterEndpointTokenKey("other", "claim"))
-	require.True(t, strings.HasPrefix(runtimeLimiterIPKey(c), "ip:"))
-	require.Equal(t, "ip:unknown", runtimeLimiterIPKey(blankIPContext{Context: c}))
-
-	require.Equal(t, 1, retryAfterSeconds(0))
-	require.Equal(t, 1, retryAfterSeconds(999*time.Millisecond))
-	require.Equal(t, 2, retryAfterSeconds(1500*time.Millisecond))
-	require.Equal(t, 3, retryAfterSeconds(3*time.Second))
-	rec := httptest.NewRecorder()
-	c = e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
-	err = runtimeRateLimitError(c, 1500*time.Millisecond, "slow down")
-	require.True(t, errors.As(err, &httpErr))
-	require.Equal(t, http.StatusTooManyRequests, httpErr.Status)
-	require.Equal(t, "2", rec.Header().Get(echo.HeaderRetryAfter))
 
 	n, err := parseOptionalInt32("")
 	require.NoError(t, err)
@@ -179,49 +161,7 @@ func TestRunStartedEventPayloadIncludesConnectionDetails(t *testing.T) {
 	}
 }
 
-func TestRuntimeTokenTouchThrottle(t *testing.T) {
-	svc := &Service{}
-	tokenID := uuid.New()
-	now := time.Date(2026, 7, 5, 10, 0, 0, 0, time.UTC)
-
-	require.True(t, svc.shouldTouchRuntimeToken(tokenID, now))
-	require.False(t, svc.shouldTouchRuntimeToken(tokenID, now.Add(time.Second)))
-	require.True(t, svc.shouldTouchRuntimeToken(tokenID, now.Add(runtimeTokenTouchMinInterval)))
-	require.False(t, svc.shouldTouchRuntimeToken(uuid.Nil, now))
-}
-
-func TestRuntimePullAndTimeoutOptionHelpers(t *testing.T) {
-	wait, err := runtimePullClaimWait("")
-	require.NoError(t, err)
-	require.Equal(t, time.Duration(0), wait)
-	wait, err = runtimePullClaimWait("5")
-	require.NoError(t, err)
-	require.Equal(t, 5*time.Second, wait)
-	wait, err = runtimePullClaimWait("999")
-	require.NoError(t, err)
-	require.Equal(t, runtimePullMaxLongPollWait, wait)
-	_, err = runtimePullClaimWait("-1")
-	require.Error(t, err)
-	_, err = runtimePullClaimWait("bad")
-	require.Error(t, err)
-
-	require.Equal(t, RuntimePullClaimOptions{}, normalizeRuntimePullClaimOptions())
-	require.Equal(t, time.Duration(0), normalizeRuntimePullClaimOptions(RuntimePullClaimOptions{Wait: -time.Second}).Wait)
-	require.Equal(t, runtimePullMaxLongPollWait, normalizeRuntimePullClaimOptions(RuntimePullClaimOptions{Wait: time.Hour}).Wait)
-
-	cfg := normalizeRuntimePullRunTimeoutConfig(RuntimePullRunTimeoutConfig{})
-	require.Equal(t, 2*time.Minute, cfg.DispatchTimeout)
-	require.Equal(t, 15*time.Minute, cfg.ResultTimeout)
-	require.Equal(t, int32(50), cfg.BatchSize)
-	cfg = normalizeRuntimePullRunTimeoutConfig(RuntimePullRunTimeoutConfig{ResultTimeout: time.Minute})
-	require.Equal(t, 2*time.Minute, cfg.DispatchTimeout)
-	require.Equal(t, runtimePullClaimTTL, cfg.ResultTimeout)
-	require.Equal(t, int32(50), cfg.BatchSize)
-	cfg = normalizeRuntimePullRunTimeoutConfig(RuntimePullRunTimeoutConfig{DispatchTimeout: time.Second, ResultTimeout: time.Hour, BatchSize: 3})
-	require.Equal(t, time.Second, cfg.DispatchTimeout)
-	require.Equal(t, time.Hour, cfg.ResultTimeout)
-	require.Equal(t, int32(3), cfg.BatchSize)
-
+func TestEndpointTimeoutOptionHelpers(t *testing.T) {
 	endpointCfg := normalizeEndpointRunTimeoutConfig(EndpointRunTimeoutConfig{})
 	require.Equal(t, defaultEndpointRunTimeout, endpointCfg.StaleAfter)
 	require.Equal(t, int32(defaultEndpointRunBatchSize), endpointCfg.BatchSize)
@@ -707,7 +647,7 @@ func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	require.Equal(t, "value", *stringPtrOrNil(" value "))
 	require.Nil(t, stringPtrOrNil(" "))
 
-	wait := runtimePullWaitingNextAction("run-1", agentID)
+	wait := queuedRuntimeWaitingNextAction("run-1", agentID)
 	require.Equal(t, "start_runtime_worker", wait.Type)
 	require.Equal(t, agentID.String(), wait.AdditionalProps["agent_id"])
 }
@@ -1261,8 +1201,6 @@ func TestRuntimeSSEAndHandlerValidation(t *testing.T) {
 		{name: "messages invalid id", call: (*Handler).GetRunMessages, method: http.MethodGet, path: "/api/v1/runs/bad/messages", userID: validUser, auth: "jwt", paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 		{name: "stream invalid last event", call: (*Handler).StreamRunEvents, method: http.MethodGet, path: "/api/v1/runs/" + validRun + "/stream", userID: validUser, auth: "jwt", paramID: validRun, query: "after_sequence=bad", wantHTTP: http.StatusBadRequest, wantError: "Last-Event-ID"},
 		{name: "report event invalid id", call: (*Handler).PostRunEvent, method: http.MethodPost, path: "/api/v1/runs/bad/events", body: `{"event_type":"run.message.delta"}`, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
-		{name: "runtime result invalid id", call: (*Handler).PostRuntimePullResult, method: http.MethodPost, path: "/api/v1/agent-runtime/runs/bad/result", body: `{"status":"success"}`, auth: "runtime", paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
-		{name: "runtime result validation", call: (*Handler).PostRuntimePullResult, method: http.MethodPost, path: "/api/v1/agent-runtime/runs/" + validRun + "/result", body: `{}`, auth: "runtime", paramID: validRun, wantHTTP: http.StatusUnprocessableEntity, wantError: "Status"},
 	}
 
 	for _, tt := range tests {
@@ -1687,14 +1625,6 @@ type signalingRuntimeDeliveryEnqueuer struct {
 func (s *signalingRuntimeDeliveryEnqueuer) EnqueueIfDefault(context.Context, *db.Run) error {
 	s.done <- struct{}{}
 	return s.err
-}
-
-type blankIPContext struct {
-	echo.Context
-}
-
-func (blankIPContext) RealIP() string {
-	return " "
 }
 
 type fakeTimeoutErr struct {

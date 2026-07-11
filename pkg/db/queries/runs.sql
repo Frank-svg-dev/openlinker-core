@@ -87,75 +87,8 @@ SELECT runtime_contract_id
 FROM runs
 WHERE id = $1;
 
--- name: ClaimRuntimePullRun :one
--- Agent 通过绑定自身的访问令牌主动拉取自己名下队列型 runtime 模式的 pending run。
--- 热路径只领取未 claimed 的 run，确保可使用 idx_runs_runtime_pull_claim。
-WITH candidate AS (
-    SELECT r.id
-    FROM runs r
-    WHERE r.agent_id = $1
-      AND r.status = 'running'
-      AND r.claimed_at IS NULL
-    ORDER BY r.started_at ASC
-    LIMIT 1
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE runs r
-SET claimed_by_runtime_token_id = $2,
-    claimed_at = NOW()
-FROM candidate
-WHERE r.id = candidate.id
-RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
-          r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
-          r.started_at, r.finished_at, r.source;
-
--- name: GetClaimedRuntimePullRunByToken :one
--- 同一个 runtime token 已领取但响应丢失时，重试 claim 应返回原 run，而不是 204。
-SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
-       r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
-       r.started_at, r.finished_at, r.source
-FROM runs r
-WHERE r.agent_id = $1
-  AND r.status = 'running'
-  AND r.claimed_by_runtime_token_id = $2
-ORDER BY r.started_at ASC
-LIMIT 1;
-
--- name: ClaimStaleRuntimePullRun :one
--- 兜底领取超过 claim TTL 的 run，避免 Agent 崩溃后任务永久卡住。
-WITH candidate AS (
-    SELECT r.id
-    FROM runs r
-    WHERE r.agent_id = $1
-      AND r.status = 'running'
-      AND r.claimed_at IS NOT NULL
-      AND r.claimed_at < $3
-    ORDER BY r.started_at ASC
-    LIMIT 1
-    FOR UPDATE SKIP LOCKED
-)
-UPDATE runs r
-SET claimed_by_runtime_token_id = $2,
-    claimed_at = NOW()
-FROM candidate
-WHERE r.id = candidate.id
-RETURNING r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
-          r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
-          r.started_at, r.finished_at, r.source;
-
--- name: ReleaseRuntimePullRunClaim :exec
--- WebSocket assignment send can fail after the DB claim succeeds. Release that
--- claim immediately so another live runtime connection can pick it up instead
--- of waiting for the stale-claim TTL.
-UPDATE runs
-SET claimed_by_runtime_token_id = NULL,
-    claimed_at = NULL
-WHERE id = $1
-  AND claimed_by_runtime_token_id = $2
-  AND status = 'running';
-
 -- name: CountClaimableRuntimePullRuns :one
--- 心跳只读统计：让队列型 runtime worker 先看 pending hint，再决定是否进入 claim。
+-- 工作台只读诊断：统计队列型 Agent 尚未进入执行阶段的 run。
 SELECT COUNT(*)::int AS total
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
@@ -164,50 +97,17 @@ WHERE r.agent_id = $1
   AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
   AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes');
 
--- name: GetRuntimePullRunState :one
-SELECT r.id, r.user_id, r.agent_id, r.status, r.cost_cents,
-       r.creator_revenue_cents, r.started_at, r.claimed_by_runtime_token_id
-FROM runs r
-WHERE r.id = $1;
-
--- name: ListStaleRuntimePullRuns :many
--- 队列型 runtime 任务如果长时间未被领取或已领取但未回传终态，需要自动收敛为 timeout，
--- 避免用户侧永久看到 running。
--- 已领取任务使用 started_at 的绝对超时窗口，避免坏客户端反复 claim 刷新 claimed_at
--- 导致同一条 run 被无限续命。
-SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
-       CASE
-           WHEN r.claimed_at IS NULL THEN 'RUNTIME_PULL_NOT_CLAIMED'
-           ELSE 'RUNTIME_PULL_RESULT_TIMEOUT'
-       END::text AS error_code,
-       CASE
-           WHEN r.claimed_at IS NULL THEN '任务未被 Agent runtime 领取，请确认本地进程正在心跳并使用 GET /agent-runtime/runs/claim?wait=25 拉取任务。'
-           ELSE 'Agent runtime 已领取任务，但未在超时时间内回传结果。'
-       END::text AS error_message
-FROM runs r
-JOIN agents a ON a.id = r.agent_id
-WHERE r.status = 'running'
-  AND r.runtime_contract_id <> 'openlinker.runtime.v2'
-  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
-  AND (
-    (r.claimed_at IS NULL AND r.started_at < $1)
-    OR (r.claimed_at IS NOT NULL AND r.started_at < $2)
-  )
-ORDER BY r.started_at ASC
-LIMIT $3
-FOR UPDATE SKIP LOCKED;
-
 -- name: ListStaleEndpointRuns :many
 -- direct_http / mcp_server 由 core API 进程主动调用 endpoint。若进程在创建
 -- running run 后崩溃、重启或 DB 暂时不可写，普通执行协程可能来不及把 run
--- 收敛到终态；该查询只扫描非队列型 endpoint run，队列型 runtime_pull/runtime_ws
--- 仍由 ListStaleRuntimePullRuns 处理。
+-- 收敛到终态；该查询只扫描非队列型 endpoint run。队列型 run
+-- 由 runtime v2 lease/deadline reconciler 处理。
 SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
        COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')::text AS connection_mode,
        'ENDPOINT_RUN_TIMEOUT'::text AS error_code,
        CASE COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')
-           WHEN 'mcp_server' THEN 'Agent MCP server 调用超过平台兜底时间，已自动标记 timeout。请确认 MCP endpoint/tool 响应时间，长任务建议改用 runtime_ws/runtime_pull。'
-           ELSE 'Agent endpoint 调用超过平台兜底时间，已自动标记 timeout。请确认 endpoint 响应时间或网络连通性，长任务建议改用 runtime_ws/runtime_pull。'
+           WHEN 'mcp_server' THEN 'Agent MCP server 调用超时，已标记为 timeout。请检查 MCP endpoint/tool 的响应时间；长任务请使用 Agent Node 的 runtime v2 队列执行。'
+           ELSE 'Agent endpoint 调用超时，已标记为 timeout。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的 runtime v2 队列执行。'
        END::text AS error_message
 FROM runs r
 JOIN agents a ON a.id = r.agent_id

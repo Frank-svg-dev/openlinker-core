@@ -2187,10 +2187,6 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListPendingTaskCallbackDeliveries(ctx)
 			return err
 		}},
-		{name: "ListStaleRuntimePullRuns", run: func() error {
-			_, err := q.ListStaleRuntimePullRuns(ctx, ListStaleRuntimePullRunsParams{DispatchStaleBefore: now, ResultStaleBefore: now, Limit: 10})
-			return err
-		}},
 		{name: "ListStaleEndpointRuns", run: func() error {
 			_, err := q.ListStaleEndpointRuns(ctx, ListStaleEndpointRunsParams{StaleBefore: now, Limit: 10})
 			return err
@@ -3830,7 +3826,6 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	creatorID := uuid.New()
 	agentID := uuid.New()
 	runID := uuid.New()
-	runtimeTokenID := uuid.New()
 	latestBenchmarkID := uuid.New()
 	now := time.Date(2026, 6, 21, 0, 0, 0, 0, time.UTC)
 	authHeader := "Bearer secret"
@@ -4036,43 +4031,6 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("GetRunByID = %#v, %v", got, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetRunByID")
-
-	dbtx.row = fakeRow{values: runValues}
-	if got, err := q.ClaimRuntimePullRun(context.Background(), ClaimRuntimePullRunParams{AgentID: agentID, RuntimeTokenID: runtimeTokenID}); err != nil || got.AgentID != agentID {
-		t.Fatalf("ClaimRuntimePullRun = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "ClaimRuntimePullRun")
-
-	dbtx.row = fakeRow{values: runValues}
-	if got, err := q.GetClaimedRuntimePullRunByToken(context.Background(), GetClaimedRuntimePullRunByTokenParams{AgentID: agentID, RuntimeTokenID: runtimeTokenID}); err != nil || got.AgentID != agentID {
-		t.Fatalf("GetClaimedRuntimePullRunByToken = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "GetClaimedRuntimePullRunByToken")
-
-	dbtx.row = fakeRow{values: []any{runID, userID, agentID, "running", int32(100), int32(75), now, &runtimeTokenID}}
-	runState, err := q.GetRuntimePullRunState(context.Background(), runID)
-	if err != nil {
-		t.Fatalf("GetRuntimePullRunState error = %v", err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "GetRuntimePullRunState")
-	if runState.ID != runID || runState.ClaimedByRuntimeTokenID == nil {
-		t.Fatalf("GetRuntimePullRunState scan = %#v", runState)
-	}
-
-	staleRows := &fakeRows{rows: [][]any{{runID, userID, agentID, int32(100), now, "RUNTIME_PULL_RESULT_TIMEOUT", "Agent runtime timed out"}}}
-	dbtx.queryRows = staleRows
-	staleRuns, err := q.ListStaleRuntimePullRuns(context.Background(), ListStaleRuntimePullRunsParams{
-		DispatchStaleBefore: now.Add(-time.Hour),
-		ResultStaleBefore:   now.Add(-30 * time.Minute),
-		Limit:               25,
-	})
-	if err != nil {
-		t.Fatalf("ListStaleRuntimePullRuns error = %v", err)
-	}
-	requireSQLName(t, dbtx.querySQL, "ListStaleRuntimePullRuns")
-	if !staleRows.closed || len(staleRuns) != 1 || staleRuns[0].ErrorCode != "RUNTIME_PULL_RESULT_TIMEOUT" {
-		t.Fatalf("ListStaleRuntimePullRuns scan = %#v closed=%v", staleRuns, staleRows.closed)
-	}
 
 	endpointRows := &fakeRows{rows: [][]any{{runID, userID, agentID, int32(100), now, "mcp_server", "ENDPOINT_RUN_TIMEOUT", "Agent endpoint timed out"}}}
 	dbtx.queryRows = endpointRows

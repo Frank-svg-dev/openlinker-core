@@ -25,6 +25,19 @@ func setMCPServerMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 	require.NoError(t, err)
 }
 
+func setQueuedRuntimeMode(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(),
+		`UPDATE agents
+		 SET connection_mode='runtime_pull',
+		     endpoint_url=$2
+		 WHERE id=$1`,
+		agentID,
+		"openlinker-runtime-v2://"+agentID.String(),
+	)
+	require.NoError(t, err)
+}
+
 func TestEndpointRunTimeoutsStaleDirectAndMCPRunsOnly(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
@@ -36,7 +49,7 @@ func TestEndpointRunTimeoutsStaleDirectAndMCPRunsOnly(t *testing.T) {
 	mcpAgentID := insertAgent(t, pool, creatorID, "https://example.com/mcp", 10, "approved")
 	setMCPServerMode(t, pool, mcpAgentID)
 	queuedAgentID := insertAgent(t, pool, creatorID, "https://example.com/not-used", 10, "approved")
-	setRuntimePullMode(t, pool, queuedAgentID)
+	setQueuedRuntimeMode(t, pool, queuedAgentID)
 
 	directRunID := insertRunningRun(t, pool, userID, directAgentID)
 	mcpRunID := insertRunningRun(t, pool, userID, mcpAgentID)
