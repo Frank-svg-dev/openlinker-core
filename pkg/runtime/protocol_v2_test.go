@@ -202,16 +202,7 @@ func TestValidateRuntimeReplyCorrelation(t *testing.T) {
 }
 
 func TestRuntimeResumePreservesSourceAttemptSessionDuringTakeover(t *testing.T) {
-	identity := AttemptIdentity{
-		RunID:            uuid.New(),
-		AttemptID:        uuid.New(),
-		LeaseID:          uuid.New(),
-		FencingToken:     3,
-		NodeID:           uuid.New(),
-		AgentID:          uuid.New(),
-		WorkerID:         "worker-a",
-		RuntimeSessionID: uuid.New(),
-	}
+	identity := runtimeTestAttemptIdentity()
 	payload := RuntimeResumePayload{
 		NodeID:           identity.NodeID,
 		AgentID:          identity.AgentID,
@@ -226,6 +217,102 @@ func TestRuntimeResumePreservesSourceAttemptSessionDuringTakeover(t *testing.T) 
 
 	payload.AgentID = uuid.New()
 	requireRuntimeTransportCode(t, ValidateRuntimePayload(payload), RuntimeErrorValidationFailed)
+}
+
+func TestRuntimeResumeRejectsAmbiguousSpoolState(t *testing.T) {
+	t.Parallel()
+
+	identity := runtimeTestAttemptIdentity()
+	resultID := uuid.New()
+	finalSequence := int64(5)
+	tests := []struct {
+		name    string
+		attempt ResumeAttempt
+	}{
+		{
+			name: "range overlaps acknowledged prefix",
+			attempt: ResumeAttempt{AttemptIdentity: identity, LastAckedClientEventSeq: 2,
+				PendingClientEventRanges: []EventRange{{Start: 2, End: 3}}},
+		},
+		{
+			name: "ranges overlap",
+			attempt: ResumeAttempt{AttemptIdentity: identity,
+				PendingClientEventRanges: []EventRange{{Start: 2, End: 4}, {Start: 4, End: 5}}},
+		},
+		{
+			name: "ranges are unsorted",
+			attempt: ResumeAttempt{AttemptIdentity: identity,
+				PendingClientEventRanges: []EventRange{{Start: 5, End: 6}, {Start: 2, End: 3}}},
+		},
+		{
+			name: "result missing final sequence",
+			attempt: ResumeAttempt{AttemptIdentity: identity, PendingClientEventRanges: []EventRange{},
+				PendingResultID: &resultID},
+		},
+		{
+			name: "final sequence missing result",
+			attempt: ResumeAttempt{AttemptIdentity: identity, PendingClientEventRanges: []EventRange{},
+				FinalClientEventSeq: &finalSequence},
+		},
+		{
+			name: "final sequence precedes pending events",
+			attempt: ResumeAttempt{AttemptIdentity: identity,
+				PendingClientEventRanges: []EventRange{{Start: 4, End: 6}}, PendingResultID: &resultID,
+				FinalClientEventSeq: &finalSequence},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			requireRuntimeTransportCode(t, ValidateRuntimePayload(test.attempt), RuntimeErrorValidationFailed)
+		})
+	}
+}
+
+func TestRuntimeResumeRejectsDuplicateAttemptIdentity(t *testing.T) {
+	t.Parallel()
+
+	identity := runtimeTestAttemptIdentity()
+	attempt := ResumeAttempt{AttemptIdentity: identity, PendingClientEventRanges: []EventRange{}}
+	payload := RuntimeResumePayload{
+		NodeID: identity.NodeID, AgentID: identity.AgentID, WorkerID: identity.WorkerID,
+		RuntimeSessionID: uuid.New(), Attempts: []ResumeAttempt{attempt, attempt},
+	}
+	requireRuntimeTransportCode(t, ValidateRuntimePayload(payload), RuntimeErrorValidationFailed)
+}
+
+func TestRuntimeResumeDecisionActionsAreCoherent(t *testing.T) {
+	t.Parallel()
+
+	identity := runtimeTestAttemptIdentity()
+	expiresAt := time.Now().UTC().Add(time.Minute)
+	valid := []RunResumeAcceptedPayload{
+		{AttemptIdentity: identity, Decision: RuntimeResumeContinueExecution, LeaseExpiresAt: &expiresAt,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionContinueExecution, RuntimeActionUploadEvents, RuntimeActionUploadResult}},
+		{AttemptIdentity: identity, Decision: RuntimeResumeUploadSpoolOnly,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionUploadResult}},
+		{AttemptIdentity: identity, Decision: RuntimeResumeResultAcked,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionClearSpool}},
+		{AttemptIdentity: identity, Decision: RuntimeResumeLeaseRevoked,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionStopExecution, RuntimeActionClearSpool}},
+	}
+	for _, decision := range valid {
+		require.NoError(t, ValidateRuntimePayload(decision))
+	}
+
+	invalid := []RunResumeAcceptedPayload{
+		{AttemptIdentity: identity, Decision: RuntimeResumeContinueExecution,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionContinueExecution}},
+		{AttemptIdentity: identity, Decision: RuntimeResumeUploadSpoolOnly, LeaseExpiresAt: &expiresAt,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionUploadResult}},
+		{AttemptIdentity: identity, Decision: RuntimeResumeResultAcked,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionUploadResult}},
+		{AttemptIdentity: identity, Decision: RuntimeResumeLeaseRevoked,
+			AllowedActions: []RuntimeResumeAction{RuntimeActionClearSpool}},
+	}
+	for _, decision := range invalid {
+		requireRuntimeTransportCode(t, ValidateRuntimePayload(decision), RuntimeErrorValidationFailed)
+	}
 }
 
 func TestRuntimeTransportErrorMappings(t *testing.T) {
@@ -324,6 +411,19 @@ func runtimeTestEnvelope(messageType RuntimeMessageType, replyTo *uuid.UUID) Run
 			SentAt:            time.Now().UTC(),
 		},
 		Payload: json.RawMessage(`{}`),
+	}
+}
+
+func runtimeTestAttemptIdentity() AttemptIdentity {
+	return AttemptIdentity{
+		RunID:            uuid.New(),
+		AttemptID:        uuid.New(),
+		LeaseID:          uuid.New(),
+		FencingToken:     3,
+		NodeID:           uuid.New(),
+		AgentID:          uuid.New(),
+		WorkerID:         "worker-a",
+		RuntimeSessionID: uuid.New(),
 	}
 }
 

@@ -302,7 +302,7 @@ func ValidateRuntimePayload(payload any) error {
 		if err := validateAttemptIdentity(value.AttemptIdentity); err != nil {
 			return err
 		}
-		if value.LastClientEventSeq < 0 || value.Capacity < 0 || value.Inflight < 0 {
+		if value.LastClientEventSeq < 0 || !validRuntimeCapacitySnapshot(value.Capacity, value.Inflight) {
 			return runtimeValidationError("invalid lease renewal", nil)
 		}
 	case RunLeaseRenewedPayload:
@@ -343,10 +343,15 @@ func ValidateRuntimePayload(payload any) error {
 	case RunResumeAcceptedPayload:
 		return validateResumeAccepted(value)
 	case RuntimeResumeResponse:
+		seen := make(map[AttemptIdentity]struct{}, len(value.Decisions))
 		for _, decision := range value.Decisions {
 			if err := validateResumeAccepted(decision); err != nil {
 				return err
 			}
+			if _, duplicate := seen[decision.AttemptIdentity]; duplicate {
+				return runtimeValidationError("runtime resume decisions must be unique per Attempt", nil)
+			}
+			seen[decision.AttemptIdentity] = struct{}{}
 		}
 	case RunLeaseRevokedPayload:
 		if err := validateAttemptIdentity(value.AttemptIdentity); err != nil {
@@ -452,7 +457,7 @@ func validateAssignmentReject(value RunAssignmentRejectPayload) error {
 	if err := validateAttemptIdentity(value.AttemptIdentity); err != nil {
 		return err
 	}
-	if value.Capacity < 0 || value.Inflight < 0 {
+	if !validRuntimeCapacitySnapshot(value.Capacity, value.Inflight) {
 		return runtimeValidationError("invalid assignment rejection capacity", nil)
 	}
 	switch value.ReasonCode {
@@ -461,6 +466,11 @@ func validateAssignmentReject(value RunAssignmentRejectPayload) error {
 	default:
 		return runtimeValidationError("invalid assignment rejection reason", nil)
 	}
+}
+
+func validRuntimeCapacitySnapshot(capacity, inflight int64) bool {
+	return capacity >= 0 && capacity <= RuntimeMaximumNodeCapacity &&
+		inflight >= 0 && inflight <= RuntimeMaximumNodeCapacity
 }
 
 func validateRunEvent(value RunEventPayload) error {
@@ -564,16 +574,27 @@ func validateResumeAttempt(value ResumeAttempt) error {
 	if value.LastAckedClientEventSeq < 0 {
 		return runtimeValidationError("invalid resume event sequence", nil)
 	}
+	previousEnd := value.LastAckedClientEventSeq
 	for _, eventRange := range value.PendingClientEventRanges {
 		if eventRange.Start < 1 || eventRange.End < eventRange.Start {
 			return runtimeValidationError("invalid pending event range", nil)
 		}
+		if eventRange.Start <= previousEnd {
+			return runtimeValidationError("pending event ranges must be ordered, non-overlapping, and newer than the acknowledged sequence", nil)
+		}
+		previousEnd = eventRange.End
 	}
 	if value.PendingResultID != nil && *value.PendingResultID == uuid.Nil {
 		return runtimeValidationError("invalid pending result ID", nil)
 	}
 	if value.FinalClientEventSeq != nil && *value.FinalClientEventSeq < 0 {
 		return runtimeValidationError("invalid final event sequence", nil)
+	}
+	if (value.PendingResultID == nil) != (value.FinalClientEventSeq == nil) {
+		return runtimeValidationError("pending result ID and final event sequence must be provided together", nil)
+	}
+	if value.FinalClientEventSeq != nil && *value.FinalClientEventSeq < previousEnd {
+		return runtimeValidationError("final event sequence precedes pending events", nil)
 	}
 	return nil
 }
@@ -582,6 +603,7 @@ func validateRuntimeResume(value RuntimeResumePayload) error {
 	if value.NodeID == uuid.Nil || value.AgentID == uuid.Nil || value.RuntimeSessionID == uuid.Nil || !validRequiredString(value.WorkerID, 200) || len(value.Attempts) > RuntimeMaximumResumeAttempts {
 		return runtimeValidationError("invalid runtime resume identity", nil)
 	}
+	seen := make(map[AttemptIdentity]struct{}, len(value.Attempts))
 	for _, attempt := range value.Attempts {
 		if err := validateResumeAttempt(attempt); err != nil {
 			return err
@@ -593,6 +615,10 @@ func validateRuntimeResume(value RuntimeResumePayload) error {
 		if identity.NodeID != value.NodeID || identity.AgentID != value.AgentID || identity.WorkerID != value.WorkerID {
 			return runtimeValidationError("resume attempt identity does not match session", nil)
 		}
+		if _, duplicate := seen[identity]; duplicate {
+			return runtimeValidationError("runtime resume attempts must be unique", nil)
+		}
+		seen[identity] = struct{}{}
 	}
 	return nil
 }
@@ -620,6 +646,31 @@ func validateResumeAccepted(value RunResumeAcceptedPayload) error {
 			return runtimeValidationError("runtime resume actions must be unique", nil)
 		}
 		seen[action] = struct{}{}
+	}
+
+	has := func(action RuntimeResumeAction) bool {
+		_, ok := seen[action]
+		return ok
+	}
+	switch value.Decision {
+	case RuntimeResumeContinueExecution:
+		if value.LeaseExpiresAt == nil || len(seen) != 3 ||
+			!has(RuntimeActionContinueExecution) || !has(RuntimeActionUploadEvents) || !has(RuntimeActionUploadResult) {
+			return runtimeValidationError("continue_execution requires a lease expiry and execution/event/result actions", nil)
+		}
+	case RuntimeResumeUploadSpoolOnly:
+		if value.LeaseExpiresAt != nil || len(seen) == 0 || len(seen) > 2 ||
+			(has(RuntimeActionContinueExecution) || has(RuntimeActionStopExecution) || has(RuntimeActionClearSpool)) {
+			return runtimeValidationError("upload_spool_only permits only event and result upload actions", nil)
+		}
+	case RuntimeResumeResultAcked:
+		if value.LeaseExpiresAt != nil || len(seen) != 1 || !has(RuntimeActionClearSpool) {
+			return runtimeValidationError("result_already_acked permits only clearing the spool", nil)
+		}
+	case RuntimeResumeLeaseRevoked:
+		if value.LeaseExpiresAt != nil || len(seen) != 2 || !has(RuntimeActionStopExecution) || !has(RuntimeActionClearSpool) {
+			return runtimeValidationError("lease_revoked requires stop_execution and clear_spool actions", nil)
+		}
 	}
 	return nil
 }
