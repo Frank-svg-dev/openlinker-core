@@ -283,8 +283,6 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		ParentTaskID      string   `json:"parent_task_id"`
 		TraceID           string   `json:"trace_id"`
 		ReferenceTaskIDs  []string `json:"reference_task_ids"`
-		CallAgentEndpoint string   `json:"call_agent_endpoint"`
-		AgentScopes       []string `json:"agent_scopes"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		targetHits++
@@ -356,8 +354,6 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, parentRunID.String(), receivedA2A.ParentTaskID)
 	assert.Equal(t, "trace-delegation", receivedA2A.TraceID)
 	assert.ElementsMatch(t, []string{"task-a", "task-z", parentRunID.String()}, receivedA2A.ReferenceTaskIDs)
-	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", receivedA2A.CallAgentEndpoint)
-	assert.Contains(t, receivedA2A.AgentScopes, "agent:call")
 
 	replayReq := *callReq
 	replayReq.ContextID = ""
@@ -514,8 +510,7 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 			Input map[string]any `json:"input"`
 			RunID string         `json:"run_id"`
 			A2A   struct {
-				CurrentRunID      string `json:"current_run_id"`
-				CallAgentEndpoint string `json:"call_agent_endpoint"`
+				CurrentRunID string `json:"current_run_id"`
 			} `json:"a2a"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
@@ -535,7 +530,6 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Equal(t, request.RunID, request.A2A.CurrentRunID)
-		require.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", request.A2A.CallAgentEndpoint)
 		require.Equal(t, "success", child.Status)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"output": map[string]any{

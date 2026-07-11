@@ -109,11 +109,7 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 		ResultMethod:   http.MethodPost,
 		ResultRequired: true,
 		A2A: &AgentA2AContext{
-			CurrentRunID:      runID.String(),
-			CallAgentEndpoint: "/api/v1/a2a",
-			CallAgentMethod:   http.MethodPost,
-			AgentTokenType:    "agent_runtime",
-			AgentScopes:       []string{"agent:pull"},
+			CurrentRunID: runID.String(),
 		},
 	}
 

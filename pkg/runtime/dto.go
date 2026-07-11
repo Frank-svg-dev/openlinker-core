@@ -298,10 +298,6 @@ type AgentA2AContext struct {
 	ParentTaskID      string   `json:"parent_task_id,omitempty"`
 	TraceID           string   `json:"trace_id,omitempty"`
 	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
-	CallAgentEndpoint string   `json:"call_agent_endpoint"`
-	CallAgentMethod   string   `json:"call_agent_method"`
-	AgentTokenType    string   `json:"agent_token_type"`
-	AgentScopes       []string `json:"agent_scopes"`
 }
 
 // AgentResponse 创作者 endpoint → 平台的响应体。

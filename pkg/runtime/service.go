@@ -321,11 +321,7 @@ func (s *Service) AppendRuntimeEvent(
 
 func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *AgentA2AContext {
 	ctx := &AgentA2AContext{
-		CurrentRunID:      runID.String(),
-		CallAgentEndpoint: s.callAgentEndpointURL(),
-		CallAgentMethod:   "POST",
-		AgentTokenType:    "ol_agent",
-		AgentScopes:       []string{"agent:call"},
+		CurrentRunID: runID.String(),
 	}
 	if delegation != nil {
 		ctx.ParentRunID = delegation.ParentRunID.String()
@@ -470,31 +466,12 @@ func conversationMessageFromRunMessage(message db.RunMessage) ConversationMessag
 	}
 }
 
-func (s *Service) callAgentEndpointURL() string {
-	apiURL := ""
-	if s.cfg != nil {
-		apiURL = s.cfg.RuntimeMTLSAPIURL
-		if strings.TrimSpace(apiURL) == "" {
-			apiURL = s.cfg.APIURL
-		}
-	}
-	apiBase := strings.TrimRight(strings.TrimSpace(apiURL), "/")
-	if apiBase == "" {
-		apiBase = "http://localhost:8080"
-	}
-	return apiBase + runtimeV2CallAgentPath
-}
-
 func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {
 	if ctx == nil {
 		return nil
 	}
 	value := map[string]interface{}{
-		"current_run_id":      ctx.CurrentRunID,
-		"call_agent_endpoint": ctx.CallAgentEndpoint,
-		"call_agent_method":   ctx.CallAgentMethod,
-		"agent_token_type":    ctx.AgentTokenType,
-		"agent_scopes":        ctx.AgentScopes,
+		"current_run_id": ctx.CurrentRunID,
 	}
 	if ctx.ParentRunID != "" {
 		value["parent_run_id"] = ctx.ParentRunID

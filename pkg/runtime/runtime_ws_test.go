@@ -81,11 +81,7 @@ func TestRuntimeQueuedModeAndAssignmentMessage(t *testing.T) {
 	runID := uuid.NewString()
 	agentID := uuid.NewString()
 	a2a := &AgentA2AContext{
-		CurrentRunID:      runID,
-		CallAgentEndpoint: "https://api.example.com/api/v1/agent-runtime/call-agent",
-		CallAgentMethod:   http.MethodPost,
-		AgentTokenType:    "ol_agent",
-		AgentScopes:       []string{"agent:call"},
+		CurrentRunID: runID,
 	}
 	msg := runtimeWSAssignmentMessage(&RuntimePullRunResponse{
 		RunID:          runID,
@@ -118,7 +114,7 @@ func TestRuntimeQueuedModeAndAssignmentMessage(t *testing.T) {
 	if msg.Input["q"] != "hello" || msg.Metadata["trace_id"] != "trace-1" || msg.ResultMethod != http.MethodPost || !msg.ResultRequired {
 		t.Fatalf("assignment message payload = %#v", msg)
 	}
-	if msg.A2A != a2a || msg.A2A.CallAgentEndpoint == "" {
+	if msg.A2A != a2a || msg.A2A.CurrentRunID == "" {
 		t.Fatalf("assignment message a2a context = %#v", msg.A2A)
 	}
 	if msg.Conversation == nil || msg.Conversation.SessionKey != "conv-1" || msg.Conversation.HistoryBeforeCurrent[0].Content != "previous" {
