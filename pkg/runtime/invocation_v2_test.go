@@ -12,7 +12,7 @@ import (
 )
 
 func TestRuntimeInvocationCapabilityIsDeterministicAndDomainSeparated(t *testing.T) {
-	signer, err := NewRuntimeInvocationSigner("test-runtime-signing-secret")
+	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
 	capability := runtimeInvocationCapabilityFixture()
 
@@ -32,14 +32,14 @@ func TestRuntimeInvocationCapabilityIsDeterministicAndDomainSeparated(t *testing
 	require.Equal(t, capability, gotContext)
 	require.Equal(t, capability, gotToken)
 
-	other, err := NewRuntimeInvocationSigner("different-runtime-signing-secret")
+	other, err := NewRuntimeInvocationSigner("different-runtime-signing-secret-00000000")
 	require.NoError(t, err)
 	_, err = other.VerifyInvocationToken(tokenA, databaseNow)
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 }
 
 func TestRuntimeInvocationCapabilityRejectsTamperAndDatabaseExpiry(t *testing.T) {
-	signer, err := NewRuntimeInvocationSigner("test-runtime-signing-secret")
+	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
 	capability := runtimeInvocationCapabilityFixture()
 	_, token, err := signer.Issue(capability)
@@ -59,10 +59,17 @@ func TestRuntimeInvocationCapabilityRejectsTamperAndDatabaseExpiry(t *testing.T)
 	require.ErrorIs(t, err, ErrExpiredRuntimeInvocation)
 	_, err = signer.VerifyInvocationToken(token, capability.ExpiresAt)
 	require.ErrorIs(t, err, ErrExpiredRuntimeInvocation)
+
+	payload, err := canonicalRuntimeInvocationCapability(capability)
+	require.NoError(t, err)
+	payload = []byte(strings.Replace(string(payload), runtimeInvocationAudience, "openlinker.runtime.v2/other", 1))
+	wrongAudience := encodeSignedRuntimeCapability(runtimeInvocationTokenPrefix, payload, signer.tokenKey[:])
+	_, err = signer.VerifyInvocationToken(wrongAudience, capability.IssuedAt.Add(time.Second))
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 }
 
 func TestRuntimeInvocationProofBindsContextMethodPathKeyAndBody(t *testing.T) {
-	signer, err := NewRuntimeInvocationSigner("test-runtime-signing-secret")
+	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
 	capability := runtimeInvocationCapabilityFixture()
 	contextValue, token, err := signer.Issue(capability)
@@ -98,7 +105,11 @@ func TestRuntimeInvocationProofBindsContextMethodPathKeyAndBody(t *testing.T) {
 func TestRuntimeInvocationCapabilityValidation(t *testing.T) {
 	_, err := NewRuntimeInvocationSigner("  ")
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
-	signer, err := NewRuntimeInvocationSigner("test-runtime-signing-secret")
+	_, err = NewRuntimeInvocationSigner("too-short")
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+	_, err = NewRuntimeInvocationSigner(" " + runtimeInvocationTestSecret)
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
 	invalid := runtimeInvocationCapabilityFixture()
 	invalid.RunID = uuid.Nil
@@ -108,6 +119,22 @@ func TestRuntimeInvocationCapabilityValidation(t *testing.T) {
 	_, err = signer.VerifyInvocationToken("garbage", time.Now())
 	require.True(t, errors.Is(err, ErrInvalidRuntimeInvocation))
 }
+
+func TestRuntimeInvocationWorkerLimitCountsRunes(t *testing.T) {
+	t.Parallel()
+
+	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
+	require.NoError(t, err)
+	capability := runtimeInvocationCapabilityFixture()
+	capability.WorkerID = strings.Repeat("节", 200)
+	_, _, err = signer.Issue(capability)
+	require.NoError(t, err)
+	capability.WorkerID += "点"
+	_, _, err = signer.Issue(capability)
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+}
+
+const runtimeInvocationTestSecret = "test-runtime-signing-secret-00000000"
 
 func runtimeInvocationCapabilityFixture() RuntimeInvocationCapability {
 	issuedAt := time.Date(2026, 7, 11, 4, 0, 0, 123456789, time.UTC)

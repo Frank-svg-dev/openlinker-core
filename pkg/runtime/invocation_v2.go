@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -25,6 +26,8 @@ const (
 	runtimeInvocationTokenDomain       = "openlinker/runtime-v2/invocation-token"
 	runtimeInvocationContextDomain     = "openlinker/runtime-v2/node-envelope"
 	runtimeInvocationProofDomain       = "openlinker/runtime-v2/invocation-proof"
+	runtimeInvocationAudience          = "openlinker.runtime.v2/call-agent"
+	runtimeInvocationMinimumKeyBytes   = 32
 )
 
 var (
@@ -70,8 +73,8 @@ type RuntimeInvocationSigner struct {
 }
 
 func NewRuntimeInvocationSigner(secret string) (*RuntimeInvocationSigner, error) {
-	if strings.TrimSpace(secret) == "" {
-		return nil, fmt.Errorf("%w: empty signing secret", ErrInvalidRuntimeInvocation)
+	if strings.TrimSpace(secret) != secret || len(secret) < runtimeInvocationMinimumKeyBytes {
+		return nil, fmt.Errorf("%w: signing secret must contain at least %d non-whitespace bytes", ErrInvalidRuntimeInvocation, runtimeInvocationMinimumKeyBytes)
 	}
 	return &RuntimeInvocationSigner{
 		tokenKey:   deriveRuntimeInvocationKey(secret, runtimeInvocationTokenDomain),
@@ -188,6 +191,7 @@ func canonicalRuntimeInvocationCapability(capability RuntimeInvocationCapability
 	}
 	return CanonicalizeRFC8785(map[string]any{
 		"agent_id":           capability.AgentID.String(),
+		"audience":           runtimeInvocationAudience,
 		"attempt_id":         capability.AttemptID.String(),
 		"credential_id":      capability.CredentialID.String(),
 		"expires_at":         capability.ExpiresAt.UTC().Format(time.RFC3339Nano),
@@ -207,7 +211,7 @@ func validateRuntimeInvocationCapability(capability RuntimeInvocationCapability)
 	if capability.RunID == uuid.Nil || capability.AttemptID == uuid.Nil || capability.LeaseID == uuid.Nil ||
 		capability.AgentID == uuid.Nil || capability.CredentialID == uuid.Nil || capability.NodeID == uuid.Nil ||
 		capability.RuntimeSessionID == uuid.Nil || capability.FencingToken < 1 ||
-		strings.TrimSpace(capability.WorkerID) == "" || len(capability.WorkerID) > 200 ||
+		strings.TrimSpace(capability.WorkerID) == "" || utf8.RuneCountInString(capability.WorkerID) > 200 ||
 		capability.IssuedAt.IsZero() || capability.ExpiresAt.IsZero() ||
 		!capability.IssuedAt.Before(capability.ExpiresAt) {
 		return ErrInvalidRuntimeInvocation
@@ -218,6 +222,7 @@ func validateRuntimeInvocationCapability(capability RuntimeInvocationCapability)
 func decodeRuntimeInvocationCapability(payload []byte) (RuntimeInvocationCapability, error) {
 	var wire struct {
 		Version          string `json:"version"`
+		Audience         string `json:"audience"`
 		RunID            string `json:"run_id"`
 		AttemptID        string `json:"attempt_id"`
 		LeaseID          string `json:"lease_id"`
@@ -236,7 +241,8 @@ func decodeRuntimeInvocationCapability(payload []byte) (RuntimeInvocationCapabil
 	if err := decoder.Decode(&wire); err != nil {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
-	if err := rejectTrailingRuntimeInvocationJSON(decoder); err != nil || wire.Version != runtimeInvocationCapabilityVersion {
+	if err := rejectTrailingRuntimeInvocationJSON(decoder); err != nil ||
+		wire.Version != runtimeInvocationCapabilityVersion || wire.Audience != runtimeInvocationAudience {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
 	capability := RuntimeInvocationCapability{FencingToken: wire.FencingToken, WorkerID: wire.WorkerID}
