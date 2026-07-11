@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
@@ -37,6 +38,7 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 		"POST /api/v1/agent-runtime/v2/runs/:id/events",
 		"POST /api/v1/agent-runtime/v2/runs/:id/result",
 		"POST /api/v1/agent-runtime/v2/runs/resume",
+		"POST /api/v1/agent-runtime/v2/call-agent",
 		"GET /api/v1/agent-runtime/v2/ws",
 	} {
 		require.True(t, routes[route], route)
@@ -330,6 +332,50 @@ func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
 	require.Equal(t, 1, fixture.resume.calls)
 }
 
+func TestRuntimeV2CallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService(t *testing.T) {
+	fixture := newRuntimeV2HandlerFixture()
+	childRunID := uuid.New()
+	fixture.delegation.summary = RunSummary{
+		RunID: childRunID, Status: RuntimeRunRunning, DispatchState: RuntimeDispatchPending,
+	}
+	body := `{"target_agent_id":"` + uuid.NewString() + `","input":{"q":"delegate"}}`
+	e := echo.New()
+	fixture.controller().Register(e.Group("/api/v1"))
+	req := httptest.NewRequest(http.MethodPost, runtimeV2CallAgentPath, strings.NewReader(body))
+	req.Header.Set(echo.HeaderAuthorization, "Bearer invocation-token")
+	req.Header.Set("Idempotency-Key", "delegate-once")
+	req.Header.Set("OpenLinker-Invocation-Context", "node-envelope")
+	req.Header.Set("OpenLinker-Invocation-Proof", "request-proof")
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, req)
+
+	require.Equal(t, http.StatusAccepted, recorder.Code, recorder.Body.String())
+	require.Equal(t, 1, fixture.devices.calls)
+	require.Equal(t, 1, fixture.delegation.calls)
+	authorization := fixture.delegation.authorization
+	require.Equal(t, fixture.authenticated.Device, authorization.Device)
+	require.Equal(t, "invocation-token", authorization.InvocationToken)
+	require.Equal(t, "node-envelope", authorization.InvocationContext)
+	require.Equal(t, "request-proof", authorization.InvocationProof)
+	require.Equal(t, "delegate-once", authorization.IdempotencyKey)
+	require.Equal(t, http.MethodPost, authorization.ProofRequest.Method)
+	require.Equal(t, runtimeV2CallAgentPath, authorization.ProofRequest.Path)
+	require.Equal(t, []byte(body), authorization.ProofRequest.Body)
+	var summary RunSummary
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &summary))
+	require.Equal(t, childRunID, summary.RunID)
+
+	fixture.devices.err = errors.New("revoked device")
+	tracked := &runtimeV2TrackedReader{reader: strings.NewReader(body)}
+	req = httptest.NewRequest(http.MethodPost, runtimeV2CallAgentPath, tracked)
+	req.Header.Set(echo.HeaderAuthorization, "Bearer invocation-token")
+	recorder = httptest.NewRecorder()
+	e.ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusUnauthorized, recorder.Code)
+	require.Equal(t, 0, tracked.reads)
+	require.Equal(t, 1, fixture.delegation.calls)
+}
+
 func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.T) {
 	fixture := newRuntimeV2HandlerFixture()
 	identity := fixture.attemptIdentity()
@@ -399,6 +445,7 @@ func TestMapRuntimeV2HTTPErrorUsesStableSessionLeaseAndStoreCodes(t *testing.T) 
 		{name: "lease identity", err: newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil), code: RuntimeErrorLeaseIdentityMismatch},
 		{name: "lease expired", err: newRuntimeLeaseError(RuntimeLeaseErrorLeaseExpired, nil), code: RuntimeErrorLeaseExpired},
 		{name: "event conflict", err: newRuntimeEventError(RuntimeEventErrorIDConflict, nil), code: RuntimeErrorEventIDConflict},
+		{name: "idempotency reuse", err: httpx.NewError(http.StatusConflict, httpx.ErrorCode(RuntimeErrorIdempotencyKeyReused), "hidden"), code: RuntimeErrorIdempotencyKeyReused},
 		{name: "unknown", err: errors.New("database detail must stay hidden"), code: RuntimeErrorInternal},
 	}
 	for _, test := range tests {
@@ -421,6 +468,7 @@ type runtimeV2HandlerFixture struct {
 	events        *runtimeV2EventStoreFake
 	finalizer     *runtimeV2ResultFinalizerFake
 	resume        *runtimeV2ResumeServiceFake
+	delegation    *runtimeV2DelegationServiceFake
 }
 
 func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
@@ -455,12 +503,13 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 		tokens: &runtimeV2TokenValidatorFake{token: db.AgentRuntimeToken{
 			ID: authenticated.CredentialID, AgentID: authenticated.AgentID,
 		}},
-		devices:   &runtimeV2DeviceAuthenticatorFake{device: authenticated.Device},
-		sessions:  &runtimeV2SessionServiceFake{},
-		leases:    &runtimeV2LeaseServiceFake{},
-		events:    &runtimeV2EventStoreFake{},
-		finalizer: &runtimeV2ResultFinalizerFake{},
-		resume:    &runtimeV2ResumeServiceFake{},
+		devices:    &runtimeV2DeviceAuthenticatorFake{device: authenticated.Device},
+		sessions:   &runtimeV2SessionServiceFake{},
+		leases:     &runtimeV2LeaseServiceFake{},
+		events:     &runtimeV2EventStoreFake{},
+		finalizer:  &runtimeV2ResultFinalizerFake{},
+		resume:     &runtimeV2ResumeServiceFake{},
+		delegation: &runtimeV2DelegationServiceFake{},
 	}
 	fixture.sessions.resolveResponse = acting
 	fixture.sessions.workerResolveResponse = acting
@@ -476,6 +525,7 @@ func (f *runtimeV2HandlerFixture) controller() *RuntimeV2HTTPController {
 		EventStore:          f.events,
 		Finalizer:           f.finalizer,
 		Resume:              f.resume,
+		Delegation:          f.delegation,
 	})
 }
 
@@ -705,6 +755,22 @@ type runtimeV2ResumeServiceFake struct {
 	calls     int
 }
 
+type runtimeV2DelegationServiceFake struct {
+	summary       RunSummary
+	err           error
+	authorization RuntimeV2DelegationAuthorization
+	calls         int
+}
+
+func (f *runtimeV2DelegationServiceFake) CallAgent(
+	_ context.Context,
+	authorization RuntimeV2DelegationAuthorization,
+) (RunSummary, error) {
+	f.calls++
+	f.authorization = authorization
+	return f.summary, f.err
+}
+
 func (f *runtimeV2ResumeServiceFake) Resume(
 	_ context.Context,
 	principal RuntimeSessionPrincipal,
@@ -730,4 +796,5 @@ var (
 	_ RuntimeV2EventStore          = (*runtimeV2EventStoreFake)(nil)
 	_ RuntimeV2ResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
 	_ RuntimeV2ResumeService       = (*runtimeV2ResumeServiceFake)(nil)
+	_ RuntimeV2DelegationAPI       = (*runtimeV2DelegationServiceFake)(nil)
 )

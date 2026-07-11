@@ -228,11 +228,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 func configureRuntimeV2(
 	handler *runtime.Handler,
-	tokenValidator runtime.RuntimeV2TokenValidator,
+	runtimeService *runtime.Service,
 	pool *pgxpool.Pool,
 	cfg *config.Config,
 ) {
-	if handler == nil || tokenValidator == nil || pool == nil || cfg == nil {
+	if handler == nil || runtimeService == nil || pool == nil || cfg == nil {
 		return
 	}
 	coreInstanceID := uuid.New()
@@ -240,6 +240,7 @@ func configureRuntimeV2(
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
 
 	var leases runtime.RuntimeV2LeaseService
+	var delegation runtime.RuntimeV2DelegationAPI
 	signer, err := runtime.NewRuntimeInvocationSignerWithPrevious(
 		cfg.RuntimeInvocationSigningKeyID,
 		cfg.RuntimeInvocationSigningSecret,
@@ -250,16 +251,18 @@ func configureRuntimeV2(
 		log.Warn().Err(err).Msg("runtime v2 assignment capabilities are disabled")
 	} else {
 		leases = runtime.NewRuntimeLeaseService(pool, coreInstanceID, signer, runtime.DefaultRuntimeLeaseConfig())
+		delegation = runtime.NewRuntimeV2DelegationService(pool, runtimeService, signer)
 	}
 
 	handler.SetRuntimeV2Dependencies(runtime.RuntimeV2HTTPDependencies{
-		TokenValidator:      tokenValidator,
+		TokenValidator:      runtimeService,
 		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
 		Sessions:            sessions,
 		Leases:              leases,
 		EventStore:          runtime.NewRuntimeEventStore(pool),
 		Finalizer:           runtime.NewResultFinalizer(pool, nil, nil),
 		Resume:              runtime.NewRuntimeResumeService(pool, coreInstanceID, 0),
+		Delegation:          delegation,
 	})
 }
 

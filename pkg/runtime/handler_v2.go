@@ -12,6 +12,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
 const runtimeV2TokenScope = "agent:pull"
@@ -56,6 +57,10 @@ type RuntimeV2ResultFinalizer interface {
 	Finalize(context.Context, RuntimeResultPrincipal, RuntimeResultRequest) (RuntimeResultAck, error)
 }
 
+type RuntimeV2DelegationAPI interface {
+	CallAgent(context.Context, RuntimeV2DelegationAuthorization) (RunSummary, error)
+}
+
 // RuntimeV2HTTPDependencies are deliberately narrow so the HTTP adapter has
 // no database access and cannot reconstruct trusted principals from JSON.
 type RuntimeV2HTTPDependencies struct {
@@ -66,6 +71,7 @@ type RuntimeV2HTTPDependencies struct {
 	EventStore          RuntimeV2EventStore
 	Finalizer           RuntimeV2ResultFinalizer
 	Resume              RuntimeV2ResumeService
+	Delegation          RuntimeV2DelegationAPI
 }
 
 // RuntimeV2HTTPController is the strict HTTP transport adapter for the durable
@@ -117,6 +123,7 @@ func (h *RuntimeV2HTTPController) Register(api *echo.Group) {
 	api.POST("/agent-runtime/v2/runs/:id/events", h.AppendEvent)
 	api.POST("/agent-runtime/v2/runs/:id/result", h.FinalizeResult)
 	api.POST("/agent-runtime/v2/runs/resume", h.ResumeRuns)
+	api.POST("/agent-runtime/v2/call-agent", h.CallAgent)
 	api.GET("/agent-runtime/v2/ws", h.WebSocket)
 }
 
@@ -445,6 +452,50 @@ func (h *RuntimeV2HTTPController) ResumeRuns(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
+// CallAgent authenticates the mTLS Node and both assignment-scoped signed
+// capabilities before the exact request bytes are decoded as business input.
+// The invocation capability, not a long-lived Agent Token, is the Bearer
+// credential for this endpoint.
+func (h *RuntimeV2HTTPController) CallAgent(c echo.Context) error {
+	if h == nil || h.dependencies.DeviceAuthenticator == nil || h.dependencies.Delegation == nil {
+		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+	}
+	invocationToken, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
+	if err != nil {
+		return writeRuntimeV2Error(c, runtimeV2UnauthorizedError(err))
+	}
+	device, err := h.dependencies.DeviceAuthenticator.AuthenticateHTTP(
+		c.Request().Context(), c.Request(),
+	)
+	if err != nil {
+		return writeRuntimeV2Error(c, runtimeV2UnauthorizedError(err))
+	}
+	if c.Request().URL.RawQuery != "" {
+		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+	}
+	rawBody, err := readRuntimeJSON(c.Request().Body)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	authorization := RuntimeV2DelegationAuthorization{
+		Device:            device,
+		InvocationContext: c.Request().Header.Get("OpenLinker-Invocation-Context"),
+		InvocationToken:   invocationToken,
+		InvocationProof:   c.Request().Header.Get("OpenLinker-Invocation-Proof"),
+		IdempotencyKey:    c.Request().Header.Get("Idempotency-Key"),
+		ProofRequest:      RuntimeInvocationProofRequestFromHTTP(c.Request(), rawBody),
+	}
+	summary, err := h.dependencies.Delegation.CallAgent(c.Request().Context(), authorization)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	status := http.StatusAccepted
+	if summary.Status != RuntimeRunRunning {
+		status = http.StatusOK
+	}
+	return writeRuntimeV2Payload(c, status, summary)
+}
+
 func (h *RuntimeV2HTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
 	if h == nil || h.dependencies.TokenValidator == nil || h.dependencies.DeviceAuthenticator == nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeV2UnavailableError()
@@ -670,6 +721,35 @@ func mapRuntimeV2HTTPError(err error) *RuntimeTransportError {
 	var transportErr *RuntimeTransportError
 	if errors.As(err, &transportErr) {
 		return transportErr
+	}
+	var httpErr *httpx.HTTPError
+	if errors.As(err, &httpErr) {
+		code := RuntimeErrorCode(httpErr.Code)
+		if !validRuntimeErrorCode(code) {
+			switch httpErr.Status {
+			case http.StatusBadRequest:
+				code = RuntimeErrorBadRequest
+			case http.StatusUnauthorized:
+				code = RuntimeErrorUnauthorized
+			case http.StatusForbidden:
+				code = RuntimeErrorPermissionDenied
+			case http.StatusNotFound:
+				code = RuntimeErrorNotFound
+			case http.StatusConflict:
+				code = RuntimeErrorConflict
+			case http.StatusUnprocessableEntity:
+				code = RuntimeErrorValidationFailed
+			case http.StatusTooManyRequests:
+				code = RuntimeErrorRateLimited
+			case http.StatusServiceUnavailable:
+				code = RuntimeErrorServiceUnavailable
+			default:
+				code = RuntimeErrorInternal
+			}
+		}
+		mapped := newRuntimeTransportError(code, runtimeErrorDefaultMessage(code), err)
+		mapped.Body.Retryable = code == RuntimeErrorRateLimited || code == RuntimeErrorServiceUnavailable
+		return mapped
 	}
 	var sessionErr *RuntimeSessionError
 	if errors.As(err, &sessionErr) {

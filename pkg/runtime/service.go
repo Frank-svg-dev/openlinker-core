@@ -131,6 +131,11 @@ type runInvocation struct {
 type createRunOptions struct {
 	delegation                   *Delegation
 	allowOfflineRuntimePullQueue bool
+	// beforeCreate runs inside the same transaction, immediately before the
+	// child Run is inserted. Runtime-scoped delegation uses it to revalidate
+	// the accepted parent Attempt under durable locks; a successful return is
+	// therefore authorization for this transaction only.
+	beforeCreate func(context.Context, pgx.Tx) error
 }
 
 type preparedTaskCallbackSubscription struct {
@@ -984,6 +989,11 @@ func (s *Service) createRunningRun(
 		AccessMode: pgx.ReadWrite,
 	}, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
+		if opts.beforeCreate != nil {
+			if authorizeErr := opts.beforeCreate(ctx, tx); authorizeErr != nil {
+				return authorizeErr
+			}
+		}
 
 		run, createErr := q.CreateRun(ctx, db.CreateRunParams{
 			ID:                          runID,
