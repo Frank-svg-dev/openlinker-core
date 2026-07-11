@@ -3,6 +3,7 @@ package runtime
 import (
 	"crypto/sha256"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,7 +45,14 @@ func TestRuntimeInvocationCapabilityRejectsTamperAndDatabaseExpiry(t *testing.T)
 	_, token, err := signer.Issue(capability)
 	require.NoError(t, err)
 
-	tampered := token[:len(token)-1] + "A"
+	parts := strings.Split(token, ".")
+	require.Len(t, parts, 3)
+	if parts[2][0] == 'A' {
+		parts[2] = "B" + parts[2][1:]
+	} else {
+		parts[2] = "A" + parts[2][1:]
+	}
+	tampered := strings.Join(parts, ".")
 	_, err = signer.VerifyInvocationToken(tampered, capability.IssuedAt.Add(time.Second))
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 	_, err = signer.VerifyInvocationToken(token, capability.IssuedAt.Add(-time.Nanosecond))
