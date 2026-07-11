@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -630,6 +631,10 @@ func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *Ru
 	if req.AgentID == uuid.Nil {
 		return nil, httpx.Unprocessable("agent_id 不能为空")
 	}
+	if _, err := runtime.HashIdempotencyKey(req.IdempotencyKey); err != nil {
+		class, _ := runtime.IdempotencyErrorClassOf(err)
+		return nil, httpx.NewError(http.StatusUnprocessableEntity, httpx.ErrorCode(class), err.Error())
+	}
 	t, err := s.queries.GetTaskQuery(ctx, taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.NotFound("任务不存在")
@@ -674,9 +679,12 @@ func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *Ru
 	}
 
 	resp, err := s.runner.StartRun(ctx, userID, &runtime.RunRequest{
-		AgentID:  req.AgentID.String(),
-		Input:    input,
-		Metadata: metadata,
+		AgentID:          req.AgentID.String(),
+		Input:            input,
+		Metadata:         metadata,
+		IdempotencyKey:   req.IdempotencyKey,
+		CreationProtocol: "task",
+		CreationMethod:   "run",
 	}, "web")
 	if err != nil {
 		return nil, err

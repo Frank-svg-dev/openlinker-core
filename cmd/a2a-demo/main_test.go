@@ -266,6 +266,7 @@ func TestRunCompletesLocalA2AFlow(t *testing.T) {
 			_, _ = w.Write([]byte(`{}`))
 		case "/api/v1/run":
 			require.Equal(t, "Bearer jwt-token", r.Header.Get("Authorization"))
+			require.NotEmpty(t, r.Header.Get("Idempotency-Key"))
 			var body map[string]any
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
 			require.Equal(t, "planner-agent", body["agent_id"])

@@ -32,6 +32,7 @@ BEGIN
            OR dispatch_state <> 'terminal'
            OR idempotency_key_hash IS NOT NULL
            OR idempotency_fingerprint IS NOT NULL
+           OR request_metadata <> '{}'::jsonb
            OR connection_mode_snapshot IS NOT NULL
            OR endpoint_idempotency_snapshot IS NOT NULL
            OR dispatch_deadline_at IS NOT NULL
@@ -154,6 +155,32 @@ BEGIN
           AND column_name IN ('claimed_by_runtime_token_id', 'claimed_at')
     ) THEN
         RAISE EXCEPTION 'legacy claim columns still exist';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'runs'
+          AND column_name = 'request_metadata'
+          AND data_type = 'jsonb'
+          AND is_nullable = 'NO'
+          AND column_default = '''{}''::jsonb'
+    ) THEN
+        RAISE EXCEPTION 'Run request metadata column is missing or mismatched';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'runs'::regclass
+          AND c.conname = 'runs_request_metadata_object'
+          AND c.contype = 'c'
+          AND c.convalidated
+          AND pg_get_constraintdef(c.oid)
+              = 'CHECK ((jsonb_typeof(request_metadata) = ''object''::text))'
+    ) THEN
+        RAISE EXCEPTION 'Run request metadata object constraint is missing or mismatched';
     END IF;
 
     IF to_regclass('idx_runs_runtime_pull_claim') IS NOT NULL

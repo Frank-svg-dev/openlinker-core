@@ -55,9 +55,11 @@ func TestA2AThirdPartyFixtureMatrix(t *testing.T) {
 				t.Fatalf("inputFromA2AMessage error = %v", err)
 			}
 			assertMatrixString(t, input, "message", tc.ExpectedInput["message"])
-			assertMatrixString(t, input, "a2a_message_id", tc.ExpectedInput["a2a_message_id"])
-			assertMatrixString(t, input, "a2a_context_id", tc.ExpectedInput["a2a_context_id"])
-			assertMatrixString(t, input, "a2a_task_id", tc.ExpectedInput["a2a_task_id"])
+			for _, key := range []string{"a2a_message_id", "a2a_context_id", "a2a_task_id", "a2a_reference_task_ids"} {
+				if _, exists := input[key]; exists {
+					t.Fatalf("protocol control field %q leaked into third-party business input: %#v", key, input)
+				}
+			}
 			if expected, ok := tc.ExpectedInput["file_count"].(float64); ok {
 				files, _ := input["files"].([]interface{})
 				if len(files) != int(expected) {

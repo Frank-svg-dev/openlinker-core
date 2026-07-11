@@ -229,6 +229,10 @@ BEGIN
     RAISE EXCEPTION 'historical run count changed';
   END IF;
 
+  IF EXISTS (SELECT 1 FROM runs WHERE request_metadata <> '{}'::jsonb) THEN
+    RAISE EXCEPTION 'historical Run request metadata backfill is inconsistent';
+  END IF;
+
   IF EXISTS (
     SELECT 1
     FROM runs r
@@ -1472,7 +1476,7 @@ SQL
 
   psql_command --quiet -c "
     INSERT INTO runs (
-      id, user_id, agent_id, input, status, cost_cents,
+      id, user_id, agent_id, input, request_metadata, status, cost_cents,
       platform_fee_cents, creator_revenue_cents, source,
       idempotency_key_hash, idempotency_fingerprint,
       connection_mode_snapshot, dispatch_deadline_at, run_deadline_at
@@ -1480,7 +1484,8 @@ SQL
       '10000000-0000-4000-8000-000000000080',
       '10000000-0000-4000-8000-000000000001',
       '10000000-0000-4000-8000-000000000002',
-      '{\"pending\":true}', 'running', 100, 20, 80, 'web',
+      '{\"pending\":true}', '{\"protocol\":\"rest\",\"method\":\"POST /api/v1/runs\"}',
+      'running', 100, 20, 80, 'web',
       decode(repeat('bb', 32), 'hex'), decode(repeat('cc', 32), 'hex'),
       'runtime_ws', clock_timestamp() + interval '2 minutes',
       clock_timestamp() + interval '10 minutes'
@@ -1488,9 +1493,31 @@ SQL
   "
 
   expect_sql_failure \
+    "runs_request_metadata_object" \
+    "INSERT INTO runs (
+      id, user_id, agent_id, input, request_metadata, status, cost_cents,
+      platform_fee_cents, creator_revenue_cents, source,
+      idempotency_key_hash, idempotency_fingerprint,
+      connection_mode_snapshot, dispatch_deadline_at, run_deadline_at
+    ) VALUES (
+      '10000000-0000-4000-8000-000000000082',
+      '10000000-0000-4000-8000-000000000001',
+      '10000000-0000-4000-8000-000000000002',
+      '{\"invalid\":\"metadata-shape\"}', '[]', 'running', 100, 20, 80, 'api',
+      decode(repeat('f1', 32), 'hex'), decode(repeat('f2', 32), 'hex'),
+      'runtime_ws', clock_timestamp() + interval '2 minutes',
+      clock_timestamp() + interval '10 minutes'
+    )"
+
+  expect_sql_failure \
     "run creation identity is immutable" \
     "UPDATE runs
      SET id = '10000000-0000-4000-8000-000000000081'
+     WHERE id = '10000000-0000-4000-8000-000000000080'"
+  expect_sql_failure \
+    "run creation identity is immutable" \
+    "UPDATE runs
+     SET request_metadata = '{\"protocol\":\"mcp\",\"method\":\"tools/call\"}'
      WHERE id = '10000000-0000-4000-8000-000000000080'"
   expect_sql_failure \
     "runs_cancel_summary_consistent" \

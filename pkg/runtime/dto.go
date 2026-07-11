@@ -8,10 +8,18 @@ import "time"
 // Input 必填，为创作者 endpoint 接收的入参（透传）。
 // Metadata 可选，平台原样转发给 endpoint，常用于 trace_id / 客户端版本等。
 type RunRequest struct {
-	AgentID    string                 `json:"agent_id" validate:"required,uuid"`
-	Input      map[string]interface{} `json:"input" validate:"required"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty"`
-	A2AContext *RunA2AContextRequest  `json:"a2a_context,omitempty"`
+	AgentID        string                 `json:"agent_id" validate:"required,uuid"`
+	Input          map[string]interface{} `json:"input" validate:"required"`
+	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	A2AContext     *RunA2AContextRequest  `json:"a2a_context,omitempty"`
+	IdempotencyKey string                 `json:"-"`
+
+	// CreationProtocol and CreationMethod are normalized by each entrypoint.
+	// They are execution semantics, not user-controlled JSON fields, and are
+	// included in the idempotency fingerprint.
+	CreationProtocol string         `json:"-"`
+	CreationMethod   string         `json:"-"`
+	CreationOptions  map[string]any `json:"-"`
 	// TaskCallback is OpenLinker's canonical callback field. PushNotification,
 	// PushNotificationAlias, and PushNotificationConfig are A2A compatibility
 	// aliases; taskCallbackConfigFromRunRequest chooses the first non-empty
@@ -38,17 +46,22 @@ type TaskCallbackConfig struct {
 }
 
 type RunA2AContextRequest struct {
-	ProtocolContextID string   `json:"protocol_context_id,omitempty"`
-	ProtocolTaskID    string   `json:"protocol_task_id,omitempty"`
-	RootContextID     string   `json:"root_context_id,omitempty"`
-	ParentContextID   string   `json:"parent_context_id,omitempty"`
-	ParentTaskID      string   `json:"parent_task_id,omitempty"`
-	ParentRunID       string   `json:"parent_run_id,omitempty"`
-	CallerAgentID     string   `json:"caller_agent_id,omitempty"`
-	TargetAgentID     string   `json:"target_agent_id,omitempty"`
-	TraceID           string   `json:"trace_id,omitempty"`
-	ReferenceTaskIDs  []string `json:"reference_task_ids,omitempty"`
-	Source            string   `json:"source,omitempty"`
+	MessageID           string                 `json:"message_id,omitempty"`
+	ProtocolContextID   string                 `json:"protocol_context_id,omitempty"`
+	ProtocolTaskID      string                 `json:"protocol_task_id,omitempty"`
+	RootContextID       string                 `json:"root_context_id,omitempty"`
+	ParentContextID     string                 `json:"parent_context_id,omitempty"`
+	ParentTaskID        string                 `json:"parent_task_id,omitempty"`
+	ParentRunID         string                 `json:"parent_run_id,omitempty"`
+	CallerAgentID       string                 `json:"caller_agent_id,omitempty"`
+	TargetAgentID       string                 `json:"target_agent_id,omitempty"`
+	TraceID             string                 `json:"trace_id,omitempty"`
+	ReferenceTaskIDs    []string               `json:"reference_task_ids,omitempty"`
+	Source              string                 `json:"source,omitempty"`
+	AcceptedOutputModes []string               `json:"accepted_output_modes,omitempty"`
+	Extensions          []string               `json:"extensions,omitempty"`
+	Visibility          string                 `json:"visibility,omitempty"`
+	Options             map[string]interface{} `json:"options,omitempty"`
 }
 
 type RunA2AContextResponse struct {
@@ -118,6 +131,7 @@ type RunResponse struct {
 	RequirementEvidence *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
 	EvidenceSummary     *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
 	NextAction          *RunNextAction                  `json:"next_action,omitempty"`
+	Replayed            bool                            `json:"replayed"`
 }
 
 // RunTaskCallbackResponse describes a caller-owned task callback created while

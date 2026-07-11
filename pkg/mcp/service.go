@@ -2,10 +2,12 @@ package mcp
 
 import (
 	"context"
+	"net/http"
 
 	"github.com/google/uuid"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 )
@@ -21,8 +23,13 @@ const (
 // *task.Service 直接注入。
 type Service struct {
 	market  *agent.MarketService
-	runtime *runtime.Service
+	runtime runtimeRunner
 	task    *task.Service
+}
+
+type runtimeRunner interface {
+	Run(ctx context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error)
+	GetRun(ctx context.Context, userID, runID uuid.UUID) (*runtime.RunResponse, error)
 }
 
 // NewService 构造 MCP service。
@@ -53,15 +60,25 @@ func (s *Service) GetAgent(ctx context.Context, req *GetAgentRequest) (*agent.Ag
 
 // RunAgent 转 runtime.Run，并标记 source='mcp'，让 /usage 能识别来源。
 func (s *Service) RunAgent(ctx context.Context, userID uuid.UUID, req *RunAgentRequest) (*runtime.RunResponse, error) {
+	if req == nil {
+		return nil, httpx.Unprocessable("请求体不能为空")
+	}
+	if _, err := runtime.HashIdempotencyKey(req.IdempotencyKey); err != nil {
+		class, _ := runtime.IdempotencyErrorClassOf(err)
+		return nil, httpx.NewError(http.StatusUnprocessableEntity, httpx.ErrorCode(class), err.Error())
+	}
 	metadata := map[string]interface{}{}
 	for k, v := range req.Metadata {
 		metadata[k] = v
 	}
 	metadata["used_mcp_tools"] = appendStringList(metadata["used_mcp_tools"], "run_agent")
 	return s.runtime.Run(ctx, userID, &runtime.RunRequest{
-		AgentID:  req.AgentID,
-		Input:    req.Input,
-		Metadata: metadata,
+		AgentID:          req.AgentID,
+		Input:            req.Input,
+		Metadata:         metadata,
+		IdempotencyKey:   req.IdempotencyKey,
+		CreationProtocol: "mcp",
+		CreationMethod:   "run_agent",
 	}, "mcp")
 }
 
@@ -117,14 +134,15 @@ var mcpTools = []ToolDescriptor{
 	},
 	{
 		Name:        "run_agent",
-		Description: "Invoke an Agent by ID and wait for the result.",
+		Description: "Invoke an Agent by ID and wait for the result. Repeating an identical request with the same idempotency key returns the original run.",
 		InputSchema: map[string]interface{}{
 			"type":     "object",
-			"required": []string{"agent_id", "input"},
+			"required": []string{"agent_id", "input", "idempotency_key"},
 			"properties": map[string]interface{}{
-				"agent_id": map[string]interface{}{"type": "string", "format": "uuid"},
-				"input":    map[string]interface{}{"type": "object", "description": "Input object sent to the selected Agent."},
-				"metadata": map[string]interface{}{"type": "object", "description": "Optional run metadata. Include task_id to associate the run with a task."},
+				"agent_id":        map[string]interface{}{"type": "string", "format": "uuid"},
+				"input":           map[string]interface{}{"type": "object", "description": "Input object sent to the selected Agent."},
+				"metadata":        map[string]interface{}{"type": "object", "description": "Optional run metadata. Include task_id to associate the run with a task."},
+				"idempotency_key": map[string]interface{}{"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[ -~]{1,255}$", "description": "Caller-generated printable ASCII key. Reuse it only when retrying the same request."},
 			},
 		},
 	},

@@ -333,8 +333,9 @@ func TestRuntimePull_ClaimIncludesCoreConversationHistory(t *testing.T) {
 	}`))
 	firstAgentID := insertAgent(t, pool, firstCreatorID, firstEndpoint, 10, "approved")
 	firstResp, err := svc.Run(ctx, userID, &runtime.RunRequest{
-		AgentID: firstAgentID.String(),
-		Input:   map[string]interface{}{"message": "first question"},
+		AgentID:        firstAgentID.String(),
+		Input:          map[string]interface{}{"message": "first question"},
+		IdempotencyKey: "runtime-pull-first/" + uuid.NewString(),
 		A2AContext: &runtime.RunA2AContextRequest{
 			ProtocolContextID: "conv-runtime-pull",
 			ProtocolTaskID:    "turn-1",
@@ -351,8 +352,9 @@ func TestRuntimePull_ClaimIncludesCoreConversationHistory(t *testing.T) {
 	markRuntimePullAvailable(t, svc, token)
 
 	started, err := svc.StartRun(ctx, userID, &runtime.RunRequest{
-		AgentID: secondAgentID.String(),
-		Input:   map[string]interface{}{"message": "continue"},
+		AgentID:        secondAgentID.String(),
+		Input:          map[string]interface{}{"message": "continue"},
+		IdempotencyKey: "runtime-pull-second/" + uuid.NewString(),
 		A2AContext: &runtime.RunA2AContextRequest{
 			ProtocolContextID: "conv-runtime-pull",
 			ProtocolTaskID:    "turn-2",

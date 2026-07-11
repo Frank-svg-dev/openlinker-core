@@ -354,6 +354,7 @@ func normalizeProtocolReferenceTaskIDs(raw []string) []string {
 		seen[item] = struct{}{}
 		out = append(out, item)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -960,7 +961,6 @@ func inputFromA2AMessage(message A2AMessage) (map[string]interface{}, error) {
 		} else {
 			input = map[string]interface{}{"data": dataParts[0]}
 		}
-		attachA2AInputIDs(input, message)
 		return input, nil
 	}
 
@@ -979,26 +979,10 @@ func inputFromA2AMessage(message A2AMessage) (map[string]interface{}, error) {
 	if len(unknownParts) > 0 {
 		input["parts"] = unknownParts
 	}
-	attachA2AInputIDs(input, message)
 	if len(input) == 0 {
 		return nil, httpx.Unprocessable("A2A message 没有可执行输入")
 	}
 	return input, nil
-}
-
-func attachA2AInputIDs(input map[string]interface{}, message A2AMessage) {
-	if message.MessageID != "" {
-		input["a2a_message_id"] = message.MessageID
-	}
-	if message.ContextID != "" {
-		input["a2a_context_id"] = message.ContextID
-	}
-	if message.TaskID != "" {
-		input["a2a_task_id"] = message.TaskID
-	}
-	if refs := normalizeProtocolReferenceTaskIDs(message.ReferenceTaskIDs); len(refs) > 0 {
-		input["a2a_reference_task_ids"] = refs
-	}
 }
 
 func partKind(part map[string]interface{}) string {
@@ -1083,12 +1067,8 @@ func validateA2AFileURI(raw string) error {
 
 func protocolMetadata(params *A2AMessageSendParams) map[string]interface{} {
 	metadata := map[string]interface{}{}
-	for k, v := range params.Metadata {
-		metadata[k] = v
-	}
-	for k, v := range params.Message.Metadata {
-		metadata[k] = v
-	}
+	copyProtocolBusinessMetadata(metadata, params.Metadata)
+	copyProtocolBusinessMetadata(metadata, params.Message.Metadata)
 	metadata["source"] = "a2a"
 	metadata["a2a"] = map[string]interface{}{
 		"protocol":           "jsonrpc-http",
@@ -1096,10 +1076,46 @@ func protocolMetadata(params *A2AMessageSendParams) map[string]interface{} {
 		"message_id":         params.Message.MessageID,
 		"context_id":         params.Message.ContextID,
 		"task_id":            params.Message.TaskID,
-		"extensions":         normalizeProtocolReferenceTaskIDs(params.Message.Extensions),
+		"extensions":         protocolExtensions(params),
 		"reference_task_ids": normalizeProtocolReferenceTaskIDs(params.Message.ReferenceTaskIDs),
 	}
 	return metadata
+}
+
+var protocolMetadataControlFields = map[string]struct{}{
+	"accepted_output_modes": {},
+	"acceptedOutputModes":   {},
+	"a2a_extensions":        {},
+	"a2a_options":           {},
+	"blocking":              {},
+	"context_id":            {},
+	"contextId":             {},
+	"delivery_visibility":   {},
+	"deliveryVisibility":    {},
+	"extensions":            {},
+	"history_length":        {},
+	"historyLength":         {},
+	"message_id":            {},
+	"messageId":             {},
+	"reference_task_ids":    {},
+	"referenceTaskIds":      {},
+	"return_immediately":    {},
+	"returnImmediately":     {},
+	"task_id":               {},
+	"taskId":                {},
+	"trace":                 {},
+	"trace_id":              {},
+	"traceId":               {},
+	"visibility":            {},
+}
+
+func copyProtocolBusinessMetadata(dst, src map[string]interface{}) {
+	for key, value := range src {
+		if _, reserved := protocolMetadataControlFields[key]; reserved {
+			continue
+		}
+		dst[key] = value
+	}
 }
 
 func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtime.RunArtifactResponse, messages []runtime.RunMessageResponse) *A2ATask {

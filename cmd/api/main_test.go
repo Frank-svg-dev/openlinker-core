@@ -230,6 +230,48 @@ func TestNewEchoAndHealthRoutes(t *testing.T) {
 	}
 }
 
+func TestNewEchoAllowsRunIdempotencyCORSHeaders(t *testing.T) {
+	cfg := &config.Config{Env: "development", FrontendURL: "https://app.example"}
+	e := newEcho(cfg)
+	e.POST("/api/v1/runs", func(c echo.Context) error {
+		c.Response().Header().Set("Idempotency-Replayed", "true")
+		c.Response().Header().Set("Preference-Applied", "wait=0")
+		c.Response().Header().Set(echo.HeaderLocation, "/api/v1/runs/test")
+		return c.NoContent(http.StatusCreated)
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/runs", nil)
+	req.Header.Set(echo.HeaderOrigin, "https://app.example")
+	req.Header.Set(echo.HeaderAccessControlRequestMethod, http.MethodPost)
+	req.Header.Set(echo.HeaderAccessControlRequestHeaders, "authorization,content-type,idempotency-key,prefer")
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d: %s", rec.Code, rec.Body.String())
+	}
+	allow := strings.ToLower(rec.Header().Get(echo.HeaderAccessControlAllowHeaders))
+	for _, header := range []string{"authorization", "content-type", "idempotency-key", "prefer"} {
+		if !strings.Contains(allow, header) {
+			t.Fatalf("Access-Control-Allow-Headers = %q, missing %q", allow, header)
+		}
+	}
+	post := httptest.NewRequest(http.MethodPost, "/api/v1/runs", nil)
+	post.Header.Set(echo.HeaderOrigin, "https://app.example")
+	post.Header.Set("Idempotency-Key", "cors-test")
+	postRec := httptest.NewRecorder()
+	e.ServeHTTP(postRec, post)
+	if postRec.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d: %s", postRec.Code, postRec.Body.String())
+	}
+	expose := strings.ToLower(postRec.Header().Get(echo.HeaderAccessControlExposeHeaders))
+	for _, header := range []string{"location", "idempotency-replayed", "preference-applied"} {
+		if !strings.Contains(expose, header) {
+			t.Fatalf("Access-Control-Expose-Headers = %q, missing %q", expose, header)
+		}
+	}
+}
+
 func TestHealthDBFailureUsesStandardError(t *testing.T) {
 	e := newEcho(&config.Config{Env: "production"})
 	registerHealthRoutes(e, &config.Config{Env: "production"}, &fakePinger{err: errors.New("db down")})

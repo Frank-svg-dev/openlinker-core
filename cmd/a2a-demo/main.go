@@ -99,11 +99,11 @@ type demoResult struct {
 }
 
 type endpointConfig struct {
-	mu           sync.RWMutex
-	apiURL       string
-	agentToken   string
-	workerID     string
-	reviewerID   string
+	mu         sync.RWMutex
+	apiURL     string
+	agentToken string
+	workerID   string
+	reviewerID string
 }
 
 func main() {
@@ -372,6 +372,7 @@ func (cfg *endpointConfig) callerEndpoint(w http.ResponseWriter, r *http.Request
 	err := api.do(http.MethodPost, "/api/v1/agent-runtime/call-agent", map[string]any{
 		"parent_run_id":   incoming.RunID,
 		"target_agent_id": workerID,
+		"idempotency_key": "a2a-demo/" + incoming.RunID + "/worker",
 		"reason":          "planner delegates report generation to worker",
 		"input":           map[string]any{"task": incoming.Input["task"]},
 	}, &workerChild)
@@ -380,6 +381,7 @@ func (cfg *endpointConfig) callerEndpoint(w http.ResponseWriter, r *http.Request
 		err = api.do(http.MethodPost, "/api/v1/agent-runtime/call-agent", map[string]any{
 			"parent_run_id":   incoming.RunID,
 			"target_agent_id": reviewerID,
+			"idempotency_key": "a2a-demo/" + incoming.RunID + "/reviewer",
 			"reason":          "planner delegates summary review to reviewer",
 			"input": map[string]any{
 				"task":          incoming.Input["task"],
@@ -423,6 +425,9 @@ func (c *client) do(method, path string, body any, output any) error {
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if method == http.MethodPost && (path == "/api/v1/run" || path == "/api/v1/runs") {
+		req.Header.Set("Idempotency-Key", fmt.Sprintf("a2a-demo-%d", time.Now().UnixNano()))
 	}
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)

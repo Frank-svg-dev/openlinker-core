@@ -446,8 +446,9 @@ func makeRunReq(agentID uuid.UUID, input map[string]interface{}) *runtime.RunReq
 		input = map[string]interface{}{}
 	}
 	return &runtime.RunRequest{
-		AgentID: agentID.String(),
-		Input:   input,
+		AgentID:        agentID.String(),
+		Input:          input,
+		IdempotencyKey: "test/" + uuid.NewString(),
 	}
 }
 

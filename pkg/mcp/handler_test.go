@@ -103,6 +103,26 @@ func TestMCPToolDescriptionsStayNeutralAndMachineReadable(t *testing.T) {
 	}
 }
 
+func TestRunAgentToolRequiresPrintableIdempotencyKey(t *testing.T) {
+	var runAgent ToolDescriptor
+	for _, tool := range NewService(nil, nil, nil).Tools() {
+		if tool.Name == "run_agent" {
+			runAgent = tool
+			break
+		}
+	}
+	require.Equal(t, "run_agent", runAgent.Name)
+	require.ElementsMatch(t, []string{"agent_id", "input", "idempotency_key"}, runAgent.InputSchema["required"])
+
+	properties, ok := runAgent.InputSchema["properties"].(map[string]interface{})
+	require.True(t, ok)
+	keySchema, ok := properties["idempotency_key"].(map[string]interface{})
+	require.True(t, ok)
+	require.Equal(t, 1, keySchema["minLength"])
+	require.Equal(t, 255, keySchema["maxLength"])
+	require.Equal(t, "^[ -~]{1,255}$", keySchema["pattern"])
+}
+
 func TestPostRPCToolCallReportsMissingScopeAsToolError(t *testing.T) {
 	e := echo.New()
 	body := []byte(`{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_agent","arguments":{"agent_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f","input":{"text":"hi"}}}}`)
@@ -290,7 +310,7 @@ func TestPostRPCToolCallValidatesParamsBeforeServiceDispatch(t *testing.T) {
 		},
 		{
 			name:    "run_agent validation",
-			params:  `{"name":"run_agent","arguments":{"agent_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f"}}`,
+			params:  `{"name":"run_agent","arguments":{"agent_id":"8582c7a4-0f02-4895-8570-7c7cce357e5f","input":{"text":"hi"}}}`,
 			wantMsg: "Invalid arguments:",
 		},
 		{
@@ -495,7 +515,7 @@ func TestRESTHandlersDispatchToService(t *testing.T) {
 		{
 			name: "run agent",
 			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
-				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/run_agent", `{"agent_id":"`+agentID.String()+`","input":{"text":"hi"},"metadata":{"trace":"mcp"}}`), rec)
+				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/run_agent", `{"agent_id":"`+agentID.String()+`","input":{"text":"hi"},"metadata":{"trace":"mcp"},"idempotency_key":"mcp-rest-run-1"}`), rec)
 				setAPIKeyScopes(c, "agents:run")
 				c.Set(string(httpx.CtxKeyUserID), userID.String())
 				return c
@@ -506,6 +526,7 @@ func TestRESTHandlersDispatchToService(t *testing.T) {
 				require.Equal(t, userID, svc.runUserID)
 				require.Equal(t, agentID.String(), svc.runReq.AgentID)
 				require.Equal(t, "mcp", svc.runReq.Metadata["trace"])
+				require.Equal(t, "mcp-rest-run-1", svc.runReq.IdempotencyKey)
 			},
 		},
 		{
@@ -580,10 +601,11 @@ func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
 		},
 		{
 			name:   "run_agent",
-			params: `{"name":"run_agent","arguments":{"agent_id":"` + agentID.String() + `","input":{"text":"hi"}}}`,
+			params: `{"name":"run_agent","arguments":{"agent_id":"` + agentID.String() + `","input":{"text":"hi"},"idempotency_key":"mcp-rpc-run-1"}}`,
 			assert: func(t *testing.T) {
 				require.Equal(t, userID, svc.runUserID)
 				require.Equal(t, agentID.String(), svc.runReq.AgentID)
+				require.Equal(t, "mcp-rpc-run-1", svc.runReq.IdempotencyKey)
 			},
 		},
 		{

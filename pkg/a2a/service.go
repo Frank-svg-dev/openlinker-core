@@ -380,6 +380,9 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err != nil {
 		return nil, err
 	}
+	if req == nil {
+		return nil, httpx.Unprocessable("请求体不能为空")
+	}
 	parentRunID, err := currentRunIDFromRequest(req)
 	if err != nil {
 		return nil, err
@@ -387,6 +390,12 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	idempotencyKeyHash, err := runtime.HashIdempotencyKey(req.IdempotencyKey)
 	if err != nil {
 		return nil, a2aIdempotencyValidationError(err)
+	}
+	if req.Input == nil {
+		return nil, httpx.Unprocessable("input 不能为空")
+	}
+	if len([]rune(strings.TrimSpace(req.Reason))) > 500 {
+		return nil, httpx.Unprocessable("reason 不能超过 500 个字符")
 	}
 	targetAgentID, err := uuid.Parse(req.TargetAgentID)
 	if err != nil {
@@ -443,14 +452,13 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err != nil {
 		return nil, err
 	}
-	metadata := copyMetadata(req.Metadata)
+	metadata := copyDelegatedBusinessMetadata(req.Metadata)
 	if childContext != nil {
 		metadata["a2a"] = map[string]interface{}{
 			"protocol_context_id": childContext.ProtocolContextID,
 			"root_context_id":     childContext.RootContextID,
 			"parent_context_id":   childContext.ParentContextID,
 			"parent_task_id":      childContext.ParentTaskID,
-			"trace_id":            childContext.TraceID,
 			"reference_task_ids":  childContext.ReferenceTaskIDs,
 		}
 	}
@@ -600,6 +608,7 @@ func (s *Service) childRunA2AContext(
 		traceID = rootContextID
 	}
 	referenceTaskIDs = appendUniqueString(referenceTaskIDs, parentTaskID)
+	referenceTaskIDs = normalizeProtocolReferenceTaskIDs(referenceTaskIDs)
 
 	return &runtime.RunA2AContextRequest{
 		ProtocolContextID: contextID,
@@ -623,11 +632,7 @@ func callRequestReferenceTaskIDs(req *CallAgentRequest) []string {
 	if len(values) == 0 {
 		values = req.ReferenceTaskIDsAlias
 	}
-	out := make([]string, 0, len(values))
-	for _, value := range values {
-		out = appendUniqueString(out, strings.TrimSpace(value))
-	}
-	return out
+	return normalizeProtocolReferenceTaskIDs(values)
 }
 
 func appendUniqueString(values []string, value string) []string {
@@ -643,10 +648,28 @@ func appendUniqueString(values []string, value string) []string {
 	return append(values, value)
 }
 
-func copyMetadata(metadata map[string]interface{}) map[string]interface{} {
+var delegatedMetadataControlFields = map[string]struct{}{
+	"caller_agent_id":    {},
+	"context_id":         {},
+	"contextId":          {},
+	"current_run_id":     {},
+	"idempotency_key":    {},
+	"parent_run_id":      {},
+	"reference_task_ids": {},
+	"referenceTaskIds":   {},
+	"target_agent_id":    {},
+	"trace":              {},
+	"trace_id":           {},
+	"traceId":            {},
+}
+
+func copyDelegatedBusinessMetadata(metadata map[string]interface{}) map[string]interface{} {
 	out := make(map[string]interface{}, len(metadata)+1)
-	for k, v := range metadata {
-		out[k] = v
+	for key, value := range metadata {
+		if _, reserved := delegatedMetadataControlFields[key]; reserved {
+			continue
+		}
+		out[key] = value
 	}
 	return out
 }

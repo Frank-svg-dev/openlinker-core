@@ -15,15 +15,31 @@
 -- name: CreateRun :one
 -- 创建 run 记录（事务内，状态 running）
 INSERT INTO runs (
-    user_id, agent_id, input, status,
-    cost_cents, platform_fee_cents, creator_revenue_cents, source
+    id, user_id, agent_id, input, status,
+    cost_cents, platform_fee_cents, creator_revenue_cents, source,
+    idempotency_key_hash, idempotency_fingerprint, request_metadata,
+    connection_mode_snapshot, endpoint_idempotency_snapshot,
+    max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at
 ) VALUES (
-    $1, $2, $3, 'running', $4, $5, $6, $7
+    $1, $2, $3, $4, 'running', $5, $6, $7, $8,
+    $9, $10, $11, $12, $13, $14, $15,
+    clock_timestamp() + ($16::bigint * INTERVAL '1 millisecond'),
+    clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond')
 )
+ON CONFLICT (user_id, idempotency_key_hash)
+    WHERE idempotency_key_hash IS NOT NULL
+    DO NOTHING
 RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
           runs.status, runs.error_code, runs.error_message, runs.cost_cents,
           runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
           runs.started_at, runs.finished_at, runs.source;
+
+-- name: GetRunIdempotencyRecord :one
+SELECT id, idempotency_fingerprint
+FROM runs
+WHERE user_id = $1
+  AND idempotency_key_hash = $2
+  AND runtime_contract_id = 'openlinker.runtime.v2';
 
 -- name: MarkRunSuccess :exec
 -- 调用成功：写 output, status=success, duration_ms, finished_at

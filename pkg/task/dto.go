@@ -7,6 +7,8 @@ package task
 
 import (
 	"github.com/google/uuid"
+
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // RecommendRequest 推荐请求体。Query 长度由 schema CHECK 与 validator 双重保障。
@@ -119,17 +121,19 @@ type CompleteRequest struct {
 	DeliveryVisibility string                 `json:"delivery_visibility,omitempty" validate:"omitempty,oneof=private shared public_example"`
 }
 
-// RunTaskRequest 从任务详情直接启动一次 Agent 运行。
+// RunTaskRequest 从任务详情直接启动一次 Agent 运行。任务允许返修后再次运行，
+// 因此不能只用 task_id 推导幂等键；调用方必须为每次语义运行提供稳定键。
 type RunTaskRequest struct {
-	AgentID uuid.UUID              `json:"agent_id" validate:"required"`
-	Input   map[string]interface{} `json:"input,omitempty"`
+	AgentID        uuid.UUID              `json:"agent_id" validate:"required"`
+	Input          map[string]interface{} `json:"input,omitempty"`
+	IdempotencyKey string                 `json:"idempotency_key" validate:"required,min=1,max=255,printascii"`
 }
 
 // RunTaskResponse 返回任务级启动结果。run 字段保持 runtime.RunResponse 的 JSON 形状。
 type RunTaskResponse struct {
-	TaskID string      `json:"task_id"`
-	Status string      `json:"status"`
-	Run    interface{} `json:"run"`
+	TaskID string               `json:"task_id"`
+	Status string               `json:"status"`
+	Run    *runtime.RunResponse `json:"run"`
 }
 
 // RevisionRequest 请求接单方修订交付结果。

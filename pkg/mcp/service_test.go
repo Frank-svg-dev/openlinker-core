@@ -16,6 +16,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 )
@@ -69,8 +70,9 @@ func TestServiceBridgesMarketRuntimeAndRunReads(t *testing.T) {
 	require.Equal(t, "MCP Bridge Agent", detail.Name)
 
 	run, err := svc.RunAgent(ctx, userID, &RunAgentRequest{
-		AgentID: agentID.String(),
-		Input:   map[string]interface{}{"prompt": "hello from mcp"},
+		AgentID:        agentID.String(),
+		Input:          map[string]interface{}{"prompt": "hello from mcp"},
+		IdempotencyKey: "mcp-service-bridge-1",
 		Metadata: map[string]interface{}{
 			"trace":          "mcp-service-test",
 			"used_mcp_tools": []interface{}{"search_agents"},
@@ -90,6 +92,68 @@ func TestServiceBridgesMarketRuntimeAndRunReads(t *testing.T) {
 	require.Equal(t, "success", gotRun.Status)
 	require.Equal(t, "mcp", gotRun.Source)
 	require.Equal(t, "mcp runtime ok", gotRun.Output["answer"])
+}
+
+func TestServiceRunAgentPropagatesStableCreationIdentity(t *testing.T) {
+	runner := &fakeMCPRuntimeRunner{
+		response: &runtime.RunResponse{RunID: uuid.NewString(), Status: "success"},
+	}
+	svc := &Service{runtime: runner}
+	userID := uuid.New()
+
+	resp, err := svc.RunAgent(context.Background(), userID, &RunAgentRequest{
+		AgentID:        uuid.NewString(),
+		Input:          map[string]interface{}{"text": "hello"},
+		Metadata:       map[string]interface{}{"trace": "kept"},
+		IdempotencyKey: "mcp-call-2026-07-11-1",
+	})
+	require.NoError(t, err)
+	require.Same(t, runner.response, resp)
+	require.Equal(t, userID, runner.userID)
+	require.Equal(t, "mcp", runner.source)
+	require.NotNil(t, runner.request)
+	require.Equal(t, "mcp-call-2026-07-11-1", runner.request.IdempotencyKey)
+	require.Equal(t, "mcp", runner.request.CreationProtocol)
+	require.Equal(t, "run_agent", runner.request.CreationMethod)
+	require.Equal(t, "kept", runner.request.Metadata["trace"])
+	require.Equal(t, []string{"run_agent"}, runner.request.Metadata["used_mcp_tools"])
+}
+
+func TestServiceRunAgentRejectsUnsafeIdempotencyKeyBeforeRuntime(t *testing.T) {
+	runner := &fakeMCPRuntimeRunner{}
+	svc := &Service{runtime: runner}
+
+	_, err := svc.RunAgent(context.Background(), uuid.New(), &RunAgentRequest{
+		AgentID:        uuid.NewString(),
+		Input:          map[string]interface{}{"text": "hello"},
+		IdempotencyKey: "unsafe\nkey",
+	})
+	require.Error(t, err)
+	require.Nil(t, runner.request)
+
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusUnprocessableEntity, httpErr.Status)
+	require.Equal(t, httpx.ErrorCode(runtime.IdempotencyErrorKeyInvalid), httpErr.Code)
+	require.NotContains(t, httpErr.Message, "unsafe")
+}
+
+type fakeMCPRuntimeRunner struct {
+	userID   uuid.UUID
+	request  *runtime.RunRequest
+	source   string
+	response *runtime.RunResponse
+}
+
+func (f *fakeMCPRuntimeRunner) Run(_ context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error) {
+	f.userID = userID
+	f.request = req
+	f.source = source
+	return f.response, nil
+}
+
+func (f *fakeMCPRuntimeRunner) GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error) {
+	return f.response, nil
 }
 
 func TestServiceCreateTaskBridgesRecommendations(t *testing.T) {

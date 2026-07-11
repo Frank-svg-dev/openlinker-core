@@ -101,11 +101,12 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 			authMethod: "user_token",
 			scopes:     []string{"agents:run"},
 			body:       `{"agent_id":"` + agentID.String() + `","input":{"q":"hi"}}`,
+			headers:    map[string]string{"Idempotency-Key": "run-sync-1"},
 		})
 		if err := h.PostRun(postCtx); err != nil {
 			t.Fatalf("PostRun error = %v", err)
 		}
-		if postRec.Code != http.StatusOK || mock.runUserID != userID || mock.runReq.AgentID != agentID.String() || mock.runSource != "api" {
+		if postRec.Code != http.StatusCreated || mock.runUserID != userID || mock.runReq.AgentID != agentID.String() || mock.runReq.IdempotencyKey != "run-sync-1" || mock.runSource != "api" {
 			t.Fatalf("post run code=%d user=%s source=%q req=%#v", postRec.Code, mock.runUserID, mock.runSource, mock.runReq)
 		}
 
@@ -116,11 +117,12 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 			authMethod: "user_token",
 			scopes:     []string{"agents:run"},
 			body:       `{"agent_id":"` + agentID.String() + `","input":{"q":"async"}}`,
+			headers:    map[string]string{"Idempotency-Key": "run-async-1"},
 		})
 		if err := h.PostRunAsync(asyncCtx); err != nil {
 			t.Fatalf("PostRunAsync error = %v", err)
 		}
-		if asyncRec.Code != http.StatusAccepted || mock.startRunUserID != userID || mock.startRunSource != "api" {
+		if asyncRec.Code != http.StatusCreated || mock.startRunUserID != userID || mock.startRunSource != "api" {
 			t.Fatalf("post async code=%d user=%s source=%q", asyncRec.Code, mock.startRunUserID, mock.startRunSource)
 		}
 
@@ -334,6 +336,7 @@ func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 				userID:     userID.String(),
 				authMethod: "jwt",
 				body:       `{"agent_id":"` + agentID.String() + `","input":{"q":"hi"}}`,
+				headers:    map[string]string{"Idempotency-Key": "run-error-sync"},
 			}),
 		},
 		{
@@ -345,6 +348,7 @@ func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 				userID:     userID.String(),
 				authMethod: "jwt",
 				body:       `{"agent_id":"` + agentID.String() + `","input":{"q":"hi"}}`,
+				headers:    map[string]string{"Idempotency-Key": "run-error-async"},
 			}),
 		},
 		{

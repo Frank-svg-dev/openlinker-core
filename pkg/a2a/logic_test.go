@@ -458,8 +458,13 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inputFromA2AMessage mixed error: %v", err)
 	}
-	if input["message"] != "hello" || input["text"] != "hello" || input["a2a_context_id"] != "ctx-1" {
-		t.Fatalf("mixed input missing text/ids: %#v", input)
+	if input["message"] != "hello" || input["text"] != "hello" {
+		t.Fatalf("mixed input missing text: %#v", input)
+	}
+	for _, key := range []string{"a2a_message_id", "a2a_context_id", "a2a_task_id", "a2a_reference_task_ids"} {
+		if _, exists := input[key]; exists {
+			t.Fatalf("protocol control field %q leaked into business input: %#v", key, input)
+		}
 	}
 	if len(input["data_parts"].([]interface{})) != 1 || len(input["files"].([]interface{})) != 1 || len(input["parts"].([]map[string]interface{})) != 1 {
 		t.Fatalf("mixed input missing parts: %#v", input)
@@ -467,7 +472,7 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 
 	sourceData := map[string]interface{}{"q": "copy me"}
 	dataOnly, err := inputFromA2AMessage(A2AMessage{ContextID: "ctx-2", Parts: []map[string]interface{}{{"kind": "data", "data": sourceData}}})
-	if err != nil || dataOnly["q"] != "copy me" || dataOnly["a2a_context_id"] != "ctx-2" {
+	if err != nil || dataOnly["q"] != "copy me" {
 		t.Fatalf("data-only input = %#v, %v", dataOnly, err)
 	}
 	dataOnly["q"] = "mutated"
@@ -544,13 +549,33 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 	}
 
 	metadata := protocolMetadata(&A2AMessageSendParams{
-		Message:  A2AMessage{MessageID: "m", ContextID: "c", TaskID: "t", Extensions: []string{"https://example.com/ext/a"}, Metadata: map[string]interface{}{"message": "meta"}},
-		Metadata: map[string]interface{}{"trace": "root"},
+		Message: A2AMessage{
+			MessageID:  "m",
+			ContextID:  "c",
+			TaskID:     "t",
+			Extensions: []string{"https://example.com/ext/b", "https://example.com/ext/a"},
+			Metadata: map[string]interface{}{
+				"message":        "meta",
+				"traceId":        "message-trace",
+				"a2a_extensions": []string{"https://example.com/ext/a"},
+			},
+		},
+		Metadata: map[string]interface{}{
+			"business":            "kept",
+			"trace":               "root-trace",
+			"delivery_visibility": "shared",
+			"a2a_options":         map[string]interface{}{"priority": "normal"},
+		},
 	})
-	if metadata["source"] != "a2a" || metadata["trace"] != "root" || metadata["message"] != "meta" {
+	if metadata["source"] != "a2a" || metadata["business"] != "kept" || metadata["message"] != "meta" {
 		t.Fatalf("protocolMetadata merge = %#v", metadata)
 	}
-	if nested := metadata["a2a"].(map[string]interface{}); nested["message_id"] != "m" || nested["context_id"] != "c" || nested["task_id"] != "t" || len(nested["extensions"].([]string)) != 1 {
+	for _, key := range []string{"trace", "traceId", "delivery_visibility", "a2a_options", "a2a_extensions"} {
+		if _, exists := metadata[key]; exists {
+			t.Fatalf("protocol control field %q leaked into fingerprint metadata: %#v", key, metadata)
+		}
+	}
+	if nested := metadata["a2a"].(map[string]interface{}); nested["message_id"] != "m" || nested["context_id"] != "c" || nested["task_id"] != "t" || !assert.ObjectsAreEqual([]string{"https://example.com/ext/a", "https://example.com/ext/b"}, nested["extensions"]) {
 		t.Fatalf("protocolMetadata a2a block = %#v", nested)
 	}
 }
@@ -592,8 +617,8 @@ func TestA2AProtocolRunRequestCarriesStableIdempotencySemantics(t *testing.T) {
 	if req.A2AContext == nil || req.A2AContext.MessageID != "message-42" || req.A2AContext.Visibility != "shared" {
 		t.Fatalf("A2A context identity = %#v", req.A2AContext)
 	}
-	assert.ElementsMatch(t, []string{"text/plain", "application/json"}, req.A2AContext.AcceptedOutputModes)
-	assert.ElementsMatch(t, []string{"urn:message-extension", "urn:negotiated-extension", "urn:shared"}, req.A2AContext.Extensions)
+	assert.Equal(t, []string{"text/plain", "application/json"}, req.A2AContext.AcceptedOutputModes)
+	assert.Equal(t, []string{"urn:message-extension", "urn:negotiated-extension", "urn:shared"}, req.A2AContext.Extensions)
 	assert.Equal(t, true, req.A2AContext.Options["return_immediately"])
 	assert.Equal(t, historyLength, req.A2AContext.Options["history_length"])
 	assert.Equal(t, "compact", req.A2AContext.Options["response_profile"])

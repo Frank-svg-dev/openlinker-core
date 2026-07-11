@@ -111,6 +111,7 @@ type Run struct {
 	RuntimeContractID           string     `db:"runtime_contract_id" json:"runtime_contract_id"`
 	IdempotencyKeyHash          []byte     `db:"idempotency_key_hash" json:"-"`
 	IdempotencyFingerprint      []byte     `db:"idempotency_fingerprint" json:"-"`
+	RequestMetadata             []byte     `db:"request_metadata" json:"request_metadata"`
 	ConnectionModeSnapshot      *string    `db:"connection_mode_snapshot" json:"connection_mode_snapshot"`
 	EndpointIdempotencySnapshot *bool      `db:"endpoint_idempotency_snapshot" json:"endpoint_idempotency_snapshot"`
 	DispatchState               string     `db:"dispatch_state" json:"dispatch_state"`

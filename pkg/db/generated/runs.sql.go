@@ -31,14 +31,24 @@ func (q *Queries) RunsCount(ctx context.Context) (int32, error) {
 
 const createRun = `-- name: CreateRun :one
 INSERT INTO runs (
-    user_id, agent_id, input, status,
-    cost_cents, platform_fee_cents, creator_revenue_cents, source
+    id, user_id, agent_id, input, status,
+    cost_cents, platform_fee_cents, creator_revenue_cents, source,
+    idempotency_key_hash, idempotency_fingerprint, request_metadata,
+    connection_mode_snapshot, endpoint_idempotency_snapshot,
+    max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at
 ) VALUES (
-    $1, $2, $3, 'running', $4, $5, $6, $7
+    $1, $2, $3, $4, 'running', $5, $6, $7, $8,
+    $9, $10, $11, $12, $13, $14, $15,
+    clock_timestamp() + ($16::bigint * INTERVAL '1 millisecond'),
+    clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond')
 )
-RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
-          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-          started_at, finished_at, source`
+ON CONFLICT (user_id, idempotency_key_hash)
+    WHERE idempotency_key_hash IS NOT NULL
+    DO NOTHING
+RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
+          runs.status, runs.error_code, runs.error_message, runs.cost_cents,
+          runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
+          runs.started_at, runs.finished_at, runs.source`
 
 // CreateRunParams 入参。
 //
@@ -46,18 +56,29 @@ RETURNING id, user_id, agent_id, input, output, status, error_code, error_messag
 // CostCents = PlatformFeeCents + CreatorRevenueCents（service 层计算）。
 // Source 取值 'web' / 'mcp' / 'api'，由 handler 从 auth_method 派生。
 type CreateRunParams struct {
-	UserID              uuid.UUID `db:"user_id" json:"user_id"`
-	AgentID             uuid.UUID `db:"agent_id" json:"agent_id"`
-	Input               []byte    `db:"input" json:"input"`
-	CostCents           int32     `db:"cost_cents" json:"cost_cents"`
-	PlatformFeeCents    int32     `db:"platform_fee_cents" json:"platform_fee_cents"`
-	CreatorRevenueCents int32     `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	Source              string    `db:"source" json:"source"`
+	ID                          uuid.UUID `db:"id" json:"id"`
+	UserID                      uuid.UUID `db:"user_id" json:"user_id"`
+	AgentID                     uuid.UUID `db:"agent_id" json:"agent_id"`
+	Input                       []byte    `db:"input" json:"input"`
+	CostCents                   int32     `db:"cost_cents" json:"cost_cents"`
+	PlatformFeeCents            int32     `db:"platform_fee_cents" json:"platform_fee_cents"`
+	CreatorRevenueCents         int32     `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	Source                      string    `db:"source" json:"source"`
+	IdempotencyKeyHash          []byte    `db:"idempotency_key_hash" json:"-"`
+	IdempotencyFingerprint      []byte    `db:"idempotency_fingerprint" json:"-"`
+	RequestMetadata             []byte    `db:"request_metadata" json:"request_metadata"`
+	ConnectionModeSnapshot      string    `db:"connection_mode_snapshot" json:"connection_mode_snapshot"`
+	EndpointIdempotencySnapshot *bool     `db:"endpoint_idempotency_snapshot" json:"endpoint_idempotency_snapshot"`
+	MaxOfferCount               int32     `db:"max_offer_count" json:"max_offer_count"`
+	MaxAttempts                 int32     `db:"max_attempts" json:"max_attempts"`
+	DispatchDeadlineAfterMs     int64     `db:"dispatch_deadline_after_ms" json:"dispatch_deadline_after_ms"`
+	RunDeadlineAfterMs          int64     `db:"run_deadline_after_ms" json:"run_deadline_after_ms"`
 }
 
 // CreateRun 在事务内创建调用记录，初始 status='running'。
 func (q *Queries) CreateRun(ctx context.Context, arg CreateRunParams) (Run, error) {
 	row := q.db.QueryRow(ctx, createRun,
+		arg.ID,
 		arg.UserID,
 		arg.AgentID,
 		arg.Input,
@@ -65,10 +86,43 @@ func (q *Queries) CreateRun(ctx context.Context, arg CreateRunParams) (Run, erro
 		arg.PlatformFeeCents,
 		arg.CreatorRevenueCents,
 		arg.Source,
+		arg.IdempotencyKeyHash,
+		arg.IdempotencyFingerprint,
+		arg.RequestMetadata,
+		arg.ConnectionModeSnapshot,
+		arg.EndpointIdempotencySnapshot,
+		arg.MaxOfferCount,
+		arg.MaxAttempts,
+		arg.DispatchDeadlineAfterMs,
+		arg.RunDeadlineAfterMs,
 	)
 	var r Run
 	err := scanRun(row, &r)
 	return r, err
+}
+
+const getRunIdempotencyRecord = `-- name: GetRunIdempotencyRecord :one
+SELECT id, idempotency_fingerprint
+FROM runs
+WHERE user_id = $1
+  AND idempotency_key_hash = $2
+  AND runtime_contract_id = 'openlinker.runtime.v2'`
+
+type GetRunIdempotencyRecordParams struct {
+	UserID             uuid.UUID `db:"user_id" json:"user_id"`
+	IdempotencyKeyHash []byte    `db:"idempotency_key_hash" json:"-"`
+}
+
+type GetRunIdempotencyRecordRow struct {
+	ID                     uuid.UUID `db:"id" json:"id"`
+	IdempotencyFingerprint []byte    `db:"idempotency_fingerprint" json:"-"`
+}
+
+func (q *Queries) GetRunIdempotencyRecord(ctx context.Context, arg GetRunIdempotencyRecordParams) (GetRunIdempotencyRecordRow, error) {
+	row := q.db.QueryRow(ctx, getRunIdempotencyRecord, arg.UserID, arg.IdempotencyKeyHash)
+	var record GetRunIdempotencyRecordRow
+	err := row.Scan(&record.ID, &record.IdempotencyFingerprint)
+	return record, err
 }
 
 const markRunSuccess = `-- name: MarkRunSuccess :exec

@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -818,8 +819,11 @@ func (s *Service) runWorkflowNode(
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("创建 step 失败: %w", err)}
 	}
 	resp, err := s.runtime.Run(ctx, userID, &runtime.RunRequest{
-		AgentID: node.AgentID.String(),
-		Input:   stepInput,
+		AgentID:          node.AgentID.String(),
+		Input:            stepInput,
+		IdempotencyKey:   workflowNodeRunIdempotencyKey(run.ID, node.NodeKey),
+		CreationProtocol: "workflow",
+		CreationMethod:   "node.run",
 		Metadata: map[string]interface{}{
 			"workflow_id":       w.ID.String(),
 			"workflow_run_id":   run.ID.String(),
@@ -882,6 +886,15 @@ func (s *Service) runWorkflowNode(
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("更新 step 失败: %w", err)}
 	}
 	return workflowNodeRunResult{NodeKey: node.NodeKey, Output: output}
+}
+
+// workflowNodeRunIdempotencyKey keeps the human node key out of the wire key.
+// Node keys may contain any valid Unicode text, while Run idempotency keys are
+// deliberately restricted to printable ASCII. Hashing the normalized semantic
+// key preserves deterministic retries without narrowing the workflow schema.
+func workflowNodeRunIdempotencyKey(workflowRunID uuid.UUID, nodeKey string) string {
+	digest := sha256.Sum256([]byte(strings.TrimSpace(nodeKey)))
+	return fmt.Sprintf("workflow/%s/node/%x", workflowRunID, digest)
 }
 
 func preferWorkflowNodeError(current, candidate error) error {

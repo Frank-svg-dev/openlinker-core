@@ -238,6 +238,7 @@ ALTER TABLE runs
     DROP COLUMN runtime_contract_id,
     DROP COLUMN idempotency_key_hash,
     DROP COLUMN idempotency_fingerprint,
+    DROP COLUMN request_metadata,
     DROP COLUMN connection_mode_snapshot,
     DROP COLUMN endpoint_idempotency_snapshot,
     DROP COLUMN dispatch_state,

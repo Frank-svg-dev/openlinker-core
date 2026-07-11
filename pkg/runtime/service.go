@@ -420,25 +420,31 @@ func normalizeRunA2AContextRequest(raw *RunA2AContextRequest, delegation *Delega
 		return nil, nil
 	}
 	ctx := &RunA2AContextRequest{
-		ProtocolContextID: trimA2AContextField(raw.ProtocolContextID),
-		ProtocolTaskID:    trimA2AContextField(raw.ProtocolTaskID),
-		RootContextID:     trimA2AContextField(raw.RootContextID),
-		ParentContextID:   trimA2AContextField(raw.ParentContextID),
-		ParentTaskID:      trimA2AContextField(raw.ParentTaskID),
-		ParentRunID:       strings.TrimSpace(raw.ParentRunID),
-		CallerAgentID:     strings.TrimSpace(raw.CallerAgentID),
-		TargetAgentID:     strings.TrimSpace(raw.TargetAgentID),
-		TraceID:           trimA2AContextField(raw.TraceID),
-		ReferenceTaskIDs:  normalizeA2AReferenceTaskIDs(raw.ReferenceTaskIDs),
-		Source:            strings.TrimSpace(raw.Source),
+		MessageID:           trimA2AContextField(raw.MessageID),
+		ProtocolContextID:   trimA2AContextField(raw.ProtocolContextID),
+		ProtocolTaskID:      trimA2AContextField(raw.ProtocolTaskID),
+		RootContextID:       trimA2AContextField(raw.RootContextID),
+		ParentContextID:     trimA2AContextField(raw.ParentContextID),
+		ParentTaskID:        trimA2AContextField(raw.ParentTaskID),
+		ParentRunID:         strings.TrimSpace(raw.ParentRunID),
+		CallerAgentID:       strings.TrimSpace(raw.CallerAgentID),
+		TargetAgentID:       strings.TrimSpace(raw.TargetAgentID),
+		TraceID:             trimA2AContextField(raw.TraceID),
+		ReferenceTaskIDs:    normalizeA2AReferenceTaskIDs(raw.ReferenceTaskIDs),
+		Source:              strings.TrimSpace(raw.Source),
+		AcceptedOutputModes: normalizeA2AStringSet(raw.AcceptedOutputModes),
+		Extensions:          normalizeA2AStringSet(raw.Extensions),
+		Visibility:          strings.TrimSpace(raw.Visibility),
 	}
+	options, err := normalizeIJSONObject(raw.Options, false)
+	if err != nil {
+		return nil, idempotencyHTTPError(err)
+	}
+	ctx.Options = options
 	if ctx.ProtocolContextID == "" && ctx.RootContextID != "" {
 		ctx.ProtocolContextID = ctx.RootContextID
 	}
-	if ctx.ProtocolContextID == "" {
-		return nil, httpx.BadRequest("a2a_context.protocol_context_id 不能为空")
-	}
-	if ctx.RootContextID == "" {
+	if ctx.RootContextID == "" && ctx.ProtocolContextID != "" {
 		ctx.RootContextID = ctx.ProtocolContextID
 	}
 	if ctx.Source == "" {
@@ -503,7 +509,47 @@ func normalizeA2AReferenceTaskIDs(raw []string) []string {
 		seen[item] = struct{}{}
 		out = append(out, item)
 	}
+	sort.Strings(out)
 	return out
+}
+
+func normalizeA2AStringSet(raw []string) []string {
+	seen := make(map[string]struct{}, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, item := range raw {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		out = append(out, item)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func materializeRunA2AContext(raw *RunA2AContextRequest, runID uuid.UUID) *RunA2AContextRequest {
+	if raw == nil {
+		return nil
+	}
+	ctx := *raw
+	ctx.ReferenceTaskIDs = append([]string{}, raw.ReferenceTaskIDs...)
+	ctx.AcceptedOutputModes = append([]string{}, raw.AcceptedOutputModes...)
+	ctx.Extensions = append([]string{}, raw.Extensions...)
+	ctx.Options = copyRunInput(raw.Options)
+	if ctx.ProtocolContextID == "" {
+		ctx.ProtocolContextID = "ctx-" + runID.String()
+	}
+	if ctx.RootContextID == "" {
+		ctx.RootContextID = ctx.ProtocolContextID
+	}
+	if ctx.ProtocolTaskID == "" {
+		ctx.ProtocolTaskID = runID.String()
+	}
+	return &ctx
 }
 
 func parseOptionalUUID(raw string) *uuid.UUID {
@@ -622,6 +668,9 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 	if err != nil {
 		return nil, err
 	}
+	if invocation == nil {
+		return resp, nil
+	}
 	if s.isRuntimePull(invocation) {
 		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 			"connection_mode": invocation.agent.ConnectionMode,
@@ -641,6 +690,9 @@ func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunReques
 	})
 	if err != nil {
 		return nil, err
+	}
+	if invocation == nil {
+		return resp, nil
 	}
 	if s.isRuntimePull(invocation) {
 		if invocation.runtimePullAvailable {
@@ -677,6 +729,9 @@ func (s *Service) RunDelegated(ctx context.Context, userID uuid.UUID, delegation
 	if err != nil {
 		return nil, err
 	}
+	if invocation == nil {
+		return resp, nil
+	}
 	if s.isRuntimePull(invocation) {
 		s.recordRunEventBestEffort(ctx, invocation.runID, "run.dispatch.pending", map[string]interface{}{
 			"connection_mode": invocation.agent.ConnectionMode,
@@ -712,16 +767,36 @@ func (s *Service) createRunningRun(
 	default:
 		return nil, nil, httpx.BadRequest("source 取值非法")
 	}
-	taskCallback, err := s.prepareTaskCallbackSubscription(taskCallbackConfigFromRunRequest(req))
+
+	normalized, err := s.normalizeRunCreation(req, source, opts)
 	if err != nil {
 		return nil, nil, err
 	}
+	req = normalized.request
+	agentID := normalized.agentID
 
-	// 1. 校验 agent
-	agentID, err := uuid.Parse(req.AgentID)
-	if err != nil {
-		return nil, nil, httpx.BadRequest("agent_id 不是合法 UUID")
+	// A committed replay is resolved before mutable Agent availability checks.
+	// Authentication and API-key scope checks have already happened at the
+	// entrypoint, while lifecycle/offline changes must not invalidate a replay.
+	if existingRunID, found, lookupErr := s.findExistingRunByIdentity(
+		ctx,
+		userID,
+		normalized.idempotencyKeyHash,
+		normalized.idempotencyFingerprint,
+	); lookupErr != nil {
+		var httpErr *httpx.HTTPError
+		if errors.As(lookupErr, &httpErr) {
+			return nil, nil, lookupErr
+		}
+		log.Error().Err(lookupErr).Str("user_id", userID.String()).Msg("runtime.Run: idempotency lookup")
+		return nil, nil, httpx.Internal("查询幂等调用记录失败")
+	} else if found {
+		resp, replayErr := s.idempotencyReplayResponse(ctx, userID, existingRunID)
+		return nil, resp, replayErr
 	}
+
+	// Validate mutable creation eligibility only after ruling out a committed
+	// replay. Concurrent requests still race through the unique key below.
 
 	agent, err := s.queries.GetAgentByID(ctx, agentID)
 	if err != nil {
@@ -739,7 +814,8 @@ func (s *Service) createRunningRun(
 	}
 	runtimePullAvailable := true
 	if !isQueuedRuntimeMode(agent.ConnectionMode) {
-		if err := endpointurl.Validate(agent.EndpointURL, s.cfg.AllowLocalHTTPEndpoints); err != nil {
+		allowLocalHTTP := s.cfg != nil && s.cfg.AllowLocalHTTPEndpoints
+		if err := endpointurl.Validate(agent.EndpointURL, allowLocalHTTP); err != nil {
 			log.Warn().Err(err).Str("agent_id", agent.ID.String()).Msg("runtime.Run: endpoint policy rejected")
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 		}
@@ -758,14 +834,19 @@ func (s *Service) createRunningRun(
 		log.Warn().Str("agent_id", agent.ID.String()).Msg("runtime.Run: missing mcp tool")
 		return nil, nil, httpx.Forbidden("Agent MCP tool 未配置")
 	}
+	taskCallback, err := s.prepareTaskCallbackSubscription(taskCallbackConfigFromRunRequest(req))
+	if err != nil {
+		return nil, nil, err
+	}
 	requirementSnapshot, err := s.buildRunRequirementSnapshot(ctx, userID, agentID, req, source)
 	if err != nil {
 		return nil, nil, err
 	}
-	runA2AContext, err := normalizeRunA2AContextRequest(req.A2AContext, opts.delegation, agentID)
-	if err != nil {
-		return nil, nil, err
-	}
+
+	// The candidate UUID is generated after fingerprinting. Server-owned A2A
+	// defaults derive from it and therefore never make retries drift.
+	runID := uuid.New()
+	runA2AContext := materializeRunA2AContext(req.A2AContext, runID)
 	normalizedReq := *req
 	normalizedReq.Input = copyRunInput(req.Input)
 	normalizedReq.A2AContext = runA2AContext
@@ -781,38 +862,67 @@ func (s *Service) createRunningRun(
 	if err != nil {
 		return nil, nil, httpx.BadRequest("input 不是合法 JSON")
 	}
+	metadataJSON, err := json.Marshal(req.Metadata)
+	if err != nil {
+		return nil, nil, httpx.BadRequest("metadata 不是合法 JSON")
+	}
 
-	// 4. 事务 A：创建 run
-	var runID uuid.UUID
+	endpointIdempotencySnapshot, maxAttempts := runEndpointIdempotencySnapshot(agent.ConnectionMode)
+	dispatchDeadlineAfter, runDeadlineAfter := s.runCreationDeadlineWindows(agent.ConnectionMode)
+
+	// 4. The winner atomically writes the Run, its creation evidence and the
+	// durable dispatch wake-up. A conflict performs only the second-statement
+	// read required by PostgreSQL READ COMMITTED snapshot semantics.
+	created := false
+	replayed := false
 	var taskCallbackResp *RunTaskCallbackResponse
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+	err = pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{
+		IsoLevel:   pgx.ReadCommitted,
+		AccessMode: pgx.ReadWrite,
+	}, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
 
 		run, createErr := q.CreateRun(ctx, db.CreateRunParams{
-			UserID:              userID,
-			AgentID:             agentID,
-			Input:               inputJSON,
-			CostCents:           cost,
-			PlatformFeeCents:    fee,
-			CreatorRevenueCents: revenue,
-			Source:              source,
+			ID:                          runID,
+			UserID:                      userID,
+			AgentID:                     agentID,
+			Input:                       inputJSON,
+			CostCents:                   cost,
+			PlatformFeeCents:            fee,
+			CreatorRevenueCents:         revenue,
+			Source:                      source,
+			IdempotencyKeyHash:          normalized.idempotencyKeyHash,
+			IdempotencyFingerprint:      normalized.idempotencyFingerprint,
+			RequestMetadata:             metadataJSON,
+			ConnectionModeSnapshot:      agent.ConnectionMode,
+			EndpointIdempotencySnapshot: endpointIdempotencySnapshot,
+			MaxOfferCount:               20,
+			MaxAttempts:                 maxAttempts,
+			DispatchDeadlineAfterMs:     dispatchDeadlineAfter.Milliseconds(),
+			RunDeadlineAfterMs:          runDeadlineAfter.Milliseconds(),
 		})
+		if errors.Is(createErr, pgx.ErrNoRows) {
+			record, lookupErr := q.GetRunIdempotencyRecord(ctx, db.GetRunIdempotencyRecordParams{
+				UserID:             userID,
+				IdempotencyKeyHash: normalized.idempotencyKeyHash,
+			})
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if len(record.IdempotencyFingerprint) != sha256.Size ||
+				subtle.ConstantTimeCompare(record.IdempotencyFingerprint, normalized.idempotencyFingerprint) != 1 {
+				return idempotencyHTTPError(&IdempotencyError{Class: IdempotencyErrorKeyReused})
+			}
+			runID = record.ID
+			replayed = true
+			return nil
+		}
 		if createErr != nil {
 			return createErr
 		}
+		created = true
 		runID = run.ID
 		if runA2AContext != nil {
-			if runA2AContext.ProtocolTaskID == "" {
-				runA2AContext.ProtocolTaskID = runID.String()
-				attachRunA2AContextToInput(req.Input, runA2AContext)
-				updatedInputJSON, marshalErr := json.Marshal(req.Input)
-				if marshalErr != nil {
-					return marshalErr
-				}
-				if _, updateErr := tx.Exec(ctx, `UPDATE runs SET input = $2 WHERE id = $1`, runID, updatedInputJSON); updateErr != nil {
-					return updateErr
-				}
-			}
 			if _, createErr = q.UpsertA2AContextMapping(ctx, db.UpsertA2AContextMappingParams{
 				RunID:             runID,
 				UserID:            userID,
@@ -833,9 +943,14 @@ func (s *Service) createRunningRun(
 			}
 		}
 		if taskCallback != nil {
+			var callerAgentID *uuid.UUID
+			if opts.delegation != nil {
+				callerAgentID = &opts.delegation.CallerAgentID
+			}
 			sub, createErr := q.CreateTaskCallbackSubscription(ctx, db.CreateTaskCallbackSubscriptionParams{
 				RunID:           runID,
 				OwnerUserID:     userID,
+				CallerAgentID:   callerAgentID,
 				TargetURL:       taskCallback.targetURL,
 				Secret:          taskCallback.secret,
 				EventTypes:      taskCallback.eventTypes,
@@ -886,8 +1001,22 @@ func (s *Service) createRunningRun(
 		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.created", payload); eventErr != nil {
 			return eventErr
 		}
-		if eventErr := createRunEvent(ctx, q, runID, parentRunID, "run.started", runStartedEventPayload(agent, userID)); eventErr != nil {
-			return eventErr
+		signalPayload, marshalErr := json.Marshal(map[string]interface{}{
+			"agent_id":        agentID.String(),
+			"connection_mode": agent.ConnectionMode,
+			"run_id":          runID.String(),
+			"source":          source,
+		})
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, signalErr := q.CreateRuntimeSignal(ctx, db.CreateRuntimeSignalParams{
+			EventType: "run.available",
+			AgentID:   agentID,
+			RunID:     &runID,
+			Payload:   signalPayload,
+		}); signalErr != nil {
+			return signalErr
 		}
 		if requirementSnapshot != nil {
 			evidence, createErr := q.CreateRunRequirementEvidence(ctx, requirementSnapshot.createParams(runID))
@@ -904,8 +1033,19 @@ func (s *Service) createRunningRun(
 		return nil
 	})
 	if err != nil {
+		var httpErr *httpx.HTTPError
+		if errors.As(err, &httpErr) {
+			return nil, nil, err
+		}
 		log.Error().Err(err).Str("user_id", userID.String()).Str("agent_id", agentID.String()).
 			Msg("runtime.Run: pre-call tx")
+		return nil, nil, httpx.Internal("创建调用记录失败")
+	}
+	if replayed {
+		resp, replayErr := s.idempotencyReplayResponse(ctx, userID, runID)
+		return nil, resp, replayErr
+	}
+	if !created {
 		return nil, nil, httpx.Internal("创建调用记录失败")
 	}
 
@@ -934,6 +1074,39 @@ func (s *Service) createRunningRun(
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	decorateNextAction(resp)
 	return invocation, resp, nil
+}
+
+func runEndpointIdempotencySnapshot(connectionMode string) (*bool, int32) {
+	if connectionMode == connectionModeDirectHTTP || connectionMode == connectionModeMCPServer {
+		// Agent execution configuration does not expose this capability yet.
+		// Fail closed: a direct endpoint is single-attempt until the declaration
+		// can be snapshotted into the Run (and later its immutable Release).
+		supported := false
+		return &supported, 1
+	}
+	return nil, 3
+}
+
+func (s *Service) runCreationDeadlineWindows(connectionMode string) (time.Duration, time.Duration) {
+	if isQueuedRuntimeMode(connectionMode) {
+		return 10 * time.Minute, 60 * time.Minute
+	}
+	endpointTimeout := 60 * time.Second
+	if s.cfg != nil && s.cfg.RunTimeoutSeconds > 0 {
+		endpointTimeout = time.Duration(s.cfg.RunTimeoutSeconds) * time.Second
+	}
+	dispatchWindow := endpointTimeout / 2
+	if dispatchWindow < time.Second {
+		dispatchWindow = time.Second
+	}
+	if dispatchWindow > 30*time.Second {
+		dispatchWindow = 30 * time.Second
+	}
+	runWindow := endpointTimeout + 30*time.Second
+	if runWindow <= dispatchWindow {
+		runWindow = dispatchWindow + time.Second
+	}
+	return dispatchWindow, runWindow
 }
 
 func runStartedEventPayload(agent db.Agent, userID uuid.UUID) map[string]interface{} {
@@ -1009,6 +1182,7 @@ func (s *Service) prepareTaskCallbackSubscription(cfg *TaskCallbackConfig) (*pre
 	if err != nil {
 		return nil, err
 	}
+	sort.Strings(eventTypes)
 	metadataMap := cfg.Metadata
 	if metadataMap == nil {
 		metadataMap = map[string]interface{}{}

@@ -1189,6 +1189,24 @@ func TestWorkflowStepCopyAndRunNodeErrorEdges(t *testing.T) {
 	}
 }
 
+func TestWorkflowNodeRunIdempotencyKeyIsStablePrintableASCII(t *testing.T) {
+	runID := uuid.New()
+	left := workflowNodeRunIdempotencyKey(runID, "  中文节点\n")
+	right := workflowNodeRunIdempotencyKey(runID, "中文节点")
+	if left != right {
+		t.Fatalf("normalized node key produced different idempotency keys: %q != %q", left, right)
+	}
+	if _, err := runtimemod.HashIdempotencyKey(left); err != nil {
+		t.Fatalf("derived workflow idempotency key is not wire-safe: %v", err)
+	}
+	if left == workflowNodeRunIdempotencyKey(uuid.New(), "中文节点") {
+		t.Fatal("different workflow runs produced the same idempotency key")
+	}
+	if left == workflowNodeRunIdempotencyKey(runID, "另一个节点") {
+		t.Fatal("different workflow nodes produced the same idempotency key")
+	}
+}
+
 func TestStartRunWorkerNoopsWithoutService(t *testing.T) {
 	StartRunWorker(context.Background(), nil, RunWorkerConfig{})
 }

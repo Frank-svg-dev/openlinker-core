@@ -35,12 +35,14 @@ type fakeSkillRecommender struct {
 type fakeRuntimeStarter struct {
 	gotUserID uuid.UUID
 	gotReq    *runtime.RunRequest
+	gotSource string
 	resp      *runtime.RunResponse
 }
 
 func (f *fakeRuntimeStarter) StartRun(_ context.Context, userID uuid.UUID, req *runtime.RunRequest, source string) (*runtime.RunResponse, error) {
 	f.gotUserID = userID
 	f.gotReq = req
+	f.gotSource = source
 	if f.resp != nil {
 		return f.resp, nil
 	}
@@ -582,7 +584,8 @@ func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
 	runner := &fakeRuntimeStarter{}
 	svc.SetRunStarter(runner)
 	revisionRun, err := svc.RunTask(context.Background(), taskID, creatorID, &task.RunTaskRequest{
-		AgentID: agentID,
+		AgentID:        agentID,
+		IdempotencyKey: "task-revision-run-1",
 		Input: map[string]interface{}{
 			"text": "按返修要求补充样本量和 SQL 口径",
 		},
@@ -880,15 +883,36 @@ func TestTaskHandlersWorkLifecycleSuccess(t *testing.T) {
 	assert.Equal(t, agentID.String(), claimed.AgentID)
 
 	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
-		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"}}`, creatorID, taskID)
+		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"},"idempotency_key":"task-handler-run-1"}`, creatorID, taskID)
 	require.NoError(t, h.Run(c))
-	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.Equal(t, http.StatusCreated, rec.Code)
 	var runResp task.RunTaskResponse
 	decodeTaskHandlerJSON(t, rec, &runResp)
 	assert.Equal(t, taskID.String(), runResp.TaskID)
 	assert.Equal(t, "in_progress", runResp.Status)
+	require.NotNil(t, runResp.Run)
+	assert.Equal(t, "/api/v1/runs/"+runResp.Run.RunID, rec.Header().Get(echo.HeaderLocation))
+	assert.Empty(t, rec.Header().Get("Idempotency-Replayed"))
 	require.NotNil(t, runner.gotReq)
 	assert.Equal(t, "按公开任务执行 SQL 分析", runner.gotReq.Input["text"])
+	assert.Equal(t, "task-handler-run-1", runner.gotReq.IdempotencyKey)
+	assert.Equal(t, "task", runner.gotReq.CreationProtocol)
+	assert.Equal(t, "run", runner.gotReq.CreationMethod)
+
+	runner.resp = &runtime.RunResponse{RunID: runResp.Run.RunID, Status: "running", Replayed: true}
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
+		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"},"idempotency_key":"task-handler-run-1"}`, creatorID, taskID)
+	require.NoError(t, h.Run(c))
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	assert.Equal(t, "true", rec.Header().Get("Idempotency-Replayed"))
+	assert.Equal(t, "/api/v1/runs/"+runResp.Run.RunID, rec.Header().Get(echo.HeaderLocation))
+
+	runner.resp = &runtime.RunResponse{RunID: runResp.Run.RunID, Status: "success", Replayed: true}
+	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
+		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"},"idempotency_key":"task-handler-run-1"}`, creatorID, taskID)
+	require.NoError(t, h.Run(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "true", rec.Header().Get("Idempotency-Replayed"))
 
 	firstRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "handler 分析完成")
 	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/complete",
@@ -978,7 +1002,8 @@ func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
 	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
 	svc.SetRunStarter(runner)
 	resp, err := svc.RunTask(context.Background(), taskID, userID, &task.RunTaskRequest{
-		AgentID: agentID,
+		AgentID:        agentID,
+		IdempotencyKey: "task-selected-agent-run-1",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, taskID.String(), resp.TaskID)
@@ -988,7 +1013,46 @@ func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {
 	assert.Equal(t, "做 SQL 查询", runner.gotReq.Input["text"])
 	assert.Equal(t, taskID.String(), runner.gotReq.Metadata["task_id"])
 	assert.Equal(t, []string{"run_agent"}, runner.gotReq.Metadata["used_mcp_tools"])
+	assert.Equal(t, "task-selected-agent-run-1", runner.gotReq.IdempotencyKey)
+	assert.Equal(t, "task", runner.gotReq.CreationProtocol)
+	assert.Equal(t, "run", runner.gotReq.CreationMethod)
+	assert.Equal(t, "web", runner.gotSource)
 	assert.Equal(t, userID, runner.gotUserID)
+}
+
+func TestRunTaskRejectsMissingOrUnsafeIdempotencyKeyBeforeDatabaseLookup(t *testing.T) {
+	tests := []struct {
+		name      string
+		key       string
+		wantClass runtime.IdempotencyErrorClass
+	}{
+		{name: "missing", wantClass: runtime.IdempotencyErrorKeyRequired},
+		{name: "control character", key: "task\nrun", wantClass: runtime.IdempotencyErrorKeyInvalid},
+		{name: "too long", key: strings.Repeat("x", 256), wantClass: runtime.IdempotencyErrorKeyInvalid},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			runner := &fakeRuntimeStarter{}
+			svc := task.NewService(nil, nil, nil)
+			svc.SetRunStarter(runner)
+
+			_, err := svc.RunTask(context.Background(), uuid.New(), uuid.New(), &task.RunTaskRequest{
+				AgentID:        uuid.New(),
+				IdempotencyKey: tt.key,
+			})
+			require.Error(t, err)
+			require.Nil(t, runner.gotReq)
+
+			var httpErr *httpx.HTTPError
+			require.ErrorAs(t, err, &httpErr)
+			require.Equal(t, http.StatusUnprocessableEntity, httpErr.Status)
+			require.Equal(t, httpx.ErrorCode(tt.wantClass), httpErr.Code)
+			if tt.key != "" {
+				require.NotContains(t, httpErr.Message, tt.key)
+			}
+		})
+	}
 }
 
 func TestRecommendRejectsUnknownAssociations(t *testing.T) {

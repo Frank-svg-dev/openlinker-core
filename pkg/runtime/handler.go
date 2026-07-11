@@ -159,11 +159,14 @@ func (h *Handler) PostRun(c echo.Context) error {
 	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
 		return err
 	}
+	if err := bindRESTRunIdempotency(c, &req); err != nil {
+		return err
+	}
 	resp, err := h.svc.Run(c.Request().Context(), uid, &req, sourceFromCtx(c))
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, resp)
+	return h.sendRunCreationResponse(c, uid, resp)
 }
 
 // PostRunAsync 启动异步调用，立即返回 run_id，调用结果通过 GET /runs/:id 或 SSE 查询。
@@ -186,11 +189,111 @@ func (h *Handler) PostRunAsync(c echo.Context) error {
 	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
 		return err
 	}
+	if err := bindRESTRunIdempotency(c, &req); err != nil {
+		return err
+	}
 	resp, err := h.svc.StartRun(c.Request().Context(), uid, &req, sourceFromCtx(c))
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusAccepted, resp)
+	return h.sendRunCreationResponse(c, uid, resp)
+}
+
+func bindRESTRunIdempotency(c echo.Context, req *RunRequest) error {
+	if req == nil {
+		return httpx.Unprocessable("请求体不能为空")
+	}
+	key := c.Request().Header.Get("Idempotency-Key")
+	if _, err := HashIdempotencyKey(key); err != nil {
+		return idempotencyHTTPError(err)
+	}
+	req.IdempotencyKey = key
+	req.CreationProtocol = "rest"
+	req.CreationMethod = "runs.create"
+	return nil
+}
+
+func (h *Handler) sendRunCreationResponse(c echo.Context, userID uuid.UUID, resp *RunResponse) error {
+	if resp == nil || strings.TrimSpace(resp.RunID) == "" {
+		return httpx.Internal("创建调用记录失败")
+	}
+	wait, preferWait, err := parseRunPreferWait(c.Request().Header.Get("Prefer"))
+	if err != nil {
+		return err
+	}
+	wasReplayed := resp.Replayed
+	if resp.Status == "running" && wait > 0 {
+		runID, parseErr := uuid.Parse(resp.RunID)
+		if parseErr != nil {
+			return httpx.Internal("创建调用记录失败")
+		}
+		deadline := time.NewTimer(wait)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer deadline.Stop()
+		defer ticker.Stop()
+	waitLoop:
+		for resp.Status == "running" {
+			select {
+			case <-c.Request().Context().Done():
+				return c.Request().Context().Err()
+			case <-deadline.C:
+				break waitLoop
+			case <-ticker.C:
+				current, getErr := h.svc.GetRun(c.Request().Context(), userID, runID)
+				if getErr != nil {
+					return getErr
+				}
+				resp = current
+				resp.Replayed = wasReplayed
+			}
+		}
+	}
+	location := "/api/v1/runs/" + resp.RunID
+	c.Response().Header().Set("Location", location)
+	status := http.StatusCreated
+	if resp.Replayed {
+		c.Response().Header().Set("Idempotency-Replayed", "true")
+		status = http.StatusOK
+		if resp.Status == "running" {
+			status = http.StatusAccepted
+		}
+	}
+	if preferWait {
+		c.Response().Header().Set("Preference-Applied", "wait="+strconv.Itoa(int(wait/time.Second)))
+		if resp.Status == "running" {
+			status = http.StatusAccepted
+		}
+	}
+	return c.JSON(status, resp)
+}
+
+func parseRunPreferWait(raw string) (time.Duration, bool, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, false, nil
+	}
+	found := false
+	waitSeconds := 0
+	for _, preference := range strings.Split(raw, ",") {
+		preference = strings.TrimSpace(preference)
+		if !strings.HasPrefix(strings.ToLower(preference), "wait=") {
+			continue
+		}
+		if found {
+			return 0, false, httpx.BadRequest("Prefer 只能包含一个 wait 参数")
+		}
+		found = true
+		value := strings.TrimSpace(preference[len("wait="):])
+		parsed, err := strconv.Atoi(value)
+		if err != nil || parsed < 0 || parsed > 30 {
+			return 0, false, httpx.BadRequest("Prefer wait 必须是 0 到 30 秒的整数")
+		}
+		waitSeconds = parsed
+	}
+	if !found {
+		return 0, false, nil
+	}
+	return time.Duration(waitSeconds) * time.Second, true, nil
 }
 
 // GetRun 查询单条调用详情（仅 owner）。

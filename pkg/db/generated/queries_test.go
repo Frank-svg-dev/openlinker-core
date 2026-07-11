@@ -127,6 +127,10 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 	duration := int32(123)
 	finished := now.Add(time.Second)
 	output := []byte(`{"ok":true}`)
+	idempotencyKeyHash := []byte("key-hash")
+	idempotencyFingerprint := []byte("fingerprint")
+	requestMetadata := []byte(`{"origin_protocol":"rest","origin_method":"POST /api/v1/runs"}`)
+	endpointIdempotency := true
 	runValues := runRow(runID, userID, agentID, []byte(`{"prompt":"hi"}`), output, "success", nil, nil, 100, 25, 75, &duration, now, &finished, "api")
 	rows := &fakeRows{rows: [][]any{append(append([]any{}, runValues...), "agent-slug", "Agent Name")}}
 	dbtx := &fakeDBTX{
@@ -137,13 +141,23 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 	q := New(dbtx)
 
 	created, err := q.CreateRun(context.Background(), CreateRunParams{
-		UserID:              userID,
-		AgentID:             agentID,
-		Input:               []byte(`{"prompt":"hi"}`),
-		CostCents:           100,
-		PlatformFeeCents:    25,
-		CreatorRevenueCents: 75,
-		Source:              "api",
+		ID:                          runID,
+		UserID:                      userID,
+		AgentID:                     agentID,
+		Input:                       []byte(`{"prompt":"hi"}`),
+		CostCents:                   100,
+		PlatformFeeCents:            25,
+		CreatorRevenueCents:         75,
+		Source:                      "api",
+		IdempotencyKeyHash:          idempotencyKeyHash,
+		IdempotencyFingerprint:      idempotencyFingerprint,
+		RequestMetadata:             requestMetadata,
+		ConnectionModeSnapshot:      "direct_http",
+		EndpointIdempotencySnapshot: &endpointIdempotency,
+		MaxOfferCount:               3,
+		MaxAttempts:                 2,
+		DispatchDeadlineAfterMs:     30_000,
+		RunDeadlineAfterMs:          120_000,
 	})
 	if err != nil {
 		t.Fatalf("CreateRun error = %v", err)
@@ -151,6 +165,44 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "CreateRun")
 	if created.ID != runID || created.DurationMs == nil || *created.DurationMs != duration || created.Source != "api" {
 		t.Fatalf("CreateRun scan = %#v", created)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{
+		runID, userID, agentID, []byte(`{"prompt":"hi"}`),
+		int32(100), int32(25), int32(75), "api",
+		idempotencyKeyHash, idempotencyFingerprint, requestMetadata, "direct_http", &endpointIdempotency,
+		int32(3), int32(2), int64(30_000), int64(120_000),
+	}) {
+		t.Fatalf("CreateRun args = %#v", dbtx.queryRowArgs)
+	}
+	for _, fragment := range []string{
+		"ON CONFLICT (user_id, idempotency_key_hash)",
+		"WHERE idempotency_key_hash IS NOT NULL",
+		"idempotency_key_hash, idempotency_fingerprint, request_metadata",
+		"clock_timestamp() + ($16::bigint * INTERVAL '1 millisecond')",
+		"clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond')",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("CreateRun SQL missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+
+	dbtx.row = fakeRow{values: []any{runID, idempotencyFingerprint}}
+	idempotencyRecord, err := q.GetRunIdempotencyRecord(context.Background(), GetRunIdempotencyRecordParams{
+		UserID:             userID,
+		IdempotencyKeyHash: idempotencyKeyHash,
+	})
+	if err != nil {
+		t.Fatalf("GetRunIdempotencyRecord error = %v", err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "GetRunIdempotencyRecord")
+	if idempotencyRecord.ID != runID || !reflect.DeepEqual(idempotencyRecord.IdempotencyFingerprint, idempotencyFingerprint) {
+		t.Fatalf("GetRunIdempotencyRecord scan = %#v", idempotencyRecord)
+	}
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, idempotencyKeyHash}) {
+		t.Fatalf("GetRunIdempotencyRecord args = %#v", dbtx.queryRowArgs)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "runtime_contract_id = 'openlinker.runtime.v2'") {
+		t.Fatalf("GetRunIdempotencyRecord SQL missing runtime contract guard: %s", dbtx.queryRowSQL)
 	}
 
 	listed, err := q.ListRunsByUserWithAgent(context.Background(), ListRunsByUserWithAgentParams{UserID: userID, Limit: 10, Offset: 5})

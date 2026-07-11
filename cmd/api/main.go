@@ -182,7 +182,17 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e.Use(emw.CORSWithConfig(emw.CORSConfig{
 		AllowOrigins:     allowedCORSOrigins(cfg),
 		AllowCredentials: true,
-		AllowHeaders:     []string{echo.HeaderContentType, echo.HeaderAuthorization},
+		AllowHeaders: []string{
+			echo.HeaderContentType,
+			echo.HeaderAuthorization,
+			"Idempotency-Key",
+			"Prefer",
+		},
+		ExposeHeaders: []string{
+			echo.HeaderLocation,
+			"Idempotency-Replayed",
+			"Preference-Applied",
+		},
 	}))
 	if cfg.IsProduction() {
 		e.Use(emw.RateLimiterWithConfig(rateLimiterConfigWithConfig(cfg, stores...)))

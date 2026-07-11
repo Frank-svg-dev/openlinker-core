@@ -45,10 +45,13 @@ type GetAgentRequest struct {
 // RunAgentRequest POST /api/v1/mcp/run_agent 请求体。
 //
 // agent_id 是 UUID；input 透传给创作者 endpoint。
+// idempotency_key 由调用方生成。同一请求重试时必须复用原值，且不能把同一值
+// 用于语义不同的调用。
 type RunAgentRequest struct {
-	AgentID  string                 `json:"agent_id" validate:"required,uuid"`
-	Input    map[string]interface{} `json:"input" validate:"required"`
-	Metadata map[string]interface{} `json:"metadata,omitempty"`
+	AgentID        string                 `json:"agent_id" validate:"required,uuid"`
+	Input          map[string]interface{} `json:"input" validate:"required"`
+	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	IdempotencyKey string                 `json:"idempotency_key" validate:"required,min=1,max=255,printascii"`
 }
 
 // GetRunRequest POST /api/v1/mcp/get_run 请求体。

@@ -219,6 +219,7 @@ ALTER TABLE runs
     ADD COLUMN runtime_contract_id TEXT,
     ADD COLUMN idempotency_key_hash BYTEA,
     ADD COLUMN idempotency_fingerprint BYTEA,
+    ADD COLUMN request_metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     ADD COLUMN connection_mode_snapshot TEXT,
     ADD COLUMN endpoint_idempotency_snapshot BOOLEAN,
     ADD COLUMN dispatch_state TEXT,
@@ -1151,6 +1152,8 @@ ALTER TABLE runs
         CHECK (char_length(runtime_contract_id) BETWEEN 1 AND 200),
     ADD CONSTRAINT runs_runtime_contract_id_valid
         CHECK (runtime_contract_id IN ('legacy.pre-v2', 'openlinker.runtime.v2')),
+    ADD CONSTRAINT runs_request_metadata_object
+        CHECK (jsonb_typeof(request_metadata) = 'object'),
     ADD CONSTRAINT runs_idempotency_consistent
         CHECK (
             (
@@ -1571,6 +1574,7 @@ BEGIN
         NEW.started_at,
         NEW.idempotency_key_hash,
         NEW.idempotency_fingerprint,
+        NEW.request_metadata,
         NEW.connection_mode_snapshot,
         NEW.endpoint_idempotency_snapshot,
         NEW.max_offer_count,
@@ -1590,6 +1594,7 @@ BEGIN
         OLD.started_at,
         OLD.idempotency_key_hash,
         OLD.idempotency_fingerprint,
+        OLD.request_metadata,
         OLD.connection_mode_snapshot,
         OLD.endpoint_idempotency_snapshot,
         OLD.max_offer_count,

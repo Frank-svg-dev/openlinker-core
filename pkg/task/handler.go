@@ -242,7 +242,20 @@ func (h *Handler) Run(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusAccepted, resp)
+	if resp == nil || resp.Run == nil || strings.TrimSpace(resp.Run.RunID) == "" {
+		return httpx.Internal("创建调用记录失败")
+	}
+	c.Response().Header().Set(echo.HeaderLocation, "/api/v1/runs/"+resp.Run.RunID)
+	status := http.StatusCreated
+	if resp.Run.Replayed {
+		c.Response().Header().Set("Idempotency-Replayed", "true")
+		status = http.StatusOK
+		runStatus := strings.ToLower(strings.TrimSpace(resp.Run.Status))
+		if runStatus == "running" || runStatus == "pending" {
+			status = http.StatusAccepted
+		}
+	}
+	return c.JSON(status, resp)
 }
 
 // Accept POST /tasks/:id/accept

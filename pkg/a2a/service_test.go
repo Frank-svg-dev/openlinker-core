@@ -318,7 +318,12 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		Reason: "summarize", Input: map[string]any{"q": "hello"},
 		ContextID:        "ctx-delegation",
 		TraceID:          "trace-delegation",
-		ReferenceTaskIDs: []string{"task-explicit"},
+		ReferenceTaskIDs: []string{"task-z", "task-a", "task-z"},
+		Metadata: map[string]any{
+			"business":   "same",
+			"trace":      "metadata-trace-first",
+			"context_id": "ctx-delegation",
+		},
 		TaskCallback: &a2a.A2APushNotificationConfig{
 			URL:    pushServer.URL + "/a2a/events",
 			Secret: "caller-a2a-secret",
@@ -350,11 +355,23 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, "ctx-delegation", receivedA2A.RootContextID)
 	assert.Equal(t, parentRunID.String(), receivedA2A.ParentTaskID)
 	assert.Equal(t, "trace-delegation", receivedA2A.TraceID)
-	assert.ElementsMatch(t, []string{"task-explicit", parentRunID.String()}, receivedA2A.ReferenceTaskIDs)
+	assert.ElementsMatch(t, []string{"task-a", "task-z", parentRunID.String()}, receivedA2A.ReferenceTaskIDs)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", receivedA2A.CallAgentEndpoint)
 	assert.Contains(t, receivedA2A.AgentScopes, "agent:call")
 
-	replay, err := svc.CallAgent(context.Background(), token.PlaintextToken, callReq)
+	replayReq := *callReq
+	replayReq.ContextID = ""
+	replayReq.ContextIDAlias = "ctx-delegation"
+	replayReq.TraceID = ""
+	replayReq.TraceIDAlias = "trace-delegation-retry"
+	replayReq.ReferenceTaskIDs = nil
+	replayReq.ReferenceTaskIDsAlias = []string{"task-a", "task-z"}
+	replayReq.Metadata = map[string]any{
+		"business":  "same",
+		"trace_id":  "metadata-trace-retry",
+		"contextId": "ctx-delegation",
+	}
+	replay, err := svc.CallAgent(context.Background(), token.PlaintextToken, &replayReq)
 	require.NoError(t, err)
 	assert.Equal(t, child.RunID, replay.RunID)
 	assert.True(t, replay.Replayed)
@@ -795,9 +812,18 @@ func TestProtocolMessageUsesMessageIDForReplayAndStableServerContext(t *testing.
 	slug := "a2a-" + agentID.String()[:8]
 	params := &a2a.A2AMessageSendParams{
 		Message: a2a.A2AMessage{
-			MessageID: "message-replay-1",
-			Role:      "user",
-			Parts:     []map[string]any{{"kind": "text", "text": "run once"}},
+			MessageID:        "message-replay-1",
+			ReferenceTaskIDs: []string{"ref-z", "ref-a", "ref-z"},
+			Extensions:       []string{"urn:ext-z", "urn:ext-a"},
+			Role:             "user",
+			Parts:            []map[string]any{{"kind": "text", "text": "run once"}},
+		},
+		Metadata: map[string]any{
+			"business":            "same",
+			"trace_id":            "trace-first-attempt",
+			"delivery_visibility": "shared",
+			"a2a_extensions":      []string{"urn:ext-m", "urn:ext-a"},
+			"a2a_options":         map[string]any{"priority": "normal"},
 		},
 	}
 	returnImmediately := true
@@ -805,7 +831,27 @@ func TestProtocolMessageUsesMessageIDForReplayAndStableServerContext(t *testing.
 
 	first, err := svc.SendProtocolMessage(context.Background(), owner, slug, params)
 	require.NoError(t, err)
-	replay, err := svc.SendProtocolMessage(context.Background(), owner, slug, params)
+	replay, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID:        "message-replay-1",
+			ReferenceTaskIDs: []string{"ref-a", "ref-z"},
+			Extensions:       []string{"urn:ext-m", "urn:ext-z"},
+			Role:             "user",
+			Parts:            []map[string]any{{"kind": "text", "text": "run once"}},
+			Metadata: map[string]any{
+				"business": "same",
+				"traceId":  "trace-retry-attempt",
+			},
+		},
+		Configuration: &a2a.A2ASendConfiguration{
+			ReturnImmediately: &returnImmediately,
+			Visibility:        "shared",
+			Options:           map[string]any{"priority": "normal"},
+		},
+		Metadata: map[string]any{
+			"a2a_extensions": []string{"urn:ext-a"},
+		},
+	})
 	require.NoError(t, err)
 	assert.Equal(t, first.ID, replay.ID)
 	assert.Equal(t, "ctx-"+first.ID, first.ContextID)
@@ -897,14 +943,18 @@ func TestProtocolMessageReusesProtocolTaskIDForContinuation(t *testing.T) {
 	owner := insertCreator(t, pool)
 
 	var calls []map[string]any
+	var callA2AMetadata []map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
-			Input map[string]any `json:"input"`
+			Input    map[string]any `json:"input"`
+			Metadata map[string]any `json:"metadata"`
 		}
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 		calls = append(calls, request.Input)
+		a2aMetadata, _ := request.Metadata["a2a"].(map[string]any)
+		callA2AMetadata = append(callA2AMetadata, a2aMetadata)
 		w.Header().Set("Content-Type", "application/json")
-		if messageID, _ := request.Input["a2a_message_id"].(string); strings.HasPrefix(messageID, "input-required-") {
+		if messageID, _ := a2aMetadata["message_id"].(string); strings.HasPrefix(messageID, "input-required-") {
 			_, _ = w.Write([]byte(`{"output":{"summary":"need input","a2a":{"task_state":"input_required","status_message":"Need a follow-up"}}}`))
 			return
 		}
@@ -943,8 +993,15 @@ func TestProtocolMessageReusesProtocolTaskIDForContinuation(t *testing.T) {
 	assert.Equal(t, "ctx-multi", followup.ContextID)
 	assert.Equal(t, "completed", followup.Status.State)
 	require.Len(t, calls, 2)
-	assert.Equal(t, first.ID, calls[1]["a2a_task_id"])
-	assert.Equal(t, "ctx-multi", calls[1]["a2a_context_id"])
+	require.Len(t, callA2AMetadata, 2)
+	assert.Equal(t, first.ID, callA2AMetadata[1]["task_id"])
+	assert.Equal(t, "ctx-multi", callA2AMetadata[1]["context_id"])
+	for _, input := range calls {
+		assert.NotContains(t, input, "a2a_message_id")
+		assert.NotContains(t, input, "a2a_context_id")
+		assert.NotContains(t, input, "a2a_task_id")
+		assert.NotContains(t, input, "a2a_reference_task_ids")
+	}
 
 	reloaded, err := svc.GetProtocolTask(context.Background(), owner, slug, first.ID, nil)
 	require.NoError(t, err)
