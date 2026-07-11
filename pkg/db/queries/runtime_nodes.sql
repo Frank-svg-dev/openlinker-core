@@ -10,6 +10,45 @@
 -- Pass the complete scope to each phase; every query sorts UUIDs itself, so
 -- callers must not rely on input-array order or lock a principal first.
 
+-- name: ResolveRuntimeWorkerSessionPrincipal :one
+-- Transport authentication proves Node/Agent/Credential/worker. Resolve the
+-- currently attached target Session from those facts; never accept an
+-- Attempt's immutable source Session ID as the acting Session after resume.
+SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
+       s.worker_id, s.attached_core_instance_id,
+       s.device_certificate_serial, n.device_public_key_thumbprint,
+       s.node_version, s.protocol_version, s.runtime_contract_id,
+       s.runtime_contract_digest, s.features, s.status, s.heartbeat_at,
+       clock_timestamp() AS database_now
+FROM runtime_sessions s
+JOIN runtime_nodes n ON n.node_id = s.node_id
+JOIN agent_tokens t
+  ON t.id = s.credential_id
+ AND t.agent_id = s.agent_id
+WHERE s.node_id = sqlc.arg(node_id)
+  AND s.agent_id = sqlc.arg(agent_id)
+  AND s.credential_id = sqlc.arg(credential_id)
+  AND s.worker_id = sqlc.arg(worker_id)
+  AND s.device_certificate_serial = sqlc.arg(device_certificate_serial)
+  AND n.device_public_key_thumbprint = sqlc.arg(device_public_key_thumbprint)
+  AND s.attached_core_instance_id = sqlc.arg(core_instance_id)
+  AND s.status IN ('active', 'draining')
+  AND s.protocol_version = 2
+  AND s.runtime_contract_id = 'openlinker.runtime.v2'
+  AND n.status IN ('active', 'draining')
+  AND n.revoked_at IS NULL
+  AND n.device_certificate_serial = s.device_certificate_serial
+  AND n.node_version = s.node_version
+  AND n.protocol_version = s.protocol_version
+  AND n.runtime_contract_id = s.runtime_contract_id
+  AND n.runtime_contract_digest = s.runtime_contract_digest
+  AND n.features @> s.features
+  AND s.features @> n.features
+  AND t.status = 'active_runtime'
+  AND t.revoked_at IS NULL
+  AND t.scopes @> ARRAY['agent:pull']::text[]
+  AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp());
+
 -- name: CreateRuntimeSchemaContract :one
 INSERT INTO runtime_schema_contracts (
     schema_version,
@@ -374,6 +413,7 @@ WHERE n.node_id = $2
   AND n.status = 'active'
   AND t.status = 'active_runtime'
   AND t.revoked_at IS NULL
+  AND t.scopes @> ARRAY['agent:pull']::text[]
   AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
 RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
           session_epoch, device_certificate_serial, node_version,
@@ -453,6 +493,7 @@ WITH candidate AS (
       AND n.status IN ('active', 'draining')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
       AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
       AND (
           s.attached_core_instance_id IS NULL
@@ -503,6 +544,7 @@ WHERE runtime_session_id = $1
         AND n.status IN ('active', 'draining')
         AND t.status = 'active_runtime'
         AND t.revoked_at IS NULL
+        AND t.scopes @> ARRAY['agent:pull']::text[]
         AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
   )
 RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
@@ -528,6 +570,7 @@ WITH candidate AS (
       AND n.status = 'active'
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
       AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
     FOR UPDATE SKIP LOCKED
 )

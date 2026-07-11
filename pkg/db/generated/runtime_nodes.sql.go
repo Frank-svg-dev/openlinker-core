@@ -119,6 +119,103 @@ func scanRuntimeSessionAttachment(row runtimeNodeScanner, a *RuntimeSessionAttac
 	)
 }
 
+const resolveRuntimeWorkerSessionPrincipal = `-- name: ResolveRuntimeWorkerSessionPrincipal :one
+SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
+       s.worker_id, s.attached_core_instance_id,
+       s.device_certificate_serial, n.device_public_key_thumbprint,
+       s.node_version, s.protocol_version, s.runtime_contract_id,
+       s.runtime_contract_digest, s.features, s.status, s.heartbeat_at,
+       clock_timestamp() AS database_now
+FROM runtime_sessions s
+JOIN runtime_nodes n ON n.node_id = s.node_id
+JOIN agent_tokens t
+  ON t.id = s.credential_id
+ AND t.agent_id = s.agent_id
+WHERE s.node_id = $1
+  AND s.agent_id = $2
+  AND s.credential_id = $3
+  AND s.worker_id = $4
+  AND s.device_certificate_serial = $5
+  AND n.device_public_key_thumbprint = $6
+  AND s.attached_core_instance_id = $7
+  AND s.status IN ('active', 'draining')
+  AND s.protocol_version = 2
+  AND s.runtime_contract_id = 'openlinker.runtime.v2'
+  AND n.status IN ('active', 'draining')
+  AND n.revoked_at IS NULL
+  AND n.device_certificate_serial = s.device_certificate_serial
+  AND n.node_version = s.node_version
+  AND n.protocol_version = s.protocol_version
+  AND n.runtime_contract_id = s.runtime_contract_id
+  AND n.runtime_contract_digest = s.runtime_contract_digest
+  AND n.features @> s.features
+  AND s.features @> n.features
+  AND t.status = 'active_runtime'
+  AND t.revoked_at IS NULL
+  AND t.scopes @> ARRAY['agent:pull']::text[]
+  AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())`
+
+type ResolveRuntimeWorkerSessionPrincipalParams struct {
+	NodeID                    uuid.UUID `db:"node_id" json:"node_id"`
+	AgentID                   uuid.UUID `db:"agent_id" json:"agent_id"`
+	CredentialID              uuid.UUID `db:"credential_id" json:"credential_id"`
+	WorkerID                  string    `db:"worker_id" json:"worker_id"`
+	DeviceCertificateSerial   string    `db:"device_certificate_serial" json:"device_certificate_serial"`
+	DevicePublicKeyThumbprint string    `db:"device_public_key_thumbprint" json:"device_public_key_thumbprint"`
+	CoreInstanceID            uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+}
+
+type ResolveRuntimeWorkerSessionPrincipalRow struct {
+	RuntimeSessionID          uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID                    uuid.UUID `db:"node_id" json:"node_id"`
+	AgentID                   uuid.UUID `db:"agent_id" json:"agent_id"`
+	CredentialID              uuid.UUID `db:"credential_id" json:"credential_id"`
+	WorkerID                  string    `db:"worker_id" json:"worker_id"`
+	AttachedCoreInstanceID    uuid.UUID `db:"attached_core_instance_id" json:"attached_core_instance_id"`
+	DeviceCertificateSerial   string    `db:"device_certificate_serial" json:"device_certificate_serial"`
+	DevicePublicKeyThumbprint string    `db:"device_public_key_thumbprint" json:"device_public_key_thumbprint"`
+	NodeVersion               string    `db:"node_version" json:"node_version"`
+	ProtocolVersion           int32     `db:"protocol_version" json:"protocol_version"`
+	RuntimeContractID         string    `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest     string    `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	Features                  []string  `db:"features" json:"features"`
+	Status                    string    `db:"status" json:"status"`
+	HeartbeatAt               time.Time `db:"heartbeat_at" json:"heartbeat_at"`
+	DatabaseNow               time.Time `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) ResolveRuntimeWorkerSessionPrincipal(ctx context.Context, arg ResolveRuntimeWorkerSessionPrincipalParams) (ResolveRuntimeWorkerSessionPrincipalRow, error) {
+	row := q.db.QueryRow(ctx, resolveRuntimeWorkerSessionPrincipal,
+		arg.NodeID,
+		arg.AgentID,
+		arg.CredentialID,
+		arg.WorkerID,
+		arg.DeviceCertificateSerial,
+		arg.DevicePublicKeyThumbprint,
+		arg.CoreInstanceID,
+	)
+	var principal ResolveRuntimeWorkerSessionPrincipalRow
+	err := row.Scan(
+		&principal.RuntimeSessionID,
+		&principal.NodeID,
+		&principal.AgentID,
+		&principal.CredentialID,
+		&principal.WorkerID,
+		&principal.AttachedCoreInstanceID,
+		&principal.DeviceCertificateSerial,
+		&principal.DevicePublicKeyThumbprint,
+		&principal.NodeVersion,
+		&principal.ProtocolVersion,
+		&principal.RuntimeContractID,
+		&principal.RuntimeContractDigest,
+		&principal.Features,
+		&principal.Status,
+		&principal.HeartbeatAt,
+		&principal.DatabaseNow,
+	)
+	return principal, err
+}
+
 const createRuntimeSchemaContract = `-- name: CreateRuntimeSchemaContract :one
 INSERT INTO runtime_schema_contracts (
     schema_version,
@@ -958,6 +1055,7 @@ WHERE n.node_id = $2
   AND n.status = 'active'
   AND t.status = 'active_runtime'
   AND t.revoked_at IS NULL
+  AND t.scopes @> ARRAY['agent:pull']::text[]
   AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
 RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
           session_epoch, device_certificate_serial, node_version,
@@ -1149,6 +1247,7 @@ WITH candidate AS (
       AND n.status IN ('active', 'draining')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
       AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
       AND (
           s.attached_core_instance_id IS NULL
@@ -1224,6 +1323,7 @@ WHERE runtime_session_id = $1
         AND n.status IN ('active', 'draining')
         AND t.status = 'active_runtime'
         AND t.revoked_at IS NULL
+        AND t.scopes @> ARRAY['agent:pull']::text[]
         AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
   )
 RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
@@ -1276,6 +1376,7 @@ WITH candidate AS (
       AND n.status = 'active'
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
       AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
     FOR UPDATE SKIP LOCKED
 )

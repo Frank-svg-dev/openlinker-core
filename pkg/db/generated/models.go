@@ -215,6 +215,35 @@ type RunAttempt struct {
 	ErrorCode               *string    `db:"error_code" json:"error_code"`
 	ErrorDetailRedacted     *string    `db:"error_detail_redacted" json:"error_detail_redacted"`
 	CreatedAt               time.Time  `db:"created_at" json:"created_at"`
+	SlotAcquiredAt          *time.Time `db:"slot_acquired_at" json:"slot_acquired_at"`
+	SlotReleasedAt          *time.Time `db:"slot_released_at" json:"slot_released_at"`
+	ActiveRuntimeSessionID  *uuid.UUID `db:"active_runtime_session_id" json:"active_runtime_session_id"`
+}
+
+// RuntimeResumeGrant is durable authorization evidence for a replacement
+// Session acting on an immutable Agent Node Attempt identity.
+type RuntimeResumeGrant struct {
+	ID                      uuid.UUID  `db:"id" json:"id"`
+	RunID                   uuid.UUID  `db:"run_id" json:"run_id"`
+	AttemptID               uuid.UUID  `db:"attempt_id" json:"attempt_id"`
+	LeaseID                 uuid.UUID  `db:"lease_id" json:"lease_id"`
+	FencingToken            int64      `db:"fencing_token" json:"fencing_token"`
+	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
+	NodeID                  uuid.UUID  `db:"node_id" json:"node_id"`
+	WorkerID                string     `db:"worker_id" json:"worker_id"`
+	SourceSessionID         uuid.UUID  `db:"source_session_id" json:"source_session_id"`
+	SourceCredentialID      uuid.UUID  `db:"source_credential_id" json:"source_credential_id"`
+	TargetSessionID         uuid.UUID  `db:"target_session_id" json:"target_session_id"`
+	TargetCredentialID      uuid.UUID  `db:"target_credential_id" json:"target_credential_id"`
+	Permission              string     `db:"permission" json:"permission"`
+	GrantedByCoreInstanceID uuid.UUID  `db:"granted_by_core_instance_id" json:"granted_by_core_instance_id"`
+	GrantedAt               time.Time  `db:"granted_at" json:"granted_at"`
+	ExpiresAt               time.Time  `db:"expires_at" json:"expires_at"`
+	FirstUsedAt             *time.Time `db:"first_used_at" json:"first_used_at"`
+	RevokedAt               *time.Time `db:"revoked_at" json:"revoked_at"`
+	RevokedByType           *string    `db:"revoked_by_type" json:"revoked_by_type"`
+	RevokedByID             *uuid.UUID `db:"revoked_by_id" json:"revoked_by_id"`
+	RevokeReason            *string    `db:"revoke_reason" json:"revoke_reason"`
 }
 
 type RunCancellation struct {

@@ -20,7 +20,8 @@ func scanRunAttempt(row interface{ Scan(dest ...any) error }, a *RunAttempt) err
 		&a.AttemptDeadlineAt, &a.FinishedAt, &a.Outcome, &a.ResultID,
 		&a.ResultFingerprint, &a.ResultClassification, &a.ResultAcknowledgedAt,
 		&a.LastClientEventSeq, &a.FinalClientEventSeq, &a.ErrorCode,
-		&a.ErrorDetailRedacted, &a.CreatedAt,
+		&a.ErrorDetailRedacted, &a.CreatedAt, &a.SlotAcquiredAt,
+		&a.SlotReleasedAt, &a.ActiveRuntimeSessionID,
 	)
 }
 
@@ -62,10 +63,13 @@ INSERT INTO run_attempts (
     id, run_id, agent_id, offer_no, executor_type, lease_id, fencing_token,
     runtime_token_id, runtime_worker_id, runtime_session_id, node_id,
     offered_by_core_instance_id, attached_core_instance_id,
-    offer_expires_at, lease_expires_at, attempt_deadline_at
+    offer_expires_at, lease_expires_at, attempt_deadline_at,
+    slot_acquired_at, active_runtime_session_id
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7,
-    $8, $9, $10, $11, $12, $13, $14, $15, $16
+    $8, $9, $10, $11, $12, $13, $14, $15, $16,
+    CASE WHEN $5::text = 'agent_node' THEN clock_timestamp() ELSE NULL END,
+    CASE WHEN $5::text = 'agent_node' THEN $10::uuid ELSE NULL END
 )
 RETURNING *`
 

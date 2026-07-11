@@ -46,6 +46,7 @@ func TestRuntimeV2AttemptAndCancellationQueries(t *testing.T) {
 		now.Add(5 * time.Minute), (*time.Time)(nil), (*string)(nil),
 		(*uuid.UUID)(nil), []byte(nil), (*string)(nil), (*time.Time)(nil),
 		int64(0), (*int64)(nil), (*string)(nil), (*string)(nil), now,
+		(*time.Time)(nil), (*time.Time)(nil), (*uuid.UUID)(nil),
 	}
 	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
 	q := New(dbtx)
@@ -99,6 +100,7 @@ func TestResultFinalizationQueries(t *testing.T) {
 	workerID, classification, outcome := "worker-a", "success", "success"
 	fingerprint := []byte("0123456789abcdef0123456789abcdef")
 	acceptedAt, finishedAt := now.Add(-time.Minute), now
+	slotAcquiredAt := now.Add(-2 * time.Minute)
 
 	attemptValues := []any{
 		attemptID, runID, agentID, int32(1), &attemptNo, executorType,
@@ -108,6 +110,7 @@ func TestResultFinalizationQueries(t *testing.T) {
 		now.Add(2 * time.Minute), &finishedAt, &outcome, &resultID,
 		fingerprint, &classification, &finishedAt, finalSequence, &finalSequence,
 		(*string)(nil), (*string)(nil), now.Add(-2 * time.Minute),
+		&slotAcquiredAt, &finishedAt, (*uuid.UUID)(nil),
 	}
 	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
 	q := New(dbtx)
@@ -363,6 +366,7 @@ func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
 		(*time.Time)(nil), (*string)(nil), (*uuid.UUID)(nil), []byte(nil),
 		(*string)(nil), (*time.Time)(nil), clientSequence, (*int64)(nil),
 		(*string)(nil), (*string)(nil), now,
+		&now, (*time.Time)(nil), &sessionID,
 	}
 	dbtx.row = fakeRow{values: attemptValues}
 	_, err = q.AdvanceRunAttemptEventSequence(context.Background(), AdvanceRunAttemptEventSequenceParams{
