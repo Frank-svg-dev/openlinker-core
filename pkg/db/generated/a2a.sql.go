@@ -42,7 +42,10 @@ func (q *Queries) CreateAgentRuntimeToken(ctx context.Context, arg CreateAgentRu
 const countActiveAgentRuntimeTokens = `-- name: CountActiveAgentRuntimeTokens :one
 SELECT COUNT(*)::int AS total
 FROM agent_tokens
-WHERE agent_id = $1 AND status = 'active_runtime' AND revoked_at IS NULL`
+WHERE agent_id = $1
+  AND status = 'active_runtime'
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())`
 
 func (q *Queries) CountActiveAgentRuntimeTokens(ctx context.Context, agentID uuid.UUID) (int32, error) {
 	var total int32
@@ -55,7 +58,11 @@ SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.sc
        t.last_used_at, t.revoked_at, t.created_at
 FROM agent_tokens t
 JOIN agents a ON a.id = t.agent_id
-WHERE t.agent_id = $1 AND a.creator_id = $2 AND t.status = 'active_runtime'
+WHERE t.agent_id = $1
+  AND a.creator_id = $2
+  AND t.status = 'active_runtime'
+  AND t.revoked_at IS NULL
+  AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
 ORDER BY t.created_at DESC`
 
 type ListAgentRuntimeTokensForOwnerParams struct {
@@ -88,7 +95,11 @@ SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.sc
        t.last_used_at, t.revoked_at, t.created_at, a.connection_mode
 FROM agent_tokens t
 JOIN agents a ON a.id = t.agent_id
-WHERE t.prefix = $1 AND t.revoked_at IS NULL AND t.status = 'active_runtime' AND t.agent_id IS NOT NULL`
+WHERE t.prefix = $1
+  AND t.revoked_at IS NULL
+  AND t.status = 'active_runtime'
+  AND t.agent_id IS NOT NULL
+  AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())`
 
 func (q *Queries) ListActiveAgentRuntimeTokensByPrefix(ctx context.Context, prefix string) ([]AgentRuntimeToken, error) {
 	rows, err := q.db.Query(ctx, listActiveAgentRuntimeTokensByPrefix, prefix)
@@ -112,8 +123,11 @@ func (q *Queries) ListActiveAgentRuntimeTokensByPrefix(ctx context.Context, pref
 }
 
 const touchAgentRuntimeToken = `-- name: TouchAgentRuntimeToken :exec
-UPDATE agent_tokens SET last_used_at = NOW()
-WHERE id = $1 AND revoked_at IS NULL`
+UPDATE agent_tokens SET last_used_at = clock_timestamp()
+WHERE id = $1
+  AND status = 'active_runtime'
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > clock_timestamp())`
 
 func (q *Queries) TouchAgentRuntimeToken(ctx context.Context, id uuid.UUID) error {
 	_, err := q.db.Exec(ctx, touchAgentRuntimeToken, id)
@@ -127,6 +141,7 @@ SELECT EXISTS(
     WHERE agent_id = $1
       AND revoked_at IS NULL
       AND status = 'active_runtime'
+      AND (expires_at IS NULL OR expires_at > clock_timestamp())
       AND 'agent:pull' = ANY(scopes)
       AND last_used_at >= NOW() - INTERVAL '5 minutes'
 )::bool AS has_recent_runtime_pull_token`
