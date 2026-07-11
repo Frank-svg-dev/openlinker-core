@@ -32,6 +32,7 @@ func TestLegacyRuntimeRoutesRequireV2WithoutCallingService(t *testing.T) {
 		{method: http.MethodGet, path: "/api/v1/agent-runtime/runs/claim"},
 		{method: http.MethodPost, path: "/api/v1/agent-runtime/runs/" + runID + "/result"},
 		{method: http.MethodGet, path: "/api/v1/agent-runtime/ws"},
+		{method: http.MethodPost, path: "/api/v1/agent-runtime/call-agent"},
 	}
 	for _, test := range tests {
 		req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{"legacy":true}`))

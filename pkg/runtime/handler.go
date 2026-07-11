@@ -137,6 +137,7 @@ func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 	api.GET("/agent-runtime/runs/claim", RuntimeClientUpgradeRequired)
 	api.POST("/agent-runtime/runs/:id/result", RuntimeClientUpgradeRequired)
 	api.GET("/agent-runtime/ws", RuntimeClientUpgradeRequired)
+	api.POST("/agent-runtime/call-agent", RuntimeClientUpgradeRequired)
 	h.runtimeV2.Register(api)
 }
 
