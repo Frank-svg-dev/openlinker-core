@@ -31,6 +31,7 @@ type Handler struct {
 	validator      *validator.Validate
 	cfg            *config.Config
 	runtimeLimiter EndpointLimiter
+	runtimeV2      *RuntimeV2HTTPController
 }
 
 type runtimeService interface {
@@ -57,6 +58,7 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 		svc:            svc,
 		validator:      validator.New(validator.WithRequiredStructEnabled()),
 		runtimeLimiter: newRuntimeEndpointLimiter(),
+		runtimeV2:      newRuntimeV2HTTPControllerForService(svc),
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]
@@ -135,6 +137,7 @@ func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 	api.GET("/agent-runtime/runs/claim", RuntimeClientUpgradeRequired)
 	api.POST("/agent-runtime/runs/:id/result", RuntimeClientUpgradeRequired)
 	api.GET("/agent-runtime/ws", RuntimeClientUpgradeRequired)
+	h.runtimeV2.Register(api)
 }
 
 // RuntimeClientUpgradeRequired is the only behavior exposed by pre-v2 runtime
