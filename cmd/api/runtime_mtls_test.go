@@ -24,6 +24,7 @@ func TestBuildRuntimeMTLSConfigRequiresVerifiedClientCertificates(t *testing.T) 
 		Port:                           8080,
 		RuntimeMTLSEnabled:             true,
 		RuntimeMTLSPort:                8443,
+		RuntimeMTLSAPIURL:              "https://runtime.example.test:8443",
 		RuntimeMTLSCertFile:            certFile,
 		RuntimeMTLSKeyFile:             keyFile,
 		RuntimeMTLSClientCAFile:        certFile,
@@ -51,6 +52,11 @@ func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
 	cfg.RuntimeMTLSCertFile = "server.pem"
 	cfg.RuntimeMTLSKeyFile = "server-key.pem"
 	cfg.RuntimeMTLSClientCAFile = "client-ca.pem"
+	cfg.RuntimeMTLSAPIURL = "http://runtime.example.test:8443"
+	if err := validateRuntimeMTLSConfig(cfg); err == nil {
+		t.Fatal("non-HTTPS runtime public URL must fail")
+	}
+	cfg.RuntimeMTLSAPIURL = "https://runtime.example.test:8443"
 	cfg.RuntimeInvocationSigningKeyID = "current"
 	cfg.RuntimeInvocationSigningSecret = "too-short"
 	if err := validateRuntimeMTLSConfig(cfg); err == nil {

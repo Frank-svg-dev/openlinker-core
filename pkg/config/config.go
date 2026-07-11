@@ -79,6 +79,7 @@ type Config struct {
 	// certificates with spoofable headers.
 	RuntimeMTLSEnabled      bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
 	RuntimeMTLSPort         int    `envconfig:"RUNTIME_MTLS_PORT" default:"8443"`
+	RuntimeMTLSAPIURL       string `envconfig:"RUNTIME_MTLS_API_URL"`
 	RuntimeMTLSCertFile     string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
 	RuntimeMTLSKeyFile      string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
 	RuntimeMTLSClientCAFile string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`

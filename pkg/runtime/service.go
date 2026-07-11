@@ -473,13 +473,16 @@ func conversationMessageFromRunMessage(message db.RunMessage) ConversationMessag
 func (s *Service) callAgentEndpointURL() string {
 	apiURL := ""
 	if s.cfg != nil {
-		apiURL = s.cfg.APIURL
+		apiURL = s.cfg.RuntimeMTLSAPIURL
+		if strings.TrimSpace(apiURL) == "" {
+			apiURL = s.cfg.APIURL
+		}
 	}
 	apiBase := strings.TrimRight(strings.TrimSpace(apiURL), "/")
 	if apiBase == "" {
 		apiBase = "http://localhost:8080"
 	}
-	return apiBase + "/api/v1/agent-runtime/call-agent"
+	return apiBase + runtimeV2CallAgentPath
 }
 
 func agentA2AContextMap(ctx *AgentA2AContext) map[string]interface{} {

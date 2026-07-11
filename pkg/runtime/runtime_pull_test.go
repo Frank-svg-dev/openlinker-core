@@ -161,7 +161,7 @@ func TestRuntimePull_ClaimAndCompleteSuccess(t *testing.T) {
 	assert.Equal(t, 900, claimed.Metadata["result_timeout_seconds"])
 	require.NotNil(t, claimed.A2A)
 	assert.Equal(t, started.RunID, claimed.A2A.CurrentRunID)
-	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
+	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/v2/call-agent", claimed.A2A.CallAgentEndpoint)
 	assert.Contains(t, claimed.A2A.AgentScopes, "agent:call")
 
 	completed, err := svc.CompleteRuntimePullRun(ctx, token, runID, &runtime.RuntimePullResultRequest{
@@ -512,7 +512,7 @@ func TestRuntimePull_RunDelegatedQueuesFreeChildAndCompletesParent(t *testing.T)
 	assert.Equal(t, parentRunID.String(), claimed.A2A.ParentTaskID)
 	assert.Equal(t, "trace-runtime-pull", claimed.A2A.TraceID)
 	assert.Equal(t, []string{"task-runtime-parent"}, claimed.A2A.ReferenceTaskIDs)
-	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", claimed.A2A.CallAgentEndpoint)
+	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/v2/call-agent", claimed.A2A.CallAgentEndpoint)
 	assert.Contains(t, claimed.A2A.AgentScopes, "agent:call")
 
 	completed, err := svc.CompleteRuntimePullRun(ctx, token, childRunID, &runtime.RuntimePullResultRequest{

@@ -282,7 +282,7 @@ func TestRuntimeCallAgentDispatchAndDryRun(t *testing.T) {
 	require.Equal(t, parentRunID.String(), gotDirect.ParentRunID)
 	require.Equal(t, callerAgentID.String(), gotDirect.CallerAgentID)
 	require.NotNil(t, gotDirect.A2A)
-	require.Equal(t, "https://api.example.com/api/v1/agent-runtime/call-agent", gotDirect.A2A.CallAgentEndpoint)
+	require.Equal(t, "https://api.example.com/api/v1/agent-runtime/v2/call-agent", gotDirect.A2A.CallAgentEndpoint)
 
 	dryOutput, dryErr := svc.DryRun(context.Background(), agent, map[string]interface{}{"ping": true})
 	require.Empty(t, dryErr)
@@ -410,14 +410,17 @@ func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
 	require.Equal(t, runID.String(), ctx.CurrentRunID)
 	require.Equal(t, parentRunID.String(), ctx.ParentRunID)
 	require.Equal(t, callerAgentID.String(), ctx.CallerAgentID)
-	require.Equal(t, "https://api.example.com/api/v1/agent-runtime/call-agent", ctx.CallAgentEndpoint)
+	require.Equal(t, "https://api.example.com/api/v1/agent-runtime/v2/call-agent", ctx.CallAgentEndpoint)
 	require.Equal(t, []string{"agent:call"}, ctx.AgentScopes)
 
 	m := agentA2AContextMap(ctx)
 	require.Equal(t, runID.String(), m["current_run_id"])
 	require.Equal(t, parentRunID.String(), m["parent_run_id"])
 	require.Nil(t, agentA2AContextMap(nil))
-	require.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", NewService(nil, &config.Config{}).callAgentEndpointURL())
+	require.Equal(t, "http://localhost:8080/api/v1/agent-runtime/v2/call-agent", NewService(nil, &config.Config{}).callAgentEndpointURL())
+	require.Equal(t, "https://runtime.example.com:8443/api/v1/agent-runtime/v2/call-agent", NewService(nil, &config.Config{
+		APIURL: "https://api.example.com", RuntimeMTLSAPIURL: "https://runtime.example.com:8443/",
+	}).callAgentEndpointURL())
 
 	id, ok, err := taskIDFromRunMetadata(nil)
 	require.NoError(t, err)

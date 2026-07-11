@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -71,6 +72,7 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 		return fmt.Errorf("RUNTIME_MTLS_PORT must differ from PORT")
 	}
 	for name, value := range map[string]string{
+		"RUNTIME_MTLS_API_URL":        cfg.RuntimeMTLSAPIURL,
 		"RUNTIME_MTLS_CERT_FILE":      cfg.RuntimeMTLSCertFile,
 		"RUNTIME_MTLS_KEY_FILE":       cfg.RuntimeMTLSKeyFile,
 		"RUNTIME_MTLS_CLIENT_CA_FILE": cfg.RuntimeMTLSClientCAFile,
@@ -78,6 +80,11 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required when RUNTIME_MTLS_ENABLED=true", name)
 		}
+	}
+	publicURL, err := url.Parse(strings.TrimSpace(cfg.RuntimeMTLSAPIURL))
+	if err != nil || publicURL.Scheme != "https" || publicURL.Host == "" || publicURL.User != nil ||
+		(publicURL.Path != "" && publicURL.Path != "/") || publicURL.RawQuery != "" || publicURL.Fragment != "" {
+		return fmt.Errorf("RUNTIME_MTLS_API_URL must be an HTTPS origin without credentials, path, query, or fragment")
 	}
 	if _, err := runtime.NewRuntimeInvocationSignerWithPrevious(
 		cfg.RuntimeInvocationSigningKeyID,
