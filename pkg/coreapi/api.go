@@ -128,7 +128,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
 	runtimeHandler.SetEndpointLimiter(opts.RuntimeLimiter)
-	configureRuntimeV2(runtimeHandler, runtimeSvc, pool, cfg)
+	configureRuntimeV2(rootCtx, runtimeHandler, runtimeSvc, pool, cfg)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
@@ -203,8 +203,10 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	deliveryHandler.RegisterProtected(api, jwtMiddleware)
 	runtimeSvc.SetDeliveryEnqueuer(deliverySvc)
 	runtimeSvc.SetRunEffectHandlers(webhookSvc, deliverySvc)
-	go delivery.StartWorker(rootCtx, deliverySvc)
-	go runtime.StartRunEffectWorker(rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{})
+	if pool != nil {
+		go delivery.StartWorker(rootCtx, deliverySvc)
+		go runtime.StartRunEffectWorker(rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{})
+	}
 
 	return &Services{
 		Auth:        authSvc,
@@ -227,6 +229,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 }
 
 func configureRuntimeV2(
+	rootCtx context.Context,
 	handler *runtime.Handler,
 	runtimeService *runtime.Service,
 	pool *pgxpool.Pool,
@@ -266,6 +269,12 @@ func configureRuntimeV2(
 		Delegation:          delegation,
 		Cancellations:       cancellations,
 	})
+	go runtime.StartRuntimeV2MaintenanceWorker(
+		rootCtx,
+		runtime.NewRuntimeV2DeadlineReconciler(pool, nil),
+		cancellations,
+		runtime.RuntimeV2MaintenanceWorkerConfig{},
+	)
 }
 
 // ConfigureGoth initializes OAuth providers and the cookie session store.
