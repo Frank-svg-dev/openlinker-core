@@ -114,6 +114,18 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("start a2a grpc server failed")
 	}
+	runtimeMTLSServer, runtimeMTLSListener, err := startRuntimeMTLSListener(cfg, e)
+	if err != nil {
+		log.Fatal().Err(err).Msg("start runtime mTLS listener failed")
+	}
+	if runtimeMTLSServer != nil {
+		go func() {
+			if serveErr := runtimeMTLSServer.Serve(runtimeMTLSListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				log.Fatal().Err(serveErr).Msg("runtime mTLS server failed")
+			}
+		}()
+		log.Info().Int("port", cfg.RuntimeMTLSPort).Msg("runtime v2 mTLS listener active")
+	}
 
 	srv := newHTTPServer(cfg.Port)
 	go func() {
@@ -133,6 +145,11 @@ func main() {
 	defer shutdownCancel()
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("shutdown failed")
+	}
+	if runtimeMTLSServer != nil {
+		if err := runtimeMTLSServer.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("runtime mTLS shutdown failed")
+		}
 	}
 	if shutdownA2AGRPC != nil {
 		if err := shutdownA2AGRPC(shutdownCtx); err != nil {
@@ -254,7 +271,13 @@ func allowedCORSOrigins(cfg *config.Config) []string {
 }
 
 func validateProductionConfig(cfg *config.Config) error {
-	if cfg == nil || !cfg.IsProduction() {
+	if cfg == nil {
+		return nil
+	}
+	if err := validateRuntimeMTLSConfig(cfg); err != nil {
+		return err
+	}
+	if !cfg.IsProduction() {
 		return nil
 	}
 	if strings.TrimSpace(cfg.FrontendURL) == "" {

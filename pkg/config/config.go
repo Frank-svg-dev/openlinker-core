@@ -74,9 +74,17 @@ type Config struct {
 	// Runtime parameters.
 	RunTimeoutSeconds       int  `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
 	AllowLocalHTTPEndpoints bool `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
-	HTTPRateLimitRate       int  `envconfig:"HTTP_RATE_LIMIT_RATE" default:"50"`
-	HTTPRateLimitBurst      int  `envconfig:"HTTP_RATE_LIMIT_BURST" default:"200"`
-	HTTPRateLimitPeriodSec  int  `envconfig:"HTTP_RATE_LIMIT_PERIOD_SECONDS" default:"1"`
+	// Runtime v2 device traffic terminates mTLS directly in Core. It is a
+	// separate listener so a reverse proxy cannot replace verified peer
+	// certificates with spoofable headers.
+	RuntimeMTLSEnabled      bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
+	RuntimeMTLSPort         int    `envconfig:"RUNTIME_MTLS_PORT" default:"8443"`
+	RuntimeMTLSCertFile     string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
+	RuntimeMTLSKeyFile      string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
+	RuntimeMTLSClientCAFile string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
+	HTTPRateLimitRate       int    `envconfig:"HTTP_RATE_LIMIT_RATE" default:"50"`
+	HTTPRateLimitBurst      int    `envconfig:"HTTP_RATE_LIMIT_BURST" default:"200"`
+	HTTPRateLimitPeriodSec  int    `envconfig:"HTTP_RATE_LIMIT_PERIOD_SECONDS" default:"1"`
 
 	// Agent availability monitor.
 	AvailabilityMonitorEnabled             bool `envconfig:"AVAILABILITY_MONITOR_ENABLED" default:"true"`

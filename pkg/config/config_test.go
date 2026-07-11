@@ -67,6 +67,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if !cfg.AllowLocalHTTPEndpoints {
 		t.Fatalf("expected AllowLocalHTTPEndpoints from env")
 	}
+	if cfg.RuntimeMTLSEnabled || cfg.RuntimeMTLSPort != 8443 {
+		t.Fatalf("unexpected runtime mTLS defaults: %#v", cfg)
+	}
 	if cfg.HTTPRateLimitRate != 50 || cfg.HTTPRateLimitBurst != 200 || cfg.HTTPRateLimitPeriodSec != 1 {
 		t.Fatalf("unexpected http rate limit defaults: %#v", cfg)
 	}
