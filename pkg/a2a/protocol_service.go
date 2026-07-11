@@ -79,21 +79,13 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 		return nil, err
 	}
 	metadata := protocolMetadata(params)
-	runReq := &runtime.RunRequest{
-		AgentID:    agent.ID.String(),
-		Input:      input,
-		Metadata:   metadata,
-		A2AContext: protocolRunA2AContext(params),
-	}
+	runReq := protocolRunRequest(agent.ID.String(), input, metadata, params)
 	run := s.runtime.Run
 	if shouldReturnA2AMessageImmediately(params) {
 		run = s.runtime.StartRun
 	}
 	resp, err := run(ctx, userID, runReq, "api")
 	if err != nil {
-		return nil, err
-	}
-	if err := s.createInlinePushConfig(ctx, userID, slug, resp.RunID, params); err != nil {
 		return nil, err
 	}
 	return applyProtocolContinuation(taskFromRun(resp, params.Message.ContextID, nil, nil), continuation), nil
@@ -128,37 +120,39 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.runtime.StartRun(ctx, userID, &runtime.RunRequest{
-		AgentID:    agent.ID.String(),
-		Input:      input,
-		Metadata:   protocolMetadata(params),
-		A2AContext: protocolRunA2AContext(params),
-	}, "api")
+	resp, err := s.runtime.StartRun(ctx, userID, protocolRunRequest(
+		agent.ID.String(),
+		input,
+		protocolMetadata(params),
+		params,
+	), "api")
 	if err != nil {
-		return nil, err
-	}
-	if err := s.createInlinePushConfig(ctx, userID, slug, resp.RunID, params); err != nil {
 		return nil, err
 	}
 	return applyProtocolContinuation(taskFromRun(resp, params.Message.ContextID, nil, nil), continuation), nil
 }
 
-func (s *Service) createInlinePushConfig(ctx context.Context, userID uuid.UUID, slug, taskID string, params *A2AMessageSendParams) error {
+func protocolRunRequest(agentID string, input, metadata map[string]interface{}, params *A2AMessageSendParams) *runtime.RunRequest {
+	return &runtime.RunRequest{
+		AgentID:          agentID,
+		Input:            input,
+		Metadata:         metadata,
+		A2AContext:       protocolRunA2AContext(params),
+		IdempotencyKey:   params.Message.MessageID,
+		CreationProtocol: "a2a",
+		CreationMethod:   "message.send",
+		TaskCallback:     runtimeTaskCallbackFromA2A(protocolInlinePushConfig(params)),
+	}
+}
+
+func protocolInlinePushConfig(params *A2AMessageSendParams) *A2APushNotificationConfig {
 	if params == nil || params.Configuration == nil {
 		return nil
 	}
-	cfg := params.Configuration.PushNotificationConfig
-	if cfg == nil && params.Configuration.TaskPushNotificationConfig != nil {
-		cfg = pushConfigFromTaskPushConfig(params.Configuration.TaskPushNotificationConfig)
+	if params.Configuration.PushNotificationConfig != nil {
+		return params.Configuration.PushNotificationConfig
 	}
-	if cfg == nil {
-		return nil
-	}
-	_, err := s.SetPushNotificationConfig(ctx, userID, slug, &A2ATaskPushConfigParams{
-		ID:                     taskID,
-		PushNotificationConfig: *cfg,
-	})
-	return err
+	return pushConfigFromTaskPushConfig(params.Configuration.TaskPushNotificationConfig)
 }
 
 func shouldReturnA2AMessageImmediately(params *A2AMessageSendParams) bool {
@@ -182,9 +176,6 @@ func normalizeProtocolMessageContext(params *A2AMessageSendParams) {
 	}
 	params.Message.ContextID = strings.TrimSpace(params.Message.ContextID)
 	params.Message.TaskID = strings.TrimSpace(params.Message.TaskID)
-	if params.Message.ContextID == "" && params.Message.TaskID == "" {
-		params.Message.ContextID = "ctx-" + uuid.NewString()
-	}
 	params.Message.MessageID = strings.TrimSpace(params.Message.MessageID)
 }
 
@@ -244,14 +235,95 @@ func protocolRunA2AContext(params *A2AMessageSendParams) *runtime.RunA2AContextR
 		traceID = params.Message.ContextID
 	}
 	return &runtime.RunA2AContextRequest{
-		ProtocolContextID: params.Message.ContextID,
-		ProtocolTaskID:    params.Message.TaskID,
-		ParentTaskID:      params.Message.TaskID,
-		RootContextID:     params.Message.ContextID,
-		TraceID:           traceID,
-		ReferenceTaskIDs:  normalizeProtocolReferenceTaskIDs(params.Message.ReferenceTaskIDs),
-		Source:            "a2a_protocol",
+		MessageID:           params.Message.MessageID,
+		ProtocolContextID:   params.Message.ContextID,
+		ProtocolTaskID:      params.Message.TaskID,
+		ParentTaskID:        params.Message.TaskID,
+		RootContextID:       params.Message.ContextID,
+		TraceID:             traceID,
+		ReferenceTaskIDs:    normalizeProtocolReferenceTaskIDs(params.Message.ReferenceTaskIDs),
+		Source:              "a2a_protocol",
+		AcceptedOutputModes: protocolAcceptedOutputModes(params),
+		Extensions:          protocolExtensions(params),
+		Visibility:          protocolVisibility(params),
+		Options:             protocolA2AOptions(params),
 	}
+}
+
+func protocolAcceptedOutputModes(params *A2AMessageSendParams) []string {
+	if params == nil || params.Configuration == nil {
+		return nil
+	}
+	return append([]string(nil), params.Configuration.AcceptedOutputModes...)
+}
+
+func protocolExtensions(params *A2AMessageSendParams) []string {
+	if params == nil {
+		return nil
+	}
+	extensions := append([]string(nil), params.Message.Extensions...)
+	if params.Metadata != nil {
+		extensions = append(extensions, stringSliceFromA2AMetadata(params.Metadata["a2a_extensions"])...)
+	}
+	return normalizeProtocolReferenceTaskIDs(extensions)
+}
+
+func stringSliceFromA2AMetadata(value interface{}) []string {
+	switch typed := value.(type) {
+	case []string:
+		return append([]string(nil), typed...)
+	case []interface{}:
+		out := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if value, ok := item.(string); ok {
+				out = append(out, value)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func protocolVisibility(params *A2AMessageSendParams) string {
+	if params == nil {
+		return ""
+	}
+	if params.Configuration != nil && strings.TrimSpace(params.Configuration.Visibility) != "" {
+		return strings.TrimSpace(params.Configuration.Visibility)
+	}
+	for _, source := range []map[string]interface{}{params.Metadata, params.Message.Metadata} {
+		for _, key := range []string{"visibility", "delivery_visibility", "deliveryVisibility"} {
+			if value, ok := source[key].(string); ok && strings.TrimSpace(value) != "" {
+				return strings.TrimSpace(value)
+			}
+		}
+	}
+	return ""
+}
+
+func protocolA2AOptions(params *A2AMessageSendParams) map[string]interface{} {
+	options := map[string]interface{}{}
+	if params == nil {
+		return options
+	}
+	if params.Metadata != nil {
+		if custom, ok := params.Metadata["a2a_options"].(map[string]interface{}); ok {
+			for key, value := range custom {
+				options[key] = value
+			}
+		}
+	}
+	if params.Configuration != nil {
+		for key, value := range params.Configuration.Options {
+			options[key] = value
+		}
+		if params.Configuration.HistoryLength != nil {
+			options["history_length"] = *params.Configuration.HistoryLength
+		}
+	}
+	options["return_immediately"] = shouldReturnA2AMessageImmediately(params)
+	return options
 }
 
 func protocolTraceID(params *A2AMessageSendParams) string {
@@ -307,10 +379,21 @@ func validateA2AMessageSendParams(params *A2AMessageSendParams) error {
 	if params == nil {
 		return httpx.BadRequest("请求体不能为空")
 	}
+	if _, err := runtime.HashIdempotencyKey(params.Message.MessageID); err != nil {
+		return a2aIdempotencyValidationError(err)
+	}
 	if err := validateA2AAcceptedOutputModes(params.Configuration); err != nil {
 		return err
 	}
 	return validateA2AMessagePartMediaTypes(params.Message)
+}
+
+func a2aIdempotencyValidationError(err error) error {
+	class, ok := runtime.IdempotencyErrorClassOf(err)
+	if !ok {
+		return err
+	}
+	return httpx.NewError(http.StatusUnprocessableEntity, httpx.ErrorCode(class), err.Error())
 }
 
 func validateA2AAcceptedOutputModes(cfg *A2ASendConfiguration) error {
@@ -1042,6 +1125,7 @@ func taskFromRun(resp *runtime.RunResponse, contextID string, artifacts []runtim
 				"duration_ms":  resp.DurationMs,
 				"cost_cents":   resp.CostCents,
 				"billing_mode": resp.BillingMode,
+				"replayed":     resp.Replayed,
 			},
 		},
 	}

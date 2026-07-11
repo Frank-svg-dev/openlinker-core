@@ -81,6 +81,7 @@ type RuntimeWorkbenchDiagnostic struct {
 
 // CallAgentRequest is sent by Agent A using its runtime token.
 type CallAgentRequest struct {
+	IdempotencyKey         string                     `json:"idempotency_key" validate:"required"`
 	ParentRunID            string                     `json:"parent_run_id,omitempty" validate:"omitempty,uuid"`
 	CurrentRunID           string                     `json:"current_run_id,omitempty" validate:"omitempty,uuid"`
 	TargetAgentID          string                     `json:"target_agent_id" validate:"required,uuid"`

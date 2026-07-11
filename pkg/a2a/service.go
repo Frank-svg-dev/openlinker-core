@@ -384,6 +384,10 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err != nil {
 		return nil, err
 	}
+	idempotencyKeyHash, err := runtime.HashIdempotencyKey(req.IdempotencyKey)
+	if err != nil {
+		return nil, a2aIdempotencyValidationError(err)
+	}
 	targetAgentID, err := uuid.Parse(req.TargetAgentID)
 	if err != nil {
 		return nil, httpx.Unprocessable("target_agent_id 不是合法 uuid")
@@ -399,35 +403,42 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 	if err != nil {
 		return nil, httpx.Internal("查询父运行失败")
 	}
-	if parent.Status != "running" {
-		return nil, httpx.Conflict("父运行已结束，不能发起新的 Agent 委派")
-	}
 
-	caller, err := s.queries.GetAgentByID(ctx, callerToken.AgentID)
-	if err != nil {
-		return nil, httpx.NotFound("调用 Agent 不存在")
+	_, identityErr := s.queries.GetRunIdempotencyRecord(ctx, db.GetRunIdempotencyRecordParams{
+		UserID:             parent.UserID,
+		IdempotencyKeyHash: idempotencyKeyHash[:],
+	})
+	hasCommittedIdentity := identityErr == nil
+	if identityErr != nil && !errors.Is(identityErr, pgx.ErrNoRows) {
+		return nil, httpx.Internal("查询幂等调用记录失败")
 	}
-	target, err := s.queries.GetAgentByID(ctx, targetAgentID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("目标 Agent 不存在")
-	}
-	if err != nil {
-		return nil, httpx.Internal("查询目标 Agent 失败")
-	}
-	policy, err := s.queries.GetAgentCallPolicy(ctx, targetAgentID)
-	if err != nil {
-		return nil, httpx.Internal("查询目标 Agent 调用策略失败")
-	}
-	if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
-		return nil, httpx.Forbidden("目标 Agent 不接受当前 Agent 的调用")
-	}
-	if err := s.enforceDelegationLimits(ctx, parentRunID, targetAgentID); err != nil {
-		return nil, err
+	if !hasCommittedIdentity {
+		if parent.Status != "running" {
+			return nil, httpx.Conflict("父运行已结束，不能发起新的 Agent 委派")
+		}
+		caller, callerErr := s.queries.GetAgentByID(ctx, callerToken.AgentID)
+		if callerErr != nil {
+			return nil, httpx.NotFound("调用 Agent 不存在")
+		}
+		target, targetErr := s.queries.GetAgentByID(ctx, targetAgentID)
+		if errors.Is(targetErr, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("目标 Agent 不存在")
+		}
+		if targetErr != nil {
+			return nil, httpx.Internal("查询目标 Agent 失败")
+		}
+		policy, policyErr := s.queries.GetAgentCallPolicy(ctx, targetAgentID)
+		if policyErr != nil {
+			return nil, httpx.Internal("查询目标 Agent 调用策略失败")
+		}
+		if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
+			return nil, httpx.Forbidden("目标 Agent 不接受当前 Agent 的调用")
+		}
+		if err := s.enforceDelegationLimits(ctx, parentRunID, targetAgentID); err != nil {
+			return nil, err
+		}
 	}
 	taskCallbackConfig := taskCallbackConfigFromCallRequest(req)
-	if err := s.validateCallerTaskCallbackConfig(taskCallbackConfig); err != nil {
-		return nil, err
-	}
 	childContext, err := s.childRunA2AContext(ctx, parentRunID, parent, callerToken.AgentID, targetAgentID, req)
 	if err != nil {
 		return nil, err
@@ -449,21 +460,30 @@ func (s *Service) CallAgent(ctx context.Context, plaintextToken string, req *Cal
 		ParentRunID:   parentRunID,
 		CallerAgentID: callerToken.AgentID,
 		Reason:        strings.TrimSpace(req.Reason),
-	}, &runtime.RunRequest{
-		AgentID:    targetAgentID.String(),
-		Input:      req.Input,
-		Metadata:   metadata,
-		A2AContext: childContext,
-	})
+	}, delegatedRuntimeRunRequest(req, targetAgentID, metadata, childContext, taskCallbackConfig))
 	if err != nil {
 		return nil, err
 	}
-	callback, err := s.createCallerTaskCallback(ctx, parent.UserID, resp.RunID, taskCallbackConfig)
-	if err != nil {
-		return nil, err
-	}
-	resp.TaskCallback = callback
 	return resp, nil
+}
+
+func delegatedRuntimeRunRequest(
+	req *CallAgentRequest,
+	targetAgentID uuid.UUID,
+	metadata map[string]interface{},
+	childContext *runtime.RunA2AContextRequest,
+	taskCallback *A2APushNotificationConfig,
+) *runtime.RunRequest {
+	return &runtime.RunRequest{
+		AgentID:          targetAgentID.String(),
+		Input:            req.Input,
+		Metadata:         metadata,
+		A2AContext:       childContext,
+		IdempotencyKey:   req.IdempotencyKey,
+		CreationProtocol: "openlinker-a2a",
+		CreationMethod:   "call-agent",
+		TaskCallback:     runtimeTaskCallbackFromA2A(taskCallback),
+	}
 }
 
 func (s *Service) enforceDelegationLimits(ctx context.Context, parentRunID, targetAgentID uuid.UUID) error {

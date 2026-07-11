@@ -225,6 +225,9 @@ func (h *Handler) CallAgent(c echo.Context) error {
 	if req.ParentRunID == "" && req.CurrentRunID == "" {
 		req.CurrentRunID = strings.TrimSpace(c.Request().Header.Get("X-OpenLinker-Run-Id"))
 	}
+	if _, err := runtime.HashIdempotencyKey(req.IdempotencyKey); err != nil {
+		return a2aIdempotencyValidationError(err)
+	}
 	if err := h.validator.Struct(&req); err != nil {
 		return httpx.Unprocessable(err.Error())
 	}
@@ -235,7 +238,13 @@ func (h *Handler) CallAgent(c echo.Context) error {
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, resp)
+	status := http.StatusCreated
+	if resp.Replayed {
+		status = http.StatusOK
+		c.Response().Header().Set("Idempotency-Replayed", "true")
+	}
+	c.Response().Header().Set(echo.HeaderLocation, "/api/v1/runs/"+resp.RunID)
+	return c.JSON(status, resp)
 }
 
 func (h *Handler) ListChildren(c echo.Context) error {

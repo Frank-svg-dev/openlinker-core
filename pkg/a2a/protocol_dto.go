@@ -37,6 +37,8 @@ type A2ASendConfiguration struct {
 	PushNotificationConfig     *A2APushNotificationConfig     `json:"pushNotificationConfig,omitempty"`
 	TaskPushNotificationConfig *A2ATaskPushNotificationConfig `json:"taskPushNotificationConfig,omitempty"`
 	HistoryLength              *int                           `json:"historyLength,omitempty"`
+	Visibility                 string                         `json:"visibility,omitempty"`
+	Options                    map[string]interface{}         `json:"options,omitempty"`
 }
 
 type A2APushNotificationConfig struct {

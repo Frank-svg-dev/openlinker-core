@@ -41,60 +41,29 @@ func taskCallbackConfigFromCallRequest(req *CallAgentRequest) *A2APushNotificati
 	return req.PushNotificationConfig
 }
 
-func (s *Service) createCallerTaskCallback(
-	ctx context.Context,
-	userID uuid.UUID,
-	runID string,
-	cfg *A2APushNotificationConfig,
-) (*runtime.RunTaskCallbackResponse, error) {
-	if cfg == nil {
-		return nil, nil
-	}
-	if err := s.validateCallerTaskCallbackConfig(cfg); err != nil {
-		return nil, err
-	}
-	parsedRunID, err := uuid.Parse(strings.TrimSpace(runID))
-	if err != nil {
-		return nil, httpx.Internal("子运行 ID 格式错误")
-	}
-	scheme, credentials := callbackAuthFromA2AConfig(*cfg)
-	metadata := a2aPushCallbackMetadata(cfg.Metadata)
-	resp, err := s.taskCallbackManager.CreateTaskCallbackSubscription(ctx, parsedRunID, userID, &webhook.CreateTaskCallbackRequest{
-		URL:             cfg.URL,
-		Secret:          cfg.Secret,
-		EventTypes:      defaultTaskCallbackEventTypes(taskCallbackEventTypesFromA2A(*cfg)),
-		AuthScheme:      scheme,
-		AuthCredentials: credentials,
-		Metadata:        metadata,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &runtime.RunTaskCallbackResponse{
-		ID:                  resp.ID,
-		RunID:               resp.RunID,
-		TargetURL:           resp.TargetURL,
-		EventTypes:          resp.EventTypes,
-		AuthScheme:          resp.AuthScheme,
-		Status:              resp.Status,
-		ConsecutiveFailures: resp.ConsecutiveFailures,
-		Secret:              resp.Secret,
-		CreatedAt:           resp.CreatedAt,
-		UpdatedAt:           resp.UpdatedAt,
-	}, nil
-}
-
-func (s *Service) validateCallerTaskCallbackConfig(cfg *A2APushNotificationConfig) error {
+func runtimeTaskCallbackFromA2A(cfg *A2APushNotificationConfig) *runtime.TaskCallbackConfig {
 	if cfg == nil {
 		return nil
 	}
-	if s.taskCallbackManager == nil {
-		return httpx.ServiceUnavailable("任务回调未启用")
+	metadata := a2aPushCallbackMetadata(cfg.Metadata)
+	if configID := strings.TrimSpace(cfg.ID); configID != "" {
+		metadata["openlinker_a2a_push_config_id"] = configID
 	}
-	if strings.TrimSpace(cfg.URL) == "" {
-		return httpx.BadRequest("task_callback.url 不能为空")
+	var authentication *runtime.TaskCallbackAuthentication
+	if cfg.Authentication != nil {
+		authentication = &runtime.TaskCallbackAuthentication{
+			Scheme:      cfg.Authentication.Scheme,
+			Credentials: cfg.Authentication.Credentials,
+		}
 	}
-	return nil
+	return &runtime.TaskCallbackConfig{
+		URL:            cfg.URL,
+		Token:          cfg.Token,
+		Secret:         cfg.Secret,
+		Authentication: authentication,
+		Metadata:       metadata,
+		EventTypes:     append([]string(nil), defaultTaskCallbackEventTypes(taskCallbackEventTypesFromA2A(*cfg))...),
+	}
 }
 
 func (s *Service) SetPushNotificationConfig(ctx context.Context, userID uuid.UUID, slug string, params *A2ATaskPushConfigParams) (*A2ATaskPushNotificationConfig, error) {

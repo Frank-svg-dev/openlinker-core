@@ -2,12 +2,14 @@ package a2a_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,28 +97,40 @@ func attachSkill(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, skillID, s
 
 func insertParentRun(t *testing.T, pool *pgxpool.Pool, userID, callerAgentID uuid.UUID) uuid.UUID {
 	t.Helper()
+	return insertPendingV2Run(t, pool, userID, callerAgentID, "web")
+}
+
+func insertPendingV2Run(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID, source string) uuid.UUID {
+	t.Helper()
 	id := uuid.New()
+	keyHash := sha256.Sum256([]byte("a2a-test-key/" + id.String()))
+	fingerprint := sha256.Sum256([]byte("a2a-test-fingerprint/" + id.String()))
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO runs (
 		  id, user_id, agent_id, input, status, cost_cents, platform_fee_cents,
-		  creator_revenue_cents, source
-		) VALUES ($1, $2, $3, '{}'::jsonb, 'running', 0, 0, 0, 'web')`,
-		id, userID, callerAgentID)
+		  creator_revenue_cents, source, runtime_contract_id,
+		  idempotency_key_hash, idempotency_fingerprint, request_metadata,
+		  connection_mode_snapshot, endpoint_idempotency_snapshot,
+		  max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at,
+		  dispatch_state
+		) SELECT
+		  $1, $2, $3, '{}'::jsonb, 'running', 0, 0, 0, $4,
+		  'openlinker.runtime.v2', $5, $6, '{}'::jsonb,
+		  a.connection_mode,
+		  CASE WHEN a.connection_mode IN ('direct_http', 'mcp_server') THEN FALSE ELSE NULL END,
+		  20, 3, clock_timestamp() + INTERVAL '10 minutes',
+		  clock_timestamp() + INTERVAL '60 minutes', 'pending'
+		FROM agents a
+		WHERE a.id = $3`,
+		id, userID, agentID, source, keyHash[:], fingerprint[:])
 	require.NoError(t, err)
 	return id
 }
 
 func insertDelegatedRun(t *testing.T, pool *pgxpool.Pool, userID, childAgentID, parentRunID, callerAgentID uuid.UUID) uuid.UUID {
 	t.Helper()
-	childRunID := uuid.New()
+	childRunID := insertPendingV2Run(t, pool, userID, childAgentID, "api")
 	_, err := pool.Exec(context.Background(),
-		`INSERT INTO runs (
-		  id, user_id, agent_id, input, status, cost_cents, platform_fee_cents,
-		  creator_revenue_cents, source
-		) VALUES ($1, $2, $3, '{}'::jsonb, 'running', 0, 0, 0, 'api')`,
-		childRunID, userID, childAgentID)
-	require.NoError(t, err)
-	_, err = pool.Exec(context.Background(),
 		`INSERT INTO run_delegations (child_run_id, parent_run_id, caller_agent_id, reason)
 		 VALUES ($1, $2, $3, 'test chain')`,
 		childRunID, parentRunID, callerAgentID)
@@ -255,11 +269,10 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	pool, svc, runtimeSvc := setupService(t)
 	callerOwner := insertCreator(t, pool)
 	targetOwner := insertCreator(t, pool)
-	pushSvc := webhook.NewService(pool, &config.Config{AllowLocalHTTPEndpoints: true})
-	svc.SetTaskCallbackManager(pushSvc)
 
 	var receivedHeader string
 	var receivedParent string
+	var targetHits int
 	var receivedA2A struct {
 		CurrentRunID      string   `json:"current_run_id"`
 		ParentRunID       string   `json:"parent_run_id"`
@@ -274,6 +287,7 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 		AgentScopes       []string `json:"agent_scopes"`
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits++
 		receivedHeader = r.Header.Get("X-OpenLinker-User-Id")
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
@@ -298,8 +312,9 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, token.PlaintextToken)
 
-	child, err := svc.CallAgent(context.Background(), token.PlaintextToken, &a2a.CallAgentRequest{
-		ParentRunID: parentRunID.String(), TargetAgentID: targetID.String(),
+	callReq := &a2a.CallAgentRequest{
+		IdempotencyKey: "delegation-success-1",
+		ParentRunID:    parentRunID.String(), TargetAgentID: targetID.String(),
 		Reason: "summarize", Input: map[string]any{"q": "hello"},
 		ContextID:        "ctx-delegation",
 		TraceID:          "trace-delegation",
@@ -314,7 +329,8 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 			},
 			Metadata: map[string]any{"client": "caller-agent"},
 		},
-	})
+	}
+	child, err := svc.CallAgent(context.Background(), token.PlaintextToken, callReq)
 	require.NoError(t, err)
 	assert.Equal(t, "success", child.Status)
 	assert.Equal(t, int32(0), child.CostCents)
@@ -322,7 +338,7 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.Equal(t, parentRunID.String(), child.ParentRunID)
 	require.NotNil(t, child.TaskCallback)
 	assert.Equal(t, pushServer.URL+"/a2a/events", child.TaskCallback.TargetURL)
-	assert.Equal(t, []string{"run.completed", "run.failed", "run.canceled"}, child.TaskCallback.EventTypes)
+	assert.ElementsMatch(t, []string{"run.completed", "run.failed", "run.canceled"}, child.TaskCallback.EventTypes)
 	assert.Equal(t, "caller-a2a-secret", child.TaskCallback.Secret)
 	assert.Empty(t, receivedHeader)
 	assert.Equal(t, parentRunID.String(), receivedParent)
@@ -337,6 +353,12 @@ func TestCallAgent_RecordsFreeDelegationWithoutLeakingUserID(t *testing.T) {
 	assert.ElementsMatch(t, []string{"task-explicit", parentRunID.String()}, receivedA2A.ReferenceTaskIDs)
 	assert.Equal(t, "http://localhost:8080/api/v1/agent-runtime/call-agent", receivedA2A.CallAgentEndpoint)
 	assert.Contains(t, receivedA2A.AgentScopes, "agent:call")
+
+	replay, err := svc.CallAgent(context.Background(), token.PlaintextToken, callReq)
+	require.NoError(t, err)
+	assert.Equal(t, child.RunID, replay.RunID)
+	assert.True(t, replay.Replayed)
+	assert.Equal(t, 1, targetHits)
 
 	reloaded, err := runtimeSvc.GetRun(context.Background(), callerOwner, uuid.MustParse(child.RunID))
 	require.NoError(t, err)
@@ -394,10 +416,11 @@ func TestCallAgent_InvalidTaskCallbackDoesNotCreateChildRun(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = svc.CallAgent(context.Background(), token.PlaintextToken, &a2a.CallAgentRequest{
-		ParentRunID:   parentRunID.String(),
-		TargetAgentID: targetID.String(),
-		Reason:        "summarize",
-		Input:         map[string]any{"q": "hello"},
+		IdempotencyKey: "delegation-invalid-callback",
+		ParentRunID:    parentRunID.String(),
+		TargetAgentID:  targetID.String(),
+		Reason:         "summarize",
+		Input:          map[string]any{"q": "hello"},
 		TaskCallback: &a2a.A2APushNotificationConfig{
 			EventTypesAlias: []string{"run.completed"},
 		},
@@ -432,9 +455,10 @@ func TestCallAgentRejectsDelegationCycle(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = svc.CallAgent(context.Background(), tokenB.PlaintextToken, &a2a.CallAgentRequest{
-		CurrentRunID:  childRun.String(),
-		TargetAgentID: agentA.String(),
-		Input:         map[string]any{"q": "loop back"},
+		IdempotencyKey: "delegation-cycle",
+		CurrentRunID:   childRun.String(),
+		TargetAgentID:  agentA.String(),
+		Input:          map[string]any{"q": "loop back"},
 	})
 	requireA2AServiceHTTPStatus(t, err, http.StatusUnprocessableEntity)
 }
@@ -453,9 +477,10 @@ func TestCallAgentRejectsWhenRunningDelegationLimitReached(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = svc.CallAgent(context.Background(), tokenA.PlaintextToken, &a2a.CallAgentRequest{
-		CurrentRunID:  rootRun.String(),
-		TargetAgentID: agentC.String(),
-		Input:         map[string]any{"q": "over limit"},
+		IdempotencyKey: "delegation-limit",
+		CurrentRunID:   rootRun.String(),
+		TargetAgentID:  agentC.String(),
+		Input:          map[string]any{"q": "over limit"},
 	})
 	requireA2AServiceHTTPStatus(t, err, http.StatusTooManyRequests)
 }
@@ -485,10 +510,11 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 		}
 
 		child, err := svc.CallAgent(r.Context(), runtimeToken, &a2a.CallAgentRequest{
-			CurrentRunID:  request.A2A.CurrentRunID,
-			TargetAgentID: targetID.String(),
-			Reason:        "delegate a verifiable subtask",
-			Input:         map[string]any{"question": "finish child"},
+			IdempotencyKey: "delegation-e2e-" + request.RunID,
+			CurrentRunID:   request.A2A.CurrentRunID,
+			TargetAgentID:  targetID.String(),
+			Reason:         "delegate a verifiable subtask",
+			Input:          map[string]any{"question": "finish child"},
 		})
 		require.NoError(t, err)
 		require.Equal(t, request.RunID, request.A2A.CurrentRunID)
@@ -512,8 +538,9 @@ func TestRun_EndToEndDelegationCompletesParentAndChild(t *testing.T) {
 	runtimeToken = token.PlaintextToken
 
 	parent, err := runtimeSvc.Run(context.Background(), owner, &runtime.RunRequest{
-		AgentID: callerID.String(),
-		Input:   map[string]any{"task": "complete through delegation"},
+		AgentID:        callerID.String(),
+		Input:          map[string]any{"task": "complete through delegation"},
+		IdempotencyKey: "a2a-parent/" + uuid.NewString(),
 	}, "web")
 	require.NoError(t, err)
 	assert.Equal(t, "success", parent.Status)
@@ -752,6 +779,67 @@ func TestProtocolMessageSendAndGetTask(t *testing.T) {
 	assert.Equal(t, "text/csv", filePart["mimeType"])
 }
 
+func TestProtocolMessageUsesMessageIDForReplayAndStableServerContext(t *testing.T) {
+	pool, svc, _ := setupService(t)
+	owner := insertCreator(t, pool)
+
+	var targetHits atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"summary":"idempotent A2A response"}}`))
+	}))
+	defer server.Close()
+
+	agentID := insertAgent(t, pool, owner, server.URL)
+	slug := "a2a-" + agentID.String()[:8]
+	params := &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "message-replay-1",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "run once"}},
+		},
+	}
+	returnImmediately := true
+	params.Configuration = &a2a.A2ASendConfiguration{ReturnImmediately: &returnImmediately}
+
+	first, err := svc.SendProtocolMessage(context.Background(), owner, slug, params)
+	require.NoError(t, err)
+	replay, err := svc.SendProtocolMessage(context.Background(), owner, slug, params)
+	require.NoError(t, err)
+	assert.Equal(t, first.ID, replay.ID)
+	assert.Equal(t, "ctx-"+first.ID, first.ContextID)
+	assert.Equal(t, first.ContextID, replay.ContextID)
+	require.Eventually(t, func() bool { return targetHits.Load() == 1 }, time.Second, 10*time.Millisecond)
+	require.NotNil(t, replay.Metadata)
+	openlinker, ok := replay.Metadata["openlinker"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, true, openlinker["replayed"])
+	_, err = svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
+		Message: a2a.A2AMessage{
+			MessageID: "message-replay-1",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "different request"}},
+		},
+		Configuration: params.Configuration,
+	})
+	requireA2AServiceHTTPStatus(t, err, http.StatusConflict)
+	httpErr, ok := err.(*httpx.HTTPError)
+	require.True(t, ok)
+	assert.Equal(t, httpx.ErrorCode(runtime.IdempotencyErrorKeyReused), httpErr.Code)
+	assert.Equal(t, int32(1), targetHits.Load())
+
+	var createdEvents, signals int
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM run_events WHERE run_id=$1 AND event_type='run.created'`, first.ID,
+	).Scan(&createdEvents))
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM runtime_signal_outbox WHERE run_id=$1 AND event_type='run.available'`, first.ID,
+	).Scan(&signals))
+	assert.Equal(t, 1, createdEvents)
+	assert.Equal(t, 1, signals)
+}
+
 func TestProtocolMessageAcceptsCurrentPartShapes(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	owner := insertCreator(t, pool)
@@ -907,9 +995,10 @@ func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
 	slug := "a2a-" + agentID.String()[:8]
 	otherSlug := "a2a-" + otherAgentID.String()[:8]
 	params := &a2a.A2AMessageSendParams{Message: a2a.A2AMessage{
-		Kind:  "message",
-		Role:  "user",
-		Parts: []map[string]any{{"kind": "text", "text": "validate service edges"}},
+		Kind:      "message",
+		MessageID: "validate-service-edges",
+		Role:      "user",
+		Parts:     []map[string]any{{"kind": "text", "text": "validate service edges"}},
 	}}
 
 	_, err := svc.SendProtocolMessage(context.Background(), owner, " ", params)
@@ -918,7 +1007,7 @@ func TestProtocolServiceValidationAndOwnershipEdges(t *testing.T) {
 	requireA2AServiceHTTPStatus(t, err, http.StatusBadRequest)
 	_, err = svc.SendProtocolMessage(context.Background(), owner, "missing-agent", params)
 	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
-	_, err = svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{Message: a2a.A2AMessage{Role: "user"}})
+	_, err = svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{Message: a2a.A2AMessage{MessageID: "invalid-empty-message", Role: "user"}})
 	requireA2AServiceHTTPStatus(t, err, http.StatusUnprocessableEntity)
 
 	_, err = svc.StartProtocolMessage(context.Background(), owner, " ", params)
@@ -1350,9 +1439,10 @@ func TestPushNotificationConfigMapsToTaskCallback(t *testing.T) {
 	slug := "a2a-" + agentID.String()[:8]
 	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
 		Message: a2a.A2AMessage{
-			Kind:  "message",
-			Role:  "user",
-			Parts: []map[string]any{{"kind": "text", "text": "configure push"}},
+			Kind:      "message",
+			MessageID: "configure-push",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "configure push"}},
 		},
 	})
 	require.NoError(t, err)
@@ -1412,9 +1502,10 @@ func TestPushNotificationConfigLookupAndValidationEdges(t *testing.T) {
 	slug := "a2a-" + agentID.String()[:8]
 	task, err := svc.SendProtocolMessage(context.Background(), owner, slug, &a2a.A2AMessageSendParams{
 		Message: a2a.A2AMessage{
-			Kind:  "message",
-			Role:  "user",
-			Parts: []map[string]any{{"kind": "text", "text": "exercise push lookup edges"}},
+			Kind:      "message",
+			MessageID: "push-lookup-edges",
+			Role:      "user",
+			Parts:     []map[string]any{{"kind": "text", "text": "exercise push lookup edges"}},
 		},
 	})
 	require.NoError(t, err)
@@ -1508,7 +1599,8 @@ func TestCallAgent_RespectsPrivateTargetPolicy(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = svc.CallAgent(context.Background(), token.PlaintextToken, &a2a.CallAgentRequest{
-		ParentRunID: parentRunID.String(), TargetAgentID: targetID.String(), Input: map[string]any{"q": "hello"},
+		IdempotencyKey: "delegation-private-target",
+		ParentRunID:    parentRunID.String(), TargetAgentID: targetID.String(), Input: map[string]any{"q": "hello"},
 	})
 	require.Error(t, err)
 	httpErr, ok := err.(*httpx.HTTPError)

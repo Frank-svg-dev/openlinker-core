@@ -518,7 +518,7 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 		t.Fatalf("non-http file uri should fail")
 	}
 	if err := validateA2AMessageSendParams(&A2AMessageSendParams{
-		Message: A2AMessage{Parts: []map[string]interface{}{{"kind": "text", "text": "hi"}}},
+		Message: A2AMessage{MessageID: "output-mode-check", Parts: []map[string]interface{}{{"kind": "text", "text": "hi"}}},
 		Configuration: &A2ASendConfiguration{
 			AcceptedOutputModes: []string{"application/xml"},
 		},
@@ -528,14 +528,14 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 		t.Fatalf("acceptedOutputModes error mapping = %#v", got)
 	}
 	if err := validateA2AMessageSendParams(&A2AMessageSendParams{
-		Message: A2AMessage{Parts: []map[string]interface{}{{"kind": "file", "url": "https://files.example/a.bin", "mediaType": "application/x-unknown"}}},
+		Message: A2AMessage{MessageID: "media-type-check", Parts: []map[string]interface{}{{"kind": "file", "url": "https://files.example/a.bin", "mediaType": "application/x-unknown"}}},
 	}); err == nil {
 		t.Fatalf("unsupported part mediaType should fail")
 	} else if got := jsonRPCErrorFrom(nil, err); got.Error == nil || got.Error.Code != -32005 {
 		t.Fatalf("mediaType error mapping = %#v", got)
 	}
 	if err := validateA2AMessageSendParams(&A2AMessageSendParams{
-		Message: A2AMessage{Parts: []map[string]interface{}{{"kind": "file", "url": "https://files.example/a.pdf", "mediaType": "application/pdf; charset=binary"}}},
+		Message: A2AMessage{MessageID: "supported-media-check", Parts: []map[string]interface{}{{"kind": "file", "url": "https://files.example/a.pdf", "mediaType": "application/pdf; charset=binary"}}},
 		Configuration: &A2ASendConfiguration{
 			AcceptedOutputModes: []string{"application/json"},
 		},
@@ -553,6 +553,99 @@ func TestA2AProtocolServiceInputCursorAndStatusHelpers(t *testing.T) {
 	if nested := metadata["a2a"].(map[string]interface{}); nested["message_id"] != "m" || nested["context_id"] != "c" || nested["task_id"] != "t" || len(nested["extensions"].([]string)) != 1 {
 		t.Fatalf("protocolMetadata a2a block = %#v", nested)
 	}
+}
+
+func TestA2AProtocolRunRequestCarriesStableIdempotencySemantics(t *testing.T) {
+	returnImmediately := true
+	historyLength := 4
+	params := &A2AMessageSendParams{
+		Message: A2AMessage{
+			MessageID:  " message-42 ",
+			Extensions: []string{"urn:message-extension", "urn:shared"},
+		},
+		Configuration: &A2ASendConfiguration{
+			AcceptedOutputModes: []string{"text/plain", "application/json"},
+			ReturnImmediately:   &returnImmediately,
+			HistoryLength:       &historyLength,
+			Visibility:          " shared ",
+			Options:             map[string]interface{}{"response_profile": "compact"},
+			PushNotificationConfig: &A2APushNotificationConfig{
+				URL:        "https://callback.example/a2a",
+				Secret:     "caller-secret",
+				EventTypes: []string{"run.completed", "run.failed"},
+			},
+		},
+		Metadata: map[string]interface{}{
+			"a2a_extensions": []string{"urn:negotiated-extension", "urn:shared"},
+			"a2a_options":    map[string]interface{}{"priority": "normal"},
+		},
+	}
+
+	normalizeProtocolMessageContext(params)
+	if params.Message.MessageID != "message-42" || params.Message.ContextID != "" || params.Message.TaskID != "" {
+		t.Fatalf("message identity normalization = %#v", params.Message)
+	}
+	req := protocolRunRequest("agent-1", map[string]interface{}{"q": "hello"}, protocolMetadata(params), params)
+	if req.IdempotencyKey != "message-42" || req.CreationProtocol != "a2a" || req.CreationMethod != "message.send" {
+		t.Fatalf("creation identity = %#v", req)
+	}
+	if req.A2AContext == nil || req.A2AContext.MessageID != "message-42" || req.A2AContext.Visibility != "shared" {
+		t.Fatalf("A2A context identity = %#v", req.A2AContext)
+	}
+	assert.ElementsMatch(t, []string{"text/plain", "application/json"}, req.A2AContext.AcceptedOutputModes)
+	assert.ElementsMatch(t, []string{"urn:message-extension", "urn:negotiated-extension", "urn:shared"}, req.A2AContext.Extensions)
+	assert.Equal(t, true, req.A2AContext.Options["return_immediately"])
+	assert.Equal(t, historyLength, req.A2AContext.Options["history_length"])
+	assert.Equal(t, "compact", req.A2AContext.Options["response_profile"])
+	assert.Equal(t, "normal", req.A2AContext.Options["priority"])
+	require.NotNil(t, req.TaskCallback)
+	assert.Equal(t, "https://callback.example/a2a", req.TaskCallback.URL)
+	assert.Equal(t, "caller-secret", req.TaskCallback.Secret)
+
+	err := validateA2AMessageSendParams(&A2AMessageSendParams{})
+	requireA2AHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	assert.Equal(t, httpx.ErrorCode(runtimepkg.IdempotencyErrorKeyRequired), httpErr.Code)
+}
+
+func TestDelegatedRunRequestCarriesIdempotencySourceAndCallback(t *testing.T) {
+	targetAgentID := uuid.New()
+	context := &runtimepkg.RunA2AContextRequest{ProtocolContextID: "ctx-delegated"}
+	req := &CallAgentRequest{
+		IdempotencyKey: "delegation-message-7",
+		Input:          map[string]interface{}{"q": "hello"},
+	}
+	callback := &A2APushNotificationConfig{
+		URL:   "https://caller.example/a2a/events",
+		Token: "caller-token",
+	}
+
+	runReq := delegatedRuntimeRunRequest(req, targetAgentID, map[string]interface{}{"source": "agent"}, context, callback)
+	assert.Equal(t, targetAgentID.String(), runReq.AgentID)
+	assert.Equal(t, "delegation-message-7", runReq.IdempotencyKey)
+	assert.Equal(t, "openlinker-a2a", runReq.CreationProtocol)
+	assert.Equal(t, "call-agent", runReq.CreationMethod)
+	assert.Same(t, context, runReq.A2AContext)
+	require.NotNil(t, runReq.TaskCallback)
+	assert.Equal(t, "https://caller.example/a2a/events", runReq.TaskCallback.URL)
+	assert.Equal(t, "caller-token", runReq.TaskCallback.Token)
+}
+
+func TestCallAgentHandlerReturnsStableMissingIdempotencyError(t *testing.T) {
+	c := newA2ATestContext(&a2aHandlerRequest{
+		method: http.MethodPost,
+		target: "/agent-runtime/call-agent",
+		body:   `{"current_run_id":"` + uuid.NewString() + `","target_agent_id":"` + uuid.NewString() + `","input":{"q":"hello"}}`,
+		headers: map[string]string{
+			echo.HeaderAuthorization: "Bearer ol_agent_test",
+		},
+	})
+	err := NewHandler(nil).CallAgent(c)
+	requireA2AHTTPStatus(t, err, http.StatusUnprocessableEntity)
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	assert.Equal(t, httpx.ErrorCode(runtimepkg.IdempotencyErrorKeyRequired), httpErr.Code)
 }
 
 func TestA2ARunTaskArtifactAndEventMapping(t *testing.T) {
@@ -996,25 +1089,28 @@ func TestA2APushServiceValidationBranches(t *testing.T) {
 	_, err = svc.ListPushNotificationConfigs(ctx, userID, "agent", nil)
 	requireA2AHTTPStatus(t, err, http.StatusBadRequest)
 
-	if err := svc.createInlinePushConfig(ctx, userID, "agent", "task", nil); err != nil {
-		t.Fatalf("nil params should skip inline push config: %v", err)
+	if protocolInlinePushConfig(nil) != nil || protocolInlinePushConfig(&A2AMessageSendParams{}) != nil {
+		t.Fatal("empty message params should not create an inline callback")
 	}
-	if err := svc.createInlinePushConfig(ctx, userID, "agent", "task", &A2AMessageSendParams{}); err != nil {
-		t.Fatalf("nil configuration should skip inline push config: %v", err)
-	}
-	if err := svc.createInlinePushConfig(ctx, userID, "agent", "task", &A2AMessageSendParams{Configuration: &A2ASendConfiguration{}}); err != nil {
-		t.Fatalf("empty configuration should skip inline push config: %v", err)
-	}
-
-	noPush := NewService(nil, nil)
-	err = noPush.createInlinePushConfig(ctx, userID, "agent", "task", &A2AMessageSendParams{
+	params := &A2AMessageSendParams{
 		Configuration: &A2ASendConfiguration{
 			TaskPushNotificationConfig: &A2ATaskPushNotificationConfig{
-				PushNotificationConfig: A2APushNotificationConfig{URL: "https://hooks.example/a2a"},
+				PushNotificationConfig: A2APushNotificationConfig{
+					ID:    "push-1",
+					URL:   "https://hooks.example/a2a",
+					Token: "callback-token",
+				},
 			},
 		},
-	})
-	requireA2AHTTPStatus(t, err, http.StatusServiceUnavailable)
+	}
+	inline := protocolInlinePushConfig(params)
+	callback := runtimeTaskCallbackFromA2A(inline)
+	if callback == nil || callback.URL != "https://hooks.example/a2a" || callback.Token != "callback-token" {
+		t.Fatalf("inline callback was not mapped into the runtime request: %#v", callback)
+	}
+	if callback.Metadata["openlinker_a2a_push_config_id"] != "push-1" || callback.Metadata["openlinker_callback_binding"] != "a2a_push_notification" {
+		t.Fatalf("inline callback metadata = %#v", callback.Metadata)
+	}
 }
 
 func TestA2AProtocolServiceValidationAndDBErrorMapping(t *testing.T) {
@@ -1102,7 +1198,8 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		{name: "call agent missing bearer", method: h.CallAgent, req: &a2aHandlerRequest{method: http.MethodPost, target: "/"}, want: http.StatusUnauthorized},
 		{name: "call agent invalid json", method: h.CallAgent, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: "{", headers: map[string]string{echo.HeaderAuthorization: "Bearer token"}}, want: http.StatusBadRequest},
 		{name: "call agent validation", method: h.CallAgent, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{}`, headers: map[string]string{echo.HeaderAuthorization: "Bearer token"}}, want: http.StatusUnprocessableEntity},
-		{name: "call agent missing current run", method: h.CallAgent, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"target_agent_id":"` + agentID + `","input":{"q":"hi"}}`, headers: map[string]string{echo.HeaderAuthorization: "Bearer token"}}, want: http.StatusUnprocessableEntity},
+		{name: "call agent missing idempotency", method: h.CallAgent, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"target_agent_id":"` + agentID + `","current_run_id":"` + runID + `","input":{"q":"hi"}}`, headers: map[string]string{echo.HeaderAuthorization: "Bearer token"}}, want: http.StatusUnprocessableEntity},
+		{name: "call agent missing current run", method: h.CallAgent, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"idempotency_key":"delegation-missing-parent","target_agent_id":"` + agentID + `","input":{"q":"hi"}}`, headers: map[string]string{echo.HeaderAuthorization: "Bearer token"}}, want: http.StatusUnprocessableEntity},
 		{name: "list children invalid id", method: h.ListChildren, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "list parents missing user", method: h.ListParentRuns, req: &a2aHandlerRequest{method: http.MethodGet, target: "/"}, want: http.StatusUnauthorized},
 		{name: "extended card bad version", method: h.GetExtendedAgentCardHTTP, req: &a2aHandlerRequest{method: http.MethodGet, target: "/?version=2"}, want: http.StatusBadRequest},
@@ -1275,7 +1372,7 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 		c := newA2ATestContext(&a2aHandlerRequest{
 			method: http.MethodPost,
 			target: "/agent-runtime/call-agent",
-			body:   `{"target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"},"task_callback":{"url":"https://caller.example.com/a2a/events","token":"caller-token","event_types":["run.completed","run.failed"]}}`,
+			body:   `{"idempotency_key":"delegation-42","target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"},"task_callback":{"url":"https://caller.example.com/a2a/events","token":"caller-token","event_types":["run.completed","run.failed"]}}`,
 			headers: map[string]string{
 				echo.HeaderAuthorization: "Bearer ol_agent_test",
 				"X-OpenLinker-Run-Id":    parentRunID.String(),
@@ -1283,13 +1380,30 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 		})
 
 		require.NoError(t, NewHandler(svc).CallAgent(c))
-		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, http.StatusCreated, c.(*a2ATestContext).rec.Code)
 		assert.Equal(t, "ol_agent_test", svc.callToken)
+		assert.Equal(t, "delegation-42", svc.callReq.IdempotencyKey)
 		assert.Equal(t, parentRunID.String(), svc.callReq.CurrentRunID)
 		assert.Equal(t, targetAgentID.String(), svc.callReq.TargetAgentID)
 		require.NotNil(t, svc.callReq.TaskCallback)
 		assert.Equal(t, "https://caller.example.com/a2a/events", svc.callReq.TaskCallback.URL)
 		assert.Equal(t, []string{"run.completed", "run.failed"}, svc.callReq.TaskCallback.EventTypesAlias)
+
+		firstRunID := svc.callRunID
+		svc.callReplayed = true
+		c = newA2ATestContext(&a2aHandlerRequest{
+			method: http.MethodPost,
+			target: "/agent-runtime/call-agent",
+			body:   `{"idempotency_key":"delegation-42","target_agent_id":"` + targetAgentID.String() + `","reason":"need data","input":{"q":"hi"}}`,
+			headers: map[string]string{
+				echo.HeaderAuthorization: "Bearer ol_agent_test",
+				"X-OpenLinker-Run-Id":    parentRunID.String(),
+			},
+		})
+		require.NoError(t, NewHandler(svc).CallAgent(c))
+		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
+		assert.Equal(t, "true", c.Response().Header().Get("Idempotency-Replayed"))
+		assert.Equal(t, "/api/v1/runs/"+firstRunID, c.Response().Header().Get(echo.HeaderLocation))
 	})
 
 	t.Run("list children and parents", func(t *testing.T) {
@@ -1374,7 +1488,7 @@ func TestA2AControlHTTPHandlersPropagateServiceErrors(t *testing.T) {
 			name: "call agent",
 			key:  "call-agent",
 			call: (*Handler).CallAgent,
-			req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"target_agent_id":"` + agentID.String() + `","current_run_id":"` + parentRunID.String() + `","input":{"q":"hi"}}`, headers: map[string]string{
+			req: &a2aHandlerRequest{method: http.MethodPost, target: "/", body: `{"idempotency_key":"delegation-service-error","target_agent_id":"` + agentID.String() + `","current_run_id":"` + parentRunID.String() + `","input":{"q":"hi"}}`, headers: map[string]string{
 				echo.HeaderAuthorization: "Bearer ol_agent_test",
 			}},
 		},
@@ -2481,12 +2595,15 @@ type controlA2AService struct {
 	updatePolicyReq UpdateCallPolicyRequest
 	callToken       string
 	callReq         CallAgentRequest
+	callRunID       string
+	callReplayed    bool
 }
 
 func newControlA2AService() *controlA2AService {
 	return &controlA2AService{
 		fakeA2AService: newFakeA2AService(uuid.NewString()),
 		errs:           map[string]error{},
+		callRunID:      uuid.NewString(),
 	}
 }
 
@@ -2596,12 +2713,13 @@ func (f *controlA2AService) CallAgent(_ context.Context, plaintextToken string, 
 		return nil, err
 	}
 	return &runtimepkg.RunResponse{
-		RunID:         uuid.NewString(),
+		RunID:         f.callRunID,
 		Status:        "success",
 		Output:        map[string]interface{}{"ok": true},
 		ParentRunID:   f.callReq.ParentRunID,
 		CallerAgentID: f.callReq.TargetAgentID,
 		BillingMode:   "a2a",
+		Replayed:      f.callReplayed,
 	}, nil
 }
 
