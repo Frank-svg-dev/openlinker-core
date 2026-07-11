@@ -465,14 +465,14 @@ func (f *ResultFinalizer) finalizeTx(
 		runtimeResultTerminalSemantics(request, classification, deadlineExceeded, retryExhausted)
 
 	var attemptErrorCode, attemptErrorDetail *string
-	if deadlineExceeded {
-		code := "RUN_DEADLINE_EXCEEDED"
-		attemptErrorCode = &code
-	} else if request.Error != nil {
+	if request.Error != nil {
 		code := request.Error.ErrorCode
 		detail := request.Error.Message
 		attemptErrorCode = &code
 		attemptErrorDetail = &detail
+	} else if deadlineExceeded {
+		code := "RUN_DEADLINE_EXCEEDED"
+		attemptErrorCode = &code
 	}
 	finishedAttempt, err := queries.FinishRunAttempt(ctx, db.FinishRunAttemptParams{
 		RunID:                run.id,
@@ -818,10 +818,10 @@ func terminalRuntimeResultPayload(
 	}
 	if runStatus == "success" {
 		payload["output"] = request.Output
-	} else if request.Error != nil {
-		payload["error_message"] = request.Error.Message
 	} else if runStatus == "timeout" {
 		payload["error_message"] = "Run deadline exceeded"
+	} else if request.Error != nil {
+		payload["error_message"] = request.Error.Message
 	}
 	if publicErrorCode != "" {
 		payload["error_code"] = publicErrorCode

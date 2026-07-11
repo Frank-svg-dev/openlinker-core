@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -261,6 +262,14 @@ func TestTerminalRuntimeResultPayloadPreservesProductResult(t *testing.T) {
 	require.Equal(t, "POLICY_REJECTED", payload["error_code"])
 	require.Equal(t, "public safe failure", payload["error_message"])
 	require.NotContains(t, payload, "output")
+
+	payload = terminalRuntimeResultPayload(
+		failure, "timeout", RuntimeResultClassificationTimeout, "RUN_DEADLINE_EXCEEDED",
+	)
+	require.Equal(t, "RUN_DEADLINE_EXCEEDED", payload["error_code"])
+	require.Equal(t, "Run deadline exceeded", payload["error_message"])
+	require.NotContains(t, fmt.Sprint(payload), failure.Error.ErrorCode)
+	require.NotContains(t, fmt.Sprint(payload), failure.Error.Message)
 }
 
 func runtimeResultTestIdentity() RuntimeAttemptIdentity {

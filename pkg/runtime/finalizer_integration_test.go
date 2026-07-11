@@ -321,6 +321,49 @@ func TestResultFinalizerRunDeadlineWinsAndReplaysTimeout(t *testing.T) {
 	assertFinalizerTerminalCounts(t, pool, fixture.identity.RunID, 1, 0, 0)
 }
 
+func TestResultFinalizerFailedResultAfterDeadlineKeepsLateErrorPrivate(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeV2Schema(t, pool)
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	expireFinalizerFixtureAtDatabaseClock(t, pool, fixture)
+	request := retryableRuntimeResult(fixture)
+	request.Error.ErrorCode = "LATE_UPSTREAM_SECRET"
+	request.Error.Message = "late private detail must not reach the public event"
+	finalizer := runtime.NewResultFinalizer(pool, nil, nil)
+
+	ack, err := finalizer.Finalize(context.Background(), fixture.principal, request)
+	require.NoError(t, err)
+	require.Equal(t, runtime.RuntimeResultClassificationTimeout, ack.Classification)
+	require.Equal(t, "timeout", ack.RunStatus)
+
+	var runErrorCode, runErrorMessage string
+	var eventPayload []byte
+	var attemptErrorCode, attemptErrorDetail *string
+	var attemptResultID *uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT r.error_code, r.error_message, e.payload,
+		       a.error_code, a.error_detail_redacted, a.result_id
+		FROM runs r
+		JOIN run_events e ON e.id = r.terminal_event_id
+		JOIN run_attempts a ON a.id = $2
+		WHERE r.id = $1`, fixture.identity.RunID, fixture.identity.AttemptID).Scan(
+		&runErrorCode, &runErrorMessage, &eventPayload,
+		&attemptErrorCode, &attemptErrorDetail, &attemptResultID,
+	))
+	require.Equal(t, "RUN_DEADLINE_EXCEEDED", runErrorCode)
+	require.Equal(t, "Run deadline exceeded", runErrorMessage)
+	require.Contains(t, string(eventPayload), `"error_code": "RUN_DEADLINE_EXCEEDED"`)
+	require.Contains(t, string(eventPayload), `"error_message": "Run deadline exceeded"`)
+	require.NotContains(t, string(eventPayload), request.Error.ErrorCode)
+	require.NotContains(t, string(eventPayload), request.Error.Message)
+	require.NotNil(t, attemptErrorCode)
+	require.Equal(t, request.Error.ErrorCode, *attemptErrorCode)
+	require.NotNil(t, attemptErrorDetail)
+	require.Equal(t, request.Error.Message, *attemptErrorDetail)
+	require.NotNil(t, attemptResultID)
+	require.Equal(t, request.ResultID, *attemptResultID)
+}
+
 func TestResultFinalizerDelegatedChildPlansOnlyParentAndCallbackEffects(t *testing.T) {
 	pool := setupTestDB(t)
 	requireReliableRuntimeV2Schema(t, pool)
