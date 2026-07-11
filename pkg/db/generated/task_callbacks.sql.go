@@ -253,6 +253,40 @@ func (q *Queries) ListActiveTaskCallbackSubscriptionsForEvent(ctx context.Contex
 	return items, rows.Err()
 }
 
+const getTaskCallbackSubscriptionByID = `-- name: GetTaskCallbackSubscriptionByID :one
+SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
+       event_types, auth_scheme, auth_credentials, metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
+FROM task_callback_subscriptions
+WHERE id = $1`
+
+func (q *Queries) GetTaskCallbackSubscriptionByID(ctx context.Context, id uuid.UUID) (TaskCallbackSubscription, error) {
+	row := q.db.QueryRow(ctx, getTaskCallbackSubscriptionByID, id)
+	var s TaskCallbackSubscription
+	err := scanTaskCallbackSubscription(row, &s)
+	return s, err
+}
+
+const getTaskCallbackEffectEvent = `-- name: GetTaskCallbackEffectEvent :one
+SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at,
+       client_event_id, client_event_seq, payload_fingerprint,
+       attempt_id, attempt_no, fencing_token
+FROM run_events
+WHERE id = $1
+  AND run_id = $2`
+
+type GetTaskCallbackEffectEventParams struct {
+	ID    uuid.UUID `db:"id" json:"id"`
+	RunID uuid.UUID `db:"run_id" json:"run_id"`
+}
+
+func (q *Queries) GetTaskCallbackEffectEvent(ctx context.Context, arg GetTaskCallbackEffectEventParams) (RunEvent, error) {
+	row := q.db.QueryRow(ctx, getTaskCallbackEffectEvent, arg.ID, arg.RunID)
+	var event RunEvent
+	err := scanRunEvent(row, &event)
+	return event, err
+}
+
 func scanTaskCallbackDelivery(row interface {
 	Scan(dest ...any) error
 }, d *TaskCallbackDelivery) error {
@@ -270,6 +304,7 @@ func scanTaskCallbackDelivery(row interface {
 		&d.DeliveredAt,
 		&d.CreatedAt,
 		&d.UpdatedAt,
+		&d.EffectOutboxID,
 	)
 }
 
@@ -283,7 +318,8 @@ ON CONFLICT (subscription_id, run_event_id) DO UPDATE
 SET payload = EXCLUDED.payload
 RETURNING id, subscription_id, run_event_id, payload, status,
           response_status, response_body, error_message,
-          attempt_count, next_retry_at, delivered_at, created_at, updated_at`
+          attempt_count, next_retry_at, delivered_at, created_at, updated_at,
+          effect_outbox_id`
 
 type CreateTaskCallbackDeliveryParams struct {
 	SubscriptionID uuid.UUID `db:"subscription_id" json:"subscription_id"`
@@ -298,10 +334,45 @@ func (q *Queries) CreateTaskCallbackDelivery(ctx context.Context, arg CreateTask
 	return d, err
 }
 
+const createTaskCallbackEffectDelivery = `-- name: CreateTaskCallbackEffectDelivery :one
+INSERT INTO task_callback_deliveries (
+    id, subscription_id, run_event_id, payload, status, attempt_count,
+    next_retry_at, effect_outbox_id
+) VALUES (
+    $1, $2, $3, $4, 'pending', 0, NULL, $1
+)
+ON CONFLICT (id) DO UPDATE
+SET id = task_callback_deliveries.id
+WHERE task_callback_deliveries.effect_outbox_id = EXCLUDED.effect_outbox_id
+  AND task_callback_deliveries.subscription_id = EXCLUDED.subscription_id
+  AND task_callback_deliveries.run_event_id = EXCLUDED.run_event_id
+  AND task_callback_deliveries.payload = EXCLUDED.payload
+RETURNING id, subscription_id, run_event_id, payload, status,
+          response_status, response_body, error_message,
+          attempt_count, next_retry_at, delivered_at, created_at, updated_at,
+          effect_outbox_id`
+
+type CreateTaskCallbackEffectDeliveryParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	SubscriptionID uuid.UUID `db:"subscription_id" json:"subscription_id"`
+	RunEventID     uuid.UUID `db:"run_event_id" json:"run_event_id"`
+	Payload        []byte    `db:"payload" json:"payload"`
+}
+
+func (q *Queries) CreateTaskCallbackEffectDelivery(ctx context.Context, arg CreateTaskCallbackEffectDeliveryParams) (TaskCallbackDelivery, error) {
+	row := q.db.QueryRow(ctx, createTaskCallbackEffectDelivery,
+		arg.ID, arg.SubscriptionID, arg.RunEventID, arg.Payload,
+	)
+	var d TaskCallbackDelivery
+	err := scanTaskCallbackDelivery(row, &d)
+	return d, err
+}
+
 const getTaskCallbackDeliveryByID = `-- name: GetTaskCallbackDeliveryByID :one
 SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        s.target_url, s.secret, s.auth_scheme, s.auth_credentials, e.event_type
 FROM task_callback_deliveries d
 JOIN task_callback_subscriptions s ON s.id = d.subscription_id
@@ -334,6 +405,7 @@ func (q *Queries) GetTaskCallbackDeliveryByID(ctx context.Context, id uuid.UUID)
 		&r.DeliveredAt,
 		&r.CreatedAt,
 		&r.UpdatedAt,
+		&r.EffectOutboxID,
 		&r.TargetURL,
 		&r.Secret,
 		&r.AuthScheme,
@@ -347,6 +419,7 @@ const listTaskCallbackDeliveriesByRun = `-- name: ListTaskCallbackDeliveriesByRu
 SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        s.target_url, e.event_type
 FROM task_callback_deliveries d
 JOIN task_callback_subscriptions s ON s.id = d.subscription_id
@@ -391,6 +464,7 @@ func (q *Queries) ListTaskCallbackDeliveriesByRun(ctx context.Context, arg ListT
 			&r.DeliveredAt,
 			&r.CreatedAt,
 			&r.UpdatedAt,
+			&r.EffectOutboxID,
 			&r.TargetURL,
 			&r.EventType,
 		); err != nil {
@@ -411,7 +485,8 @@ SET status = 'success',
     next_retry_at = NULL,
     delivered_at = NOW(),
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 type MarkTaskCallbackDeliverySuccessParams struct {
 	ID             uuid.UUID `db:"id" json:"id"`
@@ -433,7 +508,8 @@ SET status = 'pending',
     attempt_count = attempt_count + 1,
     next_retry_at = $5,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 type MarkTaskCallbackDeliveryFailedRetryParams struct {
 	ID             uuid.UUID `db:"id" json:"id"`
@@ -457,7 +533,8 @@ SET status = 'failed',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 type MarkTaskCallbackDeliveryFailedFinalParams struct {
 	ID             uuid.UUID `db:"id" json:"id"`
@@ -469,6 +546,165 @@ type MarkTaskCallbackDeliveryFailedFinalParams struct {
 func (q *Queries) MarkTaskCallbackDeliveryFailedFinal(ctx context.Context, arg MarkTaskCallbackDeliveryFailedFinalParams) error {
 	_, err := q.db.Exec(ctx, markTaskCallbackDeliveryFailedFinal, arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage)
 	return err
+}
+
+const markTaskCallbackEffectDeliverySuccess = `-- name: MarkTaskCallbackEffectDeliverySuccess :execrows
+WITH transitioned AS (
+    UPDATE task_callback_deliveries
+    SET status = 'success',
+        response_status = $2,
+        response_body = $3,
+        error_message = NULL,
+        attempt_count = GREATEST(attempt_count, $4),
+        next_retry_at = NULL,
+        delivered_at = clock_timestamp(),
+        updated_at = clock_timestamp()
+    WHERE id = $1
+      AND effect_outbox_id = $1
+      AND status = 'pending'
+      AND attempt_count < $4
+      AND EXISTS (
+          SELECT 1 FROM run_effect_outbox effect
+          WHERE effect.id = $1 AND effect.status = 'processing'
+            AND effect.lease_owner = $5 AND effect.attempt_count = $4
+      )
+    RETURNING subscription_id
+)
+UPDATE task_callback_subscriptions s
+SET consecutive_failures = 0,
+    updated_at = clock_timestamp()
+FROM transitioned
+WHERE s.id = transitioned.subscription_id`
+
+type MarkTaskCallbackEffectDeliverySuccessParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkTaskCallbackEffectDeliverySuccess(ctx context.Context, arg MarkTaskCallbackEffectDeliverySuccessParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markTaskCallbackEffectDeliverySuccess,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const markTaskCallbackEffectDeliveryRetry = `-- name: MarkTaskCallbackEffectDeliveryRetry :execrows
+WITH transitioned AS (
+    UPDATE task_callback_deliveries
+    SET response_status = $2,
+        response_body = $3,
+        error_message = $4,
+        attempt_count = GREATEST(attempt_count, $5),
+        next_retry_at = NULL,
+        updated_at = clock_timestamp()
+    WHERE id = $1
+      AND effect_outbox_id = $1
+      AND status = 'pending'
+      AND attempt_count < $5
+      AND EXISTS (
+          SELECT 1 FROM run_effect_outbox effect
+          WHERE effect.id = $1 AND effect.status = 'processing'
+            AND effect.lease_owner = $6 AND effect.attempt_count = $5
+      )
+    RETURNING subscription_id
+)
+UPDATE task_callback_subscriptions s
+SET consecutive_failures = consecutive_failures + 1,
+    status = CASE
+        WHEN consecutive_failures + 1 >= 3 THEN 'failed'
+        ELSE status
+    END,
+    updated_at = clock_timestamp()
+FROM transitioned
+WHERE s.id = transitioned.subscription_id`
+
+type MarkTaskCallbackEffectDeliveryRetryParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkTaskCallbackEffectDeliveryRetry(ctx context.Context, arg MarkTaskCallbackEffectDeliveryRetryParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markTaskCallbackEffectDeliveryRetry,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const markTaskCallbackEffectDeliveryFailed = `-- name: MarkTaskCallbackEffectDeliveryFailed :execrows
+WITH transitioned AS (
+    UPDATE task_callback_deliveries
+    SET status = 'failed',
+        response_status = $2,
+        response_body = $3,
+        error_message = $4,
+        attempt_count = GREATEST(attempt_count, $5),
+        next_retry_at = NULL,
+        updated_at = clock_timestamp()
+    WHERE id = $1
+      AND effect_outbox_id = $1
+      AND status = 'pending'
+      AND attempt_count < $5
+      AND EXISTS (
+          SELECT 1 FROM run_effect_outbox effect
+          WHERE effect.id = $1 AND effect.status = 'processing'
+            AND effect.lease_owner = $6 AND effect.attempt_count = $5
+      )
+    RETURNING subscription_id
+)
+UPDATE task_callback_subscriptions s
+SET consecutive_failures = consecutive_failures + 1,
+    status = CASE
+        WHEN consecutive_failures + 1 >= 3 THEN 'failed'
+        ELSE status
+    END,
+    updated_at = clock_timestamp()
+FROM transitioned
+WHERE s.id = transitioned.subscription_id`
+
+type MarkTaskCallbackEffectDeliveryFailedParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkTaskCallbackEffectDeliveryFailed(ctx context.Context, arg MarkTaskCallbackEffectDeliveryFailedParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markTaskCallbackEffectDeliveryFailed,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const resetTaskCallbackEffectDelivery = `-- name: ResetTaskCallbackEffectDelivery :execrows
+UPDATE task_callback_deliveries
+SET status = 'pending',
+    response_status = NULL,
+    response_body = NULL,
+    error_message = NULL,
+    attempt_count = 0,
+    next_retry_at = NULL,
+    delivered_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'failed'
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'dead_letter'
+  )`
+
+func (q *Queries) ResetTaskCallbackEffectDelivery(ctx context.Context, id uuid.UUID) (int64, error) {
+	tag, err := q.db.Exec(ctx, resetTaskCallbackEffectDelivery, id)
+	return tag.RowsAffected(), err
 }
 
 const incrementTaskCallbackSubscriptionFailure = `-- name: IncrementTaskCallbackSubscriptionFailure :exec
@@ -500,9 +736,11 @@ func (q *Queries) ResetTaskCallbackSubscriptionFailures(ctx context.Context, id 
 const listPendingTaskCallbackDeliveries = `-- name: ListPendingTaskCallbackDeliveries :many
 SELECT id, subscription_id, run_event_id, payload, status,
        response_status, response_body, error_message,
-       attempt_count, next_retry_at, delivered_at, created_at, updated_at
+       attempt_count, next_retry_at, delivered_at, created_at, updated_at,
+       effect_outbox_id
 FROM task_callback_deliveries
 WHERE status = 'pending'
+  AND effect_outbox_id IS NULL
   AND next_retry_at IS NOT NULL
   AND next_retry_at <= NOW()
 ORDER BY next_retry_at ASC

@@ -43,13 +43,36 @@ INSERT INTO webhook_deliveries (
 )
 RETURNING id, agent_id, run_id, url, payload, status,
           response_status, response_body, error_message,
-          attempt_count, next_retry_at, created_at, updated_at;
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id;
+
+-- name: CreateWebhookEffectDelivery :one
+-- Effect-owned terminal delivery. The Effect UUID is also the externally
+-- visible delivery UUID, so crash retries preserve receiver idempotency.
+INSERT INTO webhook_deliveries (
+    id, agent_id, run_id, url, payload, status, attempt_count,
+    next_retry_at, effect_outbox_id
+) VALUES (
+    $1, $2, $3, $4, $5, 'pending', 0, NULL, $1
+)
+ON CONFLICT (id) DO UPDATE
+SET id = webhook_deliveries.id
+WHERE webhook_deliveries.effect_outbox_id = EXCLUDED.effect_outbox_id
+  AND webhook_deliveries.agent_id = EXCLUDED.agent_id
+  AND webhook_deliveries.run_id = EXCLUDED.run_id
+  AND webhook_deliveries.url = EXCLUDED.url
+  AND webhook_deliveries.payload = EXCLUDED.payload
+RETURNING id, agent_id, run_id, url, payload, status,
+          response_status, response_body, error_message,
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id;
 
 -- name: GetWebhookDeliveryByID :one
 -- worker 重试时按 id 取记录，附带 agent.webhook_secret（投递签名用）。
 SELECT d.id, d.agent_id, d.run_id, d.url, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        a.webhook_secret AS webhook_secret
 FROM webhook_deliveries d
 JOIN agents a ON a.id = d.agent_id
@@ -65,7 +88,8 @@ SET status = 'success',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
 
 -- name: MarkDeliveryFailedRetry :exec
 -- 失败但还有重试机会：保持 status=pending，写入下次重试时间。
@@ -77,7 +101,8 @@ SET status = 'pending',
     attempt_count = attempt_count + 1,
     next_retry_at = $5,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
 
 -- name: MarkDeliveryFailedFinal :exec
 -- 失败且放弃重试：status=failed，next_retry_at=NULL。
@@ -89,15 +114,102 @@ SET status = 'failed',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
+
+-- name: MarkWebhookEffectDeliverySuccess :execrows
+UPDATE webhook_deliveries
+SET status = 'success',
+    response_status = $2,
+    response_body = $3,
+    error_message = NULL,
+    attempt_count = GREATEST(attempt_count, $4),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $4
+  AND EXISTS (
+      SELECT 1
+      FROM run_effect_outbox effect
+      WHERE effect.id = $1
+        AND effect.status = 'processing'
+        AND effect.lease_owner = $5
+        AND effect.attempt_count = $4
+  );
+
+-- name: MarkWebhookEffectDeliveryRetry :execrows
+UPDATE webhook_deliveries
+SET response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1
+      FROM run_effect_outbox effect
+      WHERE effect.id = $1
+        AND effect.status = 'processing'
+        AND effect.lease_owner = $6
+        AND effect.attempt_count = $5
+  );
+
+-- name: MarkWebhookEffectDeliveryFailed :execrows
+UPDATE webhook_deliveries
+SET status = 'failed',
+    response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1
+      FROM run_effect_outbox effect
+      WHERE effect.id = $1
+        AND effect.status = 'processing'
+        AND effect.lease_owner = $6
+        AND effect.attempt_count = $5
+  );
+
+-- name: ResetWebhookEffectDelivery :execrows
+UPDATE webhook_deliveries
+SET status = 'pending',
+    response_status = NULL,
+    response_body = NULL,
+    error_message = NULL,
+    attempt_count = 0,
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'failed'
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'dead_letter'
+  );
 
 -- name: ListPendingDeliveries :many
 -- worker 拉取所有应当重试的投递（按下次时间排序，限制 50 条防一次扫太多）。
 SELECT id, agent_id, run_id, url, payload, status,
        response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM webhook_deliveries
-WHERE status = 'pending' AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()
+WHERE status = 'pending'
+  AND effect_outbox_id IS NULL
+  AND next_retry_at IS NOT NULL
+  AND next_retry_at <= NOW()
 ORDER BY next_retry_at ASC
 LIMIT 50;
 
@@ -106,7 +218,8 @@ LIMIT 50;
 -- 业务层应先校验 agent.creator_id == 当前用户。
 SELECT id, agent_id, run_id, url, payload, status,
        response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM webhook_deliveries
 WHERE agent_id = $1
 ORDER BY created_at DESC

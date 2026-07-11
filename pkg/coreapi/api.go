@@ -208,7 +208,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	deliveryHandler := delivery.NewHandler(deliverySvc)
 	deliveryHandler.RegisterProtected(api, jwtMiddleware)
 	runtimeSvc.SetDeliveryEnqueuer(deliverySvc)
+	runtimeSvc.SetRunEffectHandlers(webhookSvc, deliverySvc)
 	go delivery.StartWorker(rootCtx, deliverySvc)
+	go runtime.StartRunEffectWorker(rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{})
 
 	return &Services{
 		Auth:        authSvc,

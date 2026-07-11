@@ -78,6 +78,21 @@ WHERE run_id = $1
   AND $2 = ANY(event_types)
 ORDER BY created_at ASC;
 
+-- name: GetTaskCallbackSubscriptionByID :one
+SELECT id, run_id, owner_user_id, caller_agent_id, target_url, secret,
+       event_types, auth_scheme, auth_credentials, metadata,
+       status, consecutive_failures, created_at, updated_at, deleted_at
+FROM task_callback_subscriptions
+WHERE id = $1;
+
+-- name: GetTaskCallbackEffectEvent :one
+SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at,
+       client_event_id, client_event_seq, payload_fingerprint,
+       attempt_id, attempt_no, fencing_token
+FROM run_events
+WHERE id = $1
+  AND run_id = $2;
+
 -- name: CreateTaskCallbackDelivery :one
 INSERT INTO task_callback_deliveries (
     subscription_id, run_event_id, payload, status, attempt_count, next_retry_at
@@ -88,12 +103,32 @@ ON CONFLICT (subscription_id, run_event_id) DO UPDATE
 SET payload = EXCLUDED.payload
 RETURNING id, subscription_id, run_event_id, payload, status,
           response_status, response_body, error_message,
-          attempt_count, next_retry_at, delivered_at, created_at, updated_at;
+          attempt_count, next_retry_at, delivered_at, created_at, updated_at,
+          effect_outbox_id;
+
+-- name: CreateTaskCallbackEffectDelivery :one
+INSERT INTO task_callback_deliveries (
+    id, subscription_id, run_event_id, payload, status, attempt_count,
+    next_retry_at, effect_outbox_id
+) VALUES (
+    $1, $2, $3, $4, 'pending', 0, NULL, $1
+)
+ON CONFLICT (id) DO UPDATE
+SET id = task_callback_deliveries.id
+WHERE task_callback_deliveries.effect_outbox_id = EXCLUDED.effect_outbox_id
+  AND task_callback_deliveries.subscription_id = EXCLUDED.subscription_id
+  AND task_callback_deliveries.run_event_id = EXCLUDED.run_event_id
+  AND task_callback_deliveries.payload = EXCLUDED.payload
+RETURNING id, subscription_id, run_event_id, payload, status,
+          response_status, response_body, error_message,
+          attempt_count, next_retry_at, delivered_at, created_at, updated_at,
+          effect_outbox_id;
 
 -- name: GetTaskCallbackDeliveryByID :one
 SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        s.target_url, s.secret, s.auth_scheme, s.auth_credentials, e.event_type
 FROM task_callback_deliveries d
 JOIN task_callback_subscriptions s ON s.id = d.subscription_id
@@ -104,6 +139,7 @@ WHERE d.id = $1;
 SELECT d.id, d.subscription_id, d.run_event_id, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.delivered_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        s.target_url, e.event_type
 FROM task_callback_deliveries d
 JOIN task_callback_subscriptions s ON s.id = d.subscription_id
@@ -123,7 +159,8 @@ SET status = 'success',
     next_retry_at = NULL,
     delivered_at = NOW(),
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
 
 -- name: MarkTaskCallbackDeliveryFailedRetry :exec
 UPDATE task_callback_deliveries
@@ -134,7 +171,8 @@ SET status = 'pending',
     attempt_count = attempt_count + 1,
     next_retry_at = $5,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
 
 -- name: MarkTaskCallbackDeliveryFailedFinal :exec
 UPDATE task_callback_deliveries
@@ -145,7 +183,124 @@ SET status = 'failed',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
+
+-- name: MarkTaskCallbackEffectDeliverySuccess :execrows
+WITH transitioned AS (
+    UPDATE task_callback_deliveries
+    SET status = 'success',
+        response_status = $2,
+        response_body = $3,
+        error_message = NULL,
+        attempt_count = GREATEST(attempt_count, $4),
+        next_retry_at = NULL,
+        delivered_at = clock_timestamp(),
+        updated_at = clock_timestamp()
+    WHERE id = $1
+      AND effect_outbox_id = $1
+      AND status = 'pending'
+      AND attempt_count < $4
+      AND EXISTS (
+          SELECT 1
+          FROM run_effect_outbox effect
+          WHERE effect.id = $1
+            AND effect.status = 'processing'
+            AND effect.lease_owner = $5
+            AND effect.attempt_count = $4
+      )
+    RETURNING subscription_id
+)
+UPDATE task_callback_subscriptions s
+SET consecutive_failures = 0,
+    updated_at = clock_timestamp()
+FROM transitioned
+WHERE s.id = transitioned.subscription_id;
+
+-- name: MarkTaskCallbackEffectDeliveryRetry :execrows
+WITH transitioned AS (
+    UPDATE task_callback_deliveries
+    SET response_status = $2,
+        response_body = $3,
+        error_message = $4,
+        attempt_count = GREATEST(attempt_count, $5),
+        next_retry_at = NULL,
+        updated_at = clock_timestamp()
+    WHERE id = $1
+      AND effect_outbox_id = $1
+      AND status = 'pending'
+      AND attempt_count < $5
+      AND EXISTS (
+          SELECT 1
+          FROM run_effect_outbox effect
+          WHERE effect.id = $1
+            AND effect.status = 'processing'
+            AND effect.lease_owner = $6
+            AND effect.attempt_count = $5
+      )
+    RETURNING subscription_id
+)
+UPDATE task_callback_subscriptions s
+SET consecutive_failures = consecutive_failures + 1,
+    status = CASE
+        WHEN consecutive_failures + 1 >= 3 THEN 'failed'
+        ELSE status
+    END,
+    updated_at = clock_timestamp()
+FROM transitioned
+WHERE s.id = transitioned.subscription_id;
+
+-- name: MarkTaskCallbackEffectDeliveryFailed :execrows
+WITH transitioned AS (
+    UPDATE task_callback_deliveries
+    SET status = 'failed',
+        response_status = $2,
+        response_body = $3,
+        error_message = $4,
+        attempt_count = GREATEST(attempt_count, $5),
+        next_retry_at = NULL,
+        updated_at = clock_timestamp()
+    WHERE id = $1
+      AND effect_outbox_id = $1
+      AND status = 'pending'
+      AND attempt_count < $5
+      AND EXISTS (
+          SELECT 1
+          FROM run_effect_outbox effect
+          WHERE effect.id = $1
+            AND effect.status = 'processing'
+            AND effect.lease_owner = $6
+            AND effect.attempt_count = $5
+      )
+    RETURNING subscription_id
+)
+UPDATE task_callback_subscriptions s
+SET consecutive_failures = consecutive_failures + 1,
+    status = CASE
+        WHEN consecutive_failures + 1 >= 3 THEN 'failed'
+        ELSE status
+    END,
+    updated_at = clock_timestamp()
+FROM transitioned
+WHERE s.id = transitioned.subscription_id;
+
+-- name: ResetTaskCallbackEffectDelivery :execrows
+UPDATE task_callback_deliveries
+SET status = 'pending',
+    response_status = NULL,
+    response_body = NULL,
+    error_message = NULL,
+    attempt_count = 0,
+    next_retry_at = NULL,
+    delivered_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'failed'
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'dead_letter'
+  );
 
 -- name: IncrementTaskCallbackSubscriptionFailure :exec
 UPDATE task_callback_subscriptions
@@ -166,9 +321,11 @@ WHERE id = $1;
 -- name: ListPendingTaskCallbackDeliveries :many
 SELECT id, subscription_id, run_event_id, payload, status,
        response_status, response_body, error_message,
-       attempt_count, next_retry_at, delivered_at, created_at, updated_at
+       attempt_count, next_retry_at, delivered_at, created_at, updated_at,
+       effect_outbox_id
 FROM task_callback_deliveries
 WHERE status = 'pending'
+  AND effect_outbox_id IS NULL
   AND next_retry_at IS NOT NULL
   AND next_retry_at <= NOW()
 ORDER BY next_retry_at ASC

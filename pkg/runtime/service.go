@@ -110,6 +110,8 @@ type Service struct {
 	wsHub           *runtimeWSHub
 	pullNotifier    *runtimePullNotifier
 	eventStore      *EventStore
+	resultFinalizer *ResultFinalizer
+	effectWorker    *RunEffectWorker
 	bestEffortDBSem chan struct{}
 	tokenTouchMu    sync.Mutex
 	tokenTouchAt    map[uuid.UUID]time.Time
@@ -164,6 +166,8 @@ type runtimeHeartbeatOptions struct {
 	asyncTokenTouch bool
 }
 
+const legacyRuntimeContractID = "legacy.pre-v2"
+
 // EndpointRunTimeoutConfig controls how long direct_http / mcp_server runs may
 // stay running before the platform converts them to terminal timeout.
 type EndpointRunTimeoutConfig struct {
@@ -189,6 +193,23 @@ func (s *Service) SetDeliveryEnqueuer(d DeliveryEnqueuer) {
 	s.deliverySvc = d
 }
 
+// SetRunEffectHandlers wires the durable terminal-effect dispatchers. It does
+// not start the worker; coreapi starts one worker under the process root
+// context after every handler has been constructed.
+func (s *Service) SetRunEffectHandlers(
+	webhook WebhookRunEffectHandler,
+	delivery DeliveryRunEffectHandler,
+) {
+	if s == nil {
+		return
+	}
+	if s.effectWorker == nil {
+		s.effectWorker = NewRunEffectWorker(s.queries, webhook, delivery)
+		return
+	}
+	s.effectWorker.SetHandlers(webhook, delivery)
+}
+
 // NewService 构造 Service。HTTP client timeout 取自 cfg.RunTimeoutSeconds（默认 60s）。
 func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 	timeout := time.Duration(cfg.RunTimeoutSeconds) * time.Second
@@ -196,7 +217,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		timeout = 60 * time.Second
 	}
 	queries := db.New(pool)
-	return &Service{
+	svc := &Service{
 		queries:      queries,
 		requirements: queries,
 		pool:         pool,
@@ -211,6 +232,22 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		tokenTouchAt: map[uuid.UUID]time.Time{},
 		httpClient:   endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 	}
+	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
+	svc.effectWorker = NewRunEffectWorker(queries, nil, nil)
+	return svc
+}
+
+// FinalizeRuntimeResult is the transport-neutral runtime v2 Result entrypoint.
+// Task 6 adapters authenticate and decode envelopes before calling it.
+func (s *Service) FinalizeRuntimeResult(
+	ctx context.Context,
+	principal RuntimeResultPrincipal,
+	req RuntimeResultRequest,
+) (RuntimeResultAck, error) {
+	if s == nil || s.resultFinalizer == nil {
+		return RuntimeResultAck{}, errNilResultFinalizer
+	}
+	return s.resultFinalizer.Finalize(ctx, principal, req)
 }
 
 // AppendRuntimeEvent persists one runtime v2 execution Event and emits
@@ -1416,12 +1453,14 @@ func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *Ru
 		resp.ParentRunID = invocation.delegation.ParentRunID.String()
 		resp.CallerAgentID = invocation.delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
-		s.recordRunEventBestEffort(ctx, invocation.delegation.ParentRunID, "run.child.completed", map[string]interface{}{
-			"child_run_id":    invocation.runID.String(),
-			"caller_agent_id": invocation.delegation.CallerAgentID.String(),
-			"target_agent_id": invocation.agent.ID.String(),
-			"status":          resp.Status,
-		})
+		if s.runUsesLegacyTerminalPipeline(ctx, invocation.runID) {
+			s.recordRunEventBestEffort(ctx, invocation.delegation.ParentRunID, "run.child.completed", map[string]interface{}{
+				"child_run_id":    invocation.runID.String(),
+				"caller_agent_id": invocation.delegation.CallerAgentID.String(),
+				"target_agent_id": invocation.agent.ID.String(),
+				"status":          resp.Status,
+			})
+		}
 		decorateNextAction(resp)
 	}
 	if invocation.taskCallback != nil {
@@ -2255,12 +2294,14 @@ func (s *Service) decorateDelegationCompletion(ctx context.Context, runID, targe
 	resp.ParentRunID = delegation.ParentRunID.String()
 	resp.CallerAgentID = delegation.CallerAgentID.String()
 	resp.BillingMode = "free_delegation"
-	s.recordRunEventBestEffort(ctx, delegation.ParentRunID, "run.child.completed", map[string]interface{}{
-		"child_run_id":    runID.String(),
-		"caller_agent_id": delegation.CallerAgentID.String(),
-		"target_agent_id": targetAgentID.String(),
-		"status":          resp.Status,
-	})
+	if s.runUsesLegacyTerminalPipeline(ctx, runID) {
+		s.recordRunEventBestEffort(ctx, delegation.ParentRunID, "run.child.completed", map[string]interface{}{
+			"child_run_id":    runID.String(),
+			"caller_agent_id": delegation.CallerAgentID.String(),
+			"target_agent_id": targetAgentID.String(),
+			"status":          resp.Status,
+		})
+	}
 	decorateNextAction(resp)
 }
 
@@ -3407,6 +3448,9 @@ func (s *Service) triggerWebhook(runID, agentID uuid.UUID, output map[string]int
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if !s.runUsesLegacyTerminalPipeline(bgCtx, runID) {
+			return
+		}
 		run, err := s.queries.GetRunByID(bgCtx, runID)
 		if err != nil {
 			log.Error().Err(err).Str("run_id", runID.String()).
@@ -3434,6 +3478,9 @@ func (s *Service) triggerWebhookByRun(runID uuid.UUID) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if !s.runUsesLegacyTerminalPipeline(bgCtx, runID) {
+			return
+		}
 		run, err := s.queries.GetRunByID(bgCtx, runID)
 		if err != nil {
 			log.Error().Err(err).Str("run_id", runID.String()).
@@ -3458,6 +3505,10 @@ func (s *Service) triggerTaskCallbackEvent(event *db.RunEvent) {
 	if s.taskCallbackSvc == nil || event == nil {
 		return
 	}
+	if isLegacyTerminalEventType(event.EventType) &&
+		!s.runUsesLegacyTerminalPipeline(context.Background(), event.RunID) {
+		return
+	}
 	go func(e db.RunEvent) {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
@@ -3479,6 +3530,9 @@ func (s *Service) triggerDelivery(runID uuid.UUID) {
 	go func() {
 		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		if !s.runUsesLegacyTerminalPipeline(bgCtx, runID) {
+			return
+		}
 		run, err := s.queries.GetRunByID(bgCtx, runID)
 		if err != nil {
 			log.Error().Err(err).Str("run_id", runID.String()).
@@ -3831,6 +3885,9 @@ func createRunMessage(ctx context.Context, q *db.Queries, runID uuid.UUID, event
 }
 
 func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) *db.RunEvent {
+	if isLegacyTerminalEventType(eventType) && !s.runUsesLegacyTerminalPipeline(ctx, runID) {
+		return nil
+	}
 	event, err := createRunEventRecord(ctx, s.queries, runID, nil, eventType, payload)
 	if err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Str("event_type", eventType).
@@ -3839,6 +3896,31 @@ func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID,
 	}
 	s.triggerTaskCallbackEvent(&event)
 	return &event
+}
+
+func isLegacyTerminalEventType(eventType string) bool {
+	switch eventType {
+	case "run.completed", "run.failed", "run.canceled":
+		return true
+	default:
+		return false
+	}
+}
+
+// Runtime v2 terminal state, accounting, terminal Events and outbound Effects
+// are committed together by ResultFinalizer. The old best-effort pipeline is
+// allowed only for rows migrated from before runtime v2.
+func (s *Service) runUsesLegacyTerminalPipeline(ctx context.Context, runID uuid.UUID) bool {
+	if s == nil || s.queries == nil || runID == uuid.Nil {
+		return false
+	}
+	contractID, err := s.queries.GetRunRuntimeContractID(ctx, runID)
+	if err != nil {
+		log.Warn().Err(err).Str("run_id", runID.String()).
+			Msg("runtime: cannot determine terminal pipeline; suppressing legacy side effects")
+		return false
+	}
+	return contractID == legacyRuntimeContractID
 }
 
 func (s *Service) touchRuntimeTokenAsync(ctx context.Context, tokenID uuid.UUID) {
@@ -3869,6 +3951,9 @@ func (s *Service) shouldTouchRuntimeToken(tokenID uuid.UUID, now time.Time) bool
 }
 
 func (s *Service) recordRunSuccessStatsBestEffort(ctx context.Context, runID, agentID uuid.UUID, revenue int32) {
+	if !s.runUsesLegacyTerminalPipeline(ctx, runID) {
+		return
+	}
 	statsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeBestEffortWriteTimeout)
 	defer cancel()
 	if err := pgx.BeginFunc(statsCtx, s.pool, func(tx pgx.Tx) error {

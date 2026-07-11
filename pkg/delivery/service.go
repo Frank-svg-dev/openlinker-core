@@ -89,10 +89,23 @@ func responseStatusPtr(statusCode int) *int32 {
 // HMAC 签名（webhook）/ Slack incoming webhook（slack）。
 type Service struct {
 	queries        deliveryQueries
+	effectQueries  deliveryEffectQueries
 	txRunner       deliveryTxRunner
 	pool           *pgxpool.Pool
 	httpClient     *http.Client
 	allowLocalHTTP bool
+}
+
+type deliveryEffectQueries interface {
+	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
+	GetAgentByID(context.Context, uuid.UUID) (db.Agent, error)
+	GetDeliveryTargetByID(context.Context, uuid.UUID) (db.DeliveryTarget, error)
+	CreateRunEffectDelivery(context.Context, db.CreateRunEffectDeliveryParams) (db.RunDelivery, error)
+	GetRunDeliveryByID(context.Context, uuid.UUID) (db.GetRunDeliveryRow, error)
+	MarkRunEffectDeliverySuccess(context.Context, db.MarkRunEffectDeliverySuccessParams) (int64, error)
+	MarkRunEffectDeliveryRetry(context.Context, db.MarkRunEffectDeliveryRetryParams) (int64, error)
+	MarkRunEffectDeliveryFailed(context.Context, db.MarkRunEffectDeliveryFailedParams) (int64, error)
+	ResetRunEffectDelivery(context.Context, uuid.UUID) (int64, error)
 }
 
 type deliveryTxRunner interface {
@@ -137,8 +150,10 @@ func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
 	if len(cfg) > 0 && cfg[0] != nil {
 		allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
 	}
+	queries := db.New(pool)
 	s := &Service{
-		queries:        db.New(pool),
+		queries:        queries,
+		effectQueries:  queries,
 		pool:           pool,
 		httpClient:     endpointurl.NewHTTPClient(httpTimeout, allowLocalHTTP),
 		allowLocalHTTP: allowLocalHTTP,
@@ -643,7 +658,7 @@ func (s *Service) deliverWebhook(
 
 // deliverSlack 把 OpenLinker 投递 payload 重新打包成 Slack 文本，POST 到 incoming webhook。
 func (s *Service) deliverSlack(
-	ctx context.Context, url string, _ uuid.UUID, payload []byte,
+	ctx context.Context, url string, deliveryID uuid.UUID, payload []byte,
 ) (int, string, error) {
 	var p DeliveryPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -660,6 +675,7 @@ func (s *Service) deliverSlack(
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("X-OpenLinker-Delivery", deliveryID.String())
 	return doRequest(s.httpClient, req)
 }
 

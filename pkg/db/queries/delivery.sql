@@ -69,7 +69,29 @@ INSERT INTO run_deliveries (
 )
 RETURNING id, run_id, target_id, user_id, target_type, target_url, payload,
           status, response_status, response_body, error_message,
-          attempt_count, next_retry_at, created_at, updated_at;
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id;
+
+-- name: CreateRunEffectDelivery :one
+INSERT INTO run_deliveries (
+    id, run_id, target_id, user_id, target_type, target_url, payload,
+    status, attempt_count, next_retry_at, effect_outbox_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, 'pending', 0, NULL, $1
+)
+ON CONFLICT (id) DO UPDATE
+SET id = run_deliveries.id
+WHERE run_deliveries.effect_outbox_id = EXCLUDED.effect_outbox_id
+  AND run_deliveries.run_id = EXCLUDED.run_id
+  AND run_deliveries.target_id IS NOT DISTINCT FROM EXCLUDED.target_id
+  AND run_deliveries.user_id = EXCLUDED.user_id
+  AND run_deliveries.target_type = EXCLUDED.target_type
+  AND run_deliveries.target_url = EXCLUDED.target_url
+  AND run_deliveries.payload = EXCLUDED.payload
+RETURNING id, run_id, target_id, user_id, target_type, target_url, payload,
+          status, response_status, response_body, error_message,
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id;
 
 -- name: GetRunDeliveryByID :one
 -- worker 重试时按 id 取记录，附带 target.secret + 当前 config。
@@ -77,6 +99,7 @@ RETURNING id, run_id, target_id, user_id, target_type, target_url, payload,
 SELECT d.id, d.run_id, d.target_id, d.user_id, d.target_type, d.target_url, d.payload,
        d.status, d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        t.secret AS target_secret,
        t.config AS target_config
 FROM run_deliveries d
@@ -92,7 +115,8 @@ SET status = 'success',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
 
 -- name: MarkRunDeliveryFailedRetry :exec
 UPDATE run_deliveries
@@ -103,7 +127,8 @@ SET status = 'pending',
     attempt_count = attempt_count + 1,
     next_retry_at = $5,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
 
 -- name: MarkRunDeliveryFailedFinal :exec
 UPDATE run_deliveries
@@ -114,14 +139,101 @@ SET status = 'failed',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1;
+WHERE id = $1
+  AND effect_outbox_id IS NULL;
+
+-- name: MarkRunEffectDeliverySuccess :execrows
+UPDATE run_deliveries
+SET status = 'success',
+    response_status = $2,
+    response_body = $3,
+    error_message = NULL,
+    attempt_count = GREATEST(attempt_count, $4),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $4
+  AND EXISTS (
+      SELECT 1
+      FROM run_effect_outbox effect
+      WHERE effect.id = $1
+        AND effect.status = 'processing'
+        AND effect.lease_owner = $5
+        AND effect.attempt_count = $4
+  );
+
+-- name: MarkRunEffectDeliveryRetry :execrows
+UPDATE run_deliveries
+SET response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1
+      FROM run_effect_outbox effect
+      WHERE effect.id = $1
+        AND effect.status = 'processing'
+        AND effect.lease_owner = $6
+        AND effect.attempt_count = $5
+  );
+
+-- name: MarkRunEffectDeliveryFailed :execrows
+UPDATE run_deliveries
+SET status = 'failed',
+    response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1
+      FROM run_effect_outbox effect
+      WHERE effect.id = $1
+        AND effect.status = 'processing'
+        AND effect.lease_owner = $6
+        AND effect.attempt_count = $5
+  );
+
+-- name: ResetRunEffectDelivery :execrows
+UPDATE run_deliveries
+SET status = 'pending',
+    response_status = NULL,
+    response_body = NULL,
+    error_message = NULL,
+    attempt_count = 0,
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'failed'
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'dead_letter'
+  );
 
 -- name: ListPendingRunDeliveries :many
 SELECT id, run_id, target_id, user_id, target_type, target_url, payload,
        status, response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM run_deliveries
-WHERE status = 'pending' AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()
+WHERE status = 'pending'
+  AND effect_outbox_id IS NULL
+  AND next_retry_at IS NOT NULL
+  AND next_retry_at <= NOW()
 ORDER BY next_retry_at ASC
 LIMIT 50;
 
@@ -130,7 +242,8 @@ LIMIT 50;
 -- 业务层应先校验 run.user_id == 当前用户。
 SELECT id, run_id, target_id, user_id, target_type, target_url, payload,
        status, response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM run_deliveries
 WHERE run_id = $1
 ORDER BY created_at DESC;
@@ -140,7 +253,8 @@ ORDER BY created_at DESC;
 -- 可选按 agent/run/status 过滤，给独立历史页使用。
 SELECT d.id, d.run_id, d.target_id, d.user_id, d.target_type, d.target_url, d.payload,
        d.status, d.response_status, d.response_body, d.error_message,
-       d.attempt_count, d.next_retry_at, d.created_at, d.updated_at
+       d.attempt_count, d.next_retry_at, d.created_at, d.updated_at,
+       d.effect_outbox_id
 FROM run_deliveries d
 JOIN runs r ON r.id = d.run_id
 WHERE d.user_id = $1
@@ -156,4 +270,7 @@ UPDATE run_deliveries
 SET status = 'pending',
     next_retry_at = NOW(),
     updated_at = NOW()
-WHERE id = $1 AND user_id = $2 AND status = 'failed';
+WHERE id = $1
+  AND user_id = $2
+  AND status = 'failed'
+  AND effect_outbox_id IS NULL;

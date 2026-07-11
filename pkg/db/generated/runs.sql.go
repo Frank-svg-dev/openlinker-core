@@ -224,6 +224,18 @@ func (q *Queries) GetRunByID(ctx context.Context, id uuid.UUID) (Run, error) {
 	return r, err
 }
 
+const getRunRuntimeContractID = `-- name: GetRunRuntimeContractID :one
+SELECT runtime_contract_id
+FROM runs
+WHERE id = $1`
+
+func (q *Queries) GetRunRuntimeContractID(ctx context.Context, id uuid.UUID) (string, error) {
+	row := q.db.QueryRow(ctx, getRunRuntimeContractID, id)
+	var runtimeContractID string
+	err := row.Scan(&runtimeContractID)
+	return runtimeContractID, err
+}
+
 const claimRuntimePullRun = `-- name: ClaimRuntimePullRun :one
 WITH candidate AS (
     SELECT r.id

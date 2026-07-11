@@ -82,6 +82,11 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
 FROM runs r
 WHERE r.id = $1;
 
+-- name: GetRunRuntimeContractID :one
+SELECT runtime_contract_id
+FROM runs
+WHERE id = $1;
+
 -- name: ClaimRuntimePullRun :one
 -- Agent 通过绑定自身的访问令牌主动拉取自己名下队列型 runtime 模式的 pending run。
 -- 热路径只领取未 claimed 的 run，确保可使用 idx_runs_runtime_pull_claim。
@@ -434,6 +439,45 @@ RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
           run_events.client_event_seq, run_events.payload_fingerprint,
           run_events.attempt_id, run_events.attempt_no,
           run_events.fencing_token;
+
+-- name: CreateRunEffectParentEvent :one
+-- Caller holds the parent Run row lock and Event advisory lock. Effect ID is
+-- the durable business identity; a retry may return the original Event only
+-- when every immutable field still matches.
+WITH target_run AS (
+    SELECT r.id
+    FROM runs r
+    WHERE r.id = $2::uuid
+),
+next_sequence AS (
+    SELECT COALESCE(MAX(e.sequence), 0)::int + 1 AS sequence
+    FROM run_events e
+    JOIN target_run r ON r.id = e.run_id
+)
+INSERT INTO run_events (
+    id, run_id, parent_run_id, sequence, event_type, payload
+)
+SELECT
+    $1, target_run.id, NULL, next_sequence.sequence, 'run.child.completed', $3
+FROM target_run, next_sequence
+ON CONFLICT (id) DO NOTHING
+RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
+          run_events.sequence, run_events.event_type, run_events.payload,
+          run_events.created_at, run_events.client_event_id,
+          run_events.client_event_seq, run_events.payload_fingerprint,
+          run_events.attempt_id, run_events.attempt_no,
+          run_events.fencing_token;
+
+-- name: GetMatchingRunEffectParentEvent :one
+SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at,
+       client_event_id, client_event_seq, payload_fingerprint,
+       attempt_id, attempt_no, fencing_token
+FROM run_events
+WHERE id = $1
+  AND run_id = $2
+  AND parent_run_id IS NULL
+  AND event_type = 'run.child.completed'
+  AND payload = $3;
 
 -- name: GetRunEventByClientID :one
 SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload,

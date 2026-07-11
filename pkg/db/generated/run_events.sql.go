@@ -5,6 +5,7 @@ package db
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
@@ -193,6 +194,96 @@ func createRunEventInTx(ctx context.Context, tx pgx.Tx, arg CreateRunEventParams
 	var e RunEvent
 	err := scanRunEvent(row, &e)
 	return e, err
+}
+
+const createRunEffectParentEvent = `-- name: CreateRunEffectParentEvent :one
+WITH target_run AS (
+    SELECT r.id
+    FROM runs r
+    WHERE r.id = $2::uuid
+),
+next_sequence AS (
+    SELECT COALESCE(MAX(e.sequence), 0)::int + 1 AS sequence
+    FROM run_events e
+    JOIN target_run r ON r.id = e.run_id
+)
+INSERT INTO run_events (
+    id, run_id, parent_run_id, sequence, event_type, payload
+)
+SELECT
+    $1, target_run.id, NULL, next_sequence.sequence, 'run.child.completed', $3
+FROM target_run, next_sequence
+ON CONFLICT (id) DO NOTHING
+RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
+          run_events.sequence, run_events.event_type, run_events.payload,
+          run_events.created_at, run_events.client_event_id,
+          run_events.client_event_seq, run_events.payload_fingerprint,
+          run_events.attempt_id, run_events.attempt_no,
+          run_events.fencing_token`
+
+const getMatchingRunEffectParentEvent = `-- name: GetMatchingRunEffectParentEvent :one
+SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at,
+       client_event_id, client_event_seq, payload_fingerprint,
+       attempt_id, attempt_no, fencing_token
+FROM run_events
+WHERE id = $1
+  AND run_id = $2
+  AND parent_run_id IS NULL
+  AND event_type = 'run.child.completed'
+  AND payload = $3`
+
+type CreateRunEffectParentEventParams struct {
+	ID          uuid.UUID `db:"id" json:"id"`
+	ParentRunID uuid.UUID `db:"parent_run_id" json:"parent_run_id"`
+	Payload     []byte    `db:"payload" json:"payload"`
+}
+
+func (q *Queries) CreateRunEffectParentEvent(ctx context.Context, arg CreateRunEffectParentEventParams) (RunEvent, error) {
+	if tx, ok := q.db.(pgx.Tx); ok {
+		return createRunEffectParentEventInTx(ctx, tx, arg)
+	}
+	if beginner, ok := q.db.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	}); ok {
+		tx, err := beginner.Begin(ctx)
+		if err != nil {
+			return RunEvent{}, err
+		}
+		defer func() { _ = tx.Rollback(ctx) }()
+		event, err := createRunEffectParentEventInTx(ctx, tx, arg)
+		if err != nil {
+			return RunEvent{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return RunEvent{}, err
+		}
+		return event, nil
+	}
+	return RunEvent{}, pgx.ErrTxClosed
+}
+
+func createRunEffectParentEventInTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	arg CreateRunEffectParentEventParams,
+) (RunEvent, error) {
+	var lockedRunID uuid.UUID
+	if err := tx.QueryRow(ctx, lockRunForSystemEventAppend, arg.ParentRunID).Scan(&lockedRunID); err != nil {
+		return RunEvent{}, err
+	}
+	if _, err := tx.Exec(ctx, lockRunEventSequence, arg.ParentRunID); err != nil {
+		return RunEvent{}, err
+	}
+	var event RunEvent
+	err := scanRunEvent(tx.QueryRow(
+		ctx, createRunEffectParentEvent, arg.ID, arg.ParentRunID, arg.Payload,
+	), &event)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = scanRunEvent(tx.QueryRow(
+			ctx, getMatchingRunEffectParentEvent, arg.ID, arg.ParentRunID, arg.Payload,
+		), &event)
+	}
+	return event, err
 }
 
 const getRunEventByClientID = `-- name: GetRunEventByClientID :one

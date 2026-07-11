@@ -48,6 +48,7 @@ func scanRunDelivery(row interface {
 		&d.NextRetryAt,
 		&d.CreatedAt,
 		&d.UpdatedAt,
+		&d.EffectOutboxID,
 	)
 }
 
@@ -215,7 +216,8 @@ INSERT INTO run_deliveries (
 )
 RETURNING id, run_id, target_id, user_id, target_type, target_url, payload,
           status, response_status, response_body, error_message,
-          attempt_count, next_retry_at, created_at, updated_at`
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id`
 
 type CreateRunDeliveryParams struct {
 	RunID      uuid.UUID `db:"run_id" json:"run_id"`
@@ -235,10 +237,51 @@ func (q *Queries) CreateRunDelivery(ctx context.Context, arg CreateRunDeliveryPa
 	return d, err
 }
 
+const createRunEffectDelivery = `-- name: CreateRunEffectDelivery :one
+INSERT INTO run_deliveries (
+    id, run_id, target_id, user_id, target_type, target_url, payload,
+    status, attempt_count, next_retry_at, effect_outbox_id
+) VALUES (
+    $1, $2, $3, $4, $5, $6, $7, 'pending', 0, NULL, $1
+)
+ON CONFLICT (id) DO UPDATE
+SET id = run_deliveries.id
+WHERE run_deliveries.effect_outbox_id = EXCLUDED.effect_outbox_id
+  AND run_deliveries.run_id = EXCLUDED.run_id
+  AND run_deliveries.target_id IS NOT DISTINCT FROM EXCLUDED.target_id
+  AND run_deliveries.user_id = EXCLUDED.user_id
+  AND run_deliveries.target_type = EXCLUDED.target_type
+  AND run_deliveries.target_url = EXCLUDED.target_url
+  AND run_deliveries.payload = EXCLUDED.payload
+RETURNING id, run_id, target_id, user_id, target_type, target_url, payload,
+          status, response_status, response_body, error_message,
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id`
+
+type CreateRunEffectDeliveryParams struct {
+	ID         uuid.UUID `db:"id" json:"id"`
+	RunID      uuid.UUID `db:"run_id" json:"run_id"`
+	TargetID   uuid.UUID `db:"target_id" json:"target_id"`
+	UserID     uuid.UUID `db:"user_id" json:"user_id"`
+	TargetType string    `db:"target_type" json:"target_type"`
+	TargetURL  string    `db:"target_url" json:"target_url"`
+	Payload    []byte    `db:"payload" json:"payload"`
+}
+
+func (q *Queries) CreateRunEffectDelivery(ctx context.Context, arg CreateRunEffectDeliveryParams) (RunDelivery, error) {
+	row := q.db.QueryRow(ctx, createRunEffectDelivery,
+		arg.ID, arg.RunID, arg.TargetID, arg.UserID, arg.TargetType, arg.TargetURL, arg.Payload,
+	)
+	var d RunDelivery
+	err := scanRunDelivery(row, &d)
+	return d, err
+}
+
 const getRunDeliveryByID = `-- name: GetRunDeliveryByID :one
 SELECT d.id, d.run_id, d.target_id, d.user_id, d.target_type, d.target_url, d.payload,
        d.status, d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        t.secret AS target_secret,
        t.config AS target_config
 FROM run_deliveries d
@@ -273,6 +316,7 @@ func (q *Queries) GetRunDeliveryByID(ctx context.Context, id uuid.UUID) (GetRunD
 		&r.NextRetryAt,
 		&r.CreatedAt,
 		&r.UpdatedAt,
+		&r.EffectOutboxID,
 		&r.TargetSecret,
 		&r.TargetConfig,
 	)
@@ -288,7 +332,8 @@ SET status = 'success',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 type MarkRunDeliverySuccessParams struct {
 	ID             uuid.UUID `db:"id" json:"id"`
@@ -310,7 +355,8 @@ SET status = 'pending',
     attempt_count = attempt_count + 1,
     next_retry_at = $5,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 type MarkRunDeliveryFailedRetryParams struct {
 	ID             uuid.UUID `db:"id" json:"id"`
@@ -352,12 +398,141 @@ func (q *Queries) MarkRunDeliveryFailedFinal(ctx context.Context, arg MarkRunDel
 	return err
 }
 
+const markRunEffectDeliverySuccess = `-- name: MarkRunEffectDeliverySuccess :execrows
+UPDATE run_deliveries
+SET status = 'success',
+    response_status = $2,
+    response_body = $3,
+    error_message = NULL,
+    attempt_count = GREATEST(attempt_count, $4),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $4
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'processing'
+        AND effect.lease_owner = $5 AND effect.attempt_count = $4
+  )`
+
+type MarkRunEffectDeliverySuccessParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkRunEffectDeliverySuccess(ctx context.Context, arg MarkRunEffectDeliverySuccessParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markRunEffectDeliverySuccess,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const markRunEffectDeliveryRetry = `-- name: MarkRunEffectDeliveryRetry :execrows
+UPDATE run_deliveries
+SET response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'processing'
+        AND effect.lease_owner = $6 AND effect.attempt_count = $5
+  )`
+
+type MarkRunEffectDeliveryRetryParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkRunEffectDeliveryRetry(ctx context.Context, arg MarkRunEffectDeliveryRetryParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markRunEffectDeliveryRetry,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const markRunEffectDeliveryFailed = `-- name: MarkRunEffectDeliveryFailed :execrows
+UPDATE run_deliveries
+SET status = 'failed',
+    response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'processing'
+        AND effect.lease_owner = $6 AND effect.attempt_count = $5
+  )`
+
+type MarkRunEffectDeliveryFailedParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkRunEffectDeliveryFailed(ctx context.Context, arg MarkRunEffectDeliveryFailedParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markRunEffectDeliveryFailed,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const resetRunEffectDelivery = `-- name: ResetRunEffectDelivery :execrows
+UPDATE run_deliveries
+SET status = 'pending',
+    response_status = NULL,
+    response_body = NULL,
+    error_message = NULL,
+    attempt_count = 0,
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'failed'
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'dead_letter'
+  )`
+
+func (q *Queries) ResetRunEffectDelivery(ctx context.Context, id uuid.UUID) (int64, error) {
+	tag, err := q.db.Exec(ctx, resetRunEffectDelivery, id)
+	return tag.RowsAffected(), err
+}
+
 const listPendingRunDeliveries = `-- name: ListPendingRunDeliveries :many
 SELECT id, run_id, target_id, user_id, target_type, target_url, payload,
        status, response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM run_deliveries
-WHERE status = 'pending' AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()
+WHERE status = 'pending'
+  AND effect_outbox_id IS NULL
+  AND next_retry_at IS NOT NULL
+  AND next_retry_at <= NOW()
 ORDER BY next_retry_at ASC
 LIMIT 50`
 
@@ -384,7 +559,8 @@ func (q *Queries) ListPendingRunDeliveries(ctx context.Context) ([]RunDelivery, 
 const listRunDeliveriesByRun = `-- name: ListRunDeliveriesByRun :many
 SELECT id, run_id, target_id, user_id, target_type, target_url, payload,
        status, response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM run_deliveries
 WHERE run_id = $1
 ORDER BY created_at DESC`
@@ -412,7 +588,8 @@ func (q *Queries) ListRunDeliveriesByRun(ctx context.Context, runID uuid.UUID) (
 const listRunDeliveriesByUser = `-- name: ListRunDeliveriesByUser :many
 SELECT d.id, d.run_id, d.target_id, d.user_id, d.target_type, d.target_url, d.payload,
        d.status, d.response_status, d.response_body, d.error_message,
-       d.attempt_count, d.next_retry_at, d.created_at, d.updated_at
+       d.attempt_count, d.next_retry_at, d.created_at, d.updated_at,
+       d.effect_outbox_id
 FROM run_deliveries d
 JOIN runs r ON r.id = d.run_id
 WHERE d.user_id = $1
@@ -465,7 +642,10 @@ UPDATE run_deliveries
 SET status = 'pending',
     next_retry_at = NOW(),
     updated_at = NOW()
-WHERE id = $1 AND user_id = $2 AND status = 'failed'`
+WHERE id = $1
+  AND user_id = $2
+  AND status = 'failed'
+  AND effect_outbox_id IS NULL`
 
 type ResetRunDeliveryForRetryParams struct {
 	ID     uuid.UUID `db:"id" json:"id"`

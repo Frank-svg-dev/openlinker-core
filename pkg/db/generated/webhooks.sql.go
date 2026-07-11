@@ -31,6 +31,7 @@ func scanWebhookDelivery(row interface {
 		&d.NextRetryAt,
 		&d.CreatedAt,
 		&d.UpdatedAt,
+		&d.EffectOutboxID,
 	)
 }
 
@@ -117,7 +118,8 @@ INSERT INTO webhook_deliveries (
 )
 RETURNING id, agent_id, run_id, url, payload, status,
           response_status, response_body, error_message,
-          attempt_count, next_retry_at, created_at, updated_at`
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id`
 
 // CreateWebhookDeliveryParams 入参。
 type CreateWebhookDeliveryParams struct {
@@ -140,10 +142,51 @@ func (q *Queries) CreateWebhookDelivery(ctx context.Context, arg CreateWebhookDe
 	return d, err
 }
 
+const createWebhookEffectDelivery = `-- name: CreateWebhookEffectDelivery :one
+INSERT INTO webhook_deliveries (
+    id, agent_id, run_id, url, payload, status, attempt_count,
+    next_retry_at, effect_outbox_id
+) VALUES (
+    $1, $2, $3, $4, $5, 'pending', 0, NULL, $1
+)
+ON CONFLICT (id) DO UPDATE
+SET id = webhook_deliveries.id
+WHERE webhook_deliveries.effect_outbox_id = EXCLUDED.effect_outbox_id
+  AND webhook_deliveries.agent_id = EXCLUDED.agent_id
+  AND webhook_deliveries.run_id = EXCLUDED.run_id
+  AND webhook_deliveries.url = EXCLUDED.url
+  AND webhook_deliveries.payload = EXCLUDED.payload
+RETURNING id, agent_id, run_id, url, payload, status,
+          response_status, response_body, error_message,
+          attempt_count, next_retry_at, created_at, updated_at,
+          effect_outbox_id`
+
+type CreateWebhookEffectDeliveryParams struct {
+	ID      uuid.UUID `db:"id" json:"id"`
+	AgentID uuid.UUID `db:"agent_id" json:"agent_id"`
+	RunID   uuid.UUID `db:"run_id" json:"run_id"`
+	URL     string    `db:"url" json:"url"`
+	Payload []byte    `db:"payload" json:"payload"`
+}
+
+func (q *Queries) CreateWebhookEffectDelivery(ctx context.Context, arg CreateWebhookEffectDeliveryParams) (WebhookDelivery, error) {
+	row := q.db.QueryRow(ctx, createWebhookEffectDelivery,
+		arg.ID,
+		arg.AgentID,
+		arg.RunID,
+		arg.URL,
+		arg.Payload,
+	)
+	var d WebhookDelivery
+	err := scanWebhookDelivery(row, &d)
+	return d, err
+}
+
 const getWebhookDeliveryByID = `-- name: GetWebhookDeliveryByID :one
 SELECT d.id, d.agent_id, d.run_id, d.url, d.payload, d.status,
        d.response_status, d.response_body, d.error_message,
        d.attempt_count, d.next_retry_at, d.created_at, d.updated_at,
+       d.effect_outbox_id,
        a.webhook_secret AS webhook_secret
 FROM webhook_deliveries d
 JOIN agents a ON a.id = d.agent_id
@@ -175,6 +218,7 @@ func (q *Queries) GetWebhookDeliveryByID(ctx context.Context, id uuid.UUID) (Get
 		&r.NextRetryAt,
 		&r.CreatedAt,
 		&r.UpdatedAt,
+		&r.EffectOutboxID,
 		&r.WebhookSecret,
 	)
 	return r, err
@@ -189,7 +233,8 @@ SET status = 'success',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 // MarkDeliverySuccessParams 入参。
 type MarkDeliverySuccessParams struct {
@@ -213,7 +258,8 @@ SET status = 'pending',
     attempt_count = attempt_count + 1,
     next_retry_at = $5,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 // MarkDeliveryFailedRetryParams 入参。
 type MarkDeliveryFailedRetryParams struct {
@@ -245,7 +291,8 @@ SET status = 'failed',
     attempt_count = attempt_count + 1,
     next_retry_at = NULL,
     updated_at = NOW()
-WHERE id = $1`
+WHERE id = $1
+  AND effect_outbox_id IS NULL`
 
 // MarkDeliveryFailedFinalParams 入参。
 type MarkDeliveryFailedFinalParams struct {
@@ -266,12 +313,141 @@ func (q *Queries) MarkDeliveryFailedFinal(ctx context.Context, arg MarkDeliveryF
 	return err
 }
 
+const markWebhookEffectDeliverySuccess = `-- name: MarkWebhookEffectDeliverySuccess :execrows
+UPDATE webhook_deliveries
+SET status = 'success',
+    response_status = $2,
+    response_body = $3,
+    error_message = NULL,
+    attempt_count = GREATEST(attempt_count, $4),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $4
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'processing'
+        AND effect.lease_owner = $5 AND effect.attempt_count = $4
+  )`
+
+type MarkWebhookEffectDeliverySuccessParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkWebhookEffectDeliverySuccess(ctx context.Context, arg MarkWebhookEffectDeliverySuccessParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markWebhookEffectDeliverySuccess,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const markWebhookEffectDeliveryRetry = `-- name: MarkWebhookEffectDeliveryRetry :execrows
+UPDATE webhook_deliveries
+SET response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'processing'
+        AND effect.lease_owner = $6 AND effect.attempt_count = $5
+  )`
+
+type MarkWebhookEffectDeliveryRetryParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkWebhookEffectDeliveryRetry(ctx context.Context, arg MarkWebhookEffectDeliveryRetryParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markWebhookEffectDeliveryRetry,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const markWebhookEffectDeliveryFailed = `-- name: MarkWebhookEffectDeliveryFailed :execrows
+UPDATE webhook_deliveries
+SET status = 'failed',
+    response_status = $2,
+    response_body = $3,
+    error_message = $4,
+    attempt_count = GREATEST(attempt_count, $5),
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'pending'
+  AND attempt_count < $5
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'processing'
+        AND effect.lease_owner = $6 AND effect.attempt_count = $5
+  )`
+
+type MarkWebhookEffectDeliveryFailedParams struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	ResponseStatus *int32    `db:"response_status" json:"response_status"`
+	ResponseBody   *string   `db:"response_body" json:"response_body"`
+	ErrorMessage   *string   `db:"error_message" json:"error_message"`
+	AttemptCount   int32     `db:"attempt_count" json:"attempt_count"`
+	LeaseOwner     uuid.UUID `db:"lease_owner" json:"lease_owner"`
+}
+
+func (q *Queries) MarkWebhookEffectDeliveryFailed(ctx context.Context, arg MarkWebhookEffectDeliveryFailedParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, markWebhookEffectDeliveryFailed,
+		arg.ID, arg.ResponseStatus, arg.ResponseBody, arg.ErrorMessage, arg.AttemptCount, arg.LeaseOwner,
+	)
+	return tag.RowsAffected(), err
+}
+
+const resetWebhookEffectDelivery = `-- name: ResetWebhookEffectDelivery :execrows
+UPDATE webhook_deliveries
+SET status = 'pending',
+    response_status = NULL,
+    response_body = NULL,
+    error_message = NULL,
+    attempt_count = 0,
+    next_retry_at = NULL,
+    updated_at = clock_timestamp()
+WHERE id = $1
+  AND effect_outbox_id = $1
+  AND status = 'failed'
+  AND EXISTS (
+      SELECT 1 FROM run_effect_outbox effect
+      WHERE effect.id = $1 AND effect.status = 'dead_letter'
+  )`
+
+func (q *Queries) ResetWebhookEffectDelivery(ctx context.Context, id uuid.UUID) (int64, error) {
+	tag, err := q.db.Exec(ctx, resetWebhookEffectDelivery, id)
+	return tag.RowsAffected(), err
+}
+
 const listPendingDeliveries = `-- name: ListPendingDeliveries :many
 SELECT id, agent_id, run_id, url, payload, status,
        response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM webhook_deliveries
-WHERE status = 'pending' AND next_retry_at IS NOT NULL AND next_retry_at <= NOW()
+WHERE status = 'pending'
+  AND effect_outbox_id IS NULL
+  AND next_retry_at IS NOT NULL
+  AND next_retry_at <= NOW()
 ORDER BY next_retry_at ASC
 LIMIT 50`
 
@@ -299,7 +475,8 @@ func (q *Queries) ListPendingDeliveries(ctx context.Context) ([]WebhookDelivery,
 const listDeliveriesByAgent = `-- name: ListDeliveriesByAgent :many
 SELECT id, agent_id, run_id, url, payload, status,
        response_status, response_body, error_message,
-       attempt_count, next_retry_at, created_at, updated_at
+       attempt_count, next_retry_at, created_at, updated_at,
+       effect_outbox_id
 FROM webhook_deliveries
 WHERE agent_id = $1
 ORDER BY created_at DESC

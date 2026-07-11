@@ -100,11 +100,32 @@ func responseStatusPtr(statusCode int) *int32 {
 //   - 签名 HMAC-SHA256，header X-OpenLinker-Signature: sha256=<hex>
 type Service struct {
 	queries                webhookQueries
+	effectQueries          webhookEffectQueries
 	pool                   *pgxpool.Pool
 	httpClient             *http.Client
 	allowLocalHTTP         bool
 	taskCallbackRunCacheMu sync.Mutex
 	taskCallbackRunCache   map[uuid.UUID]taskCallbackRunCacheEntry
+}
+
+type webhookEffectQueries interface {
+	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
+	GetAgentWebhookConfig(context.Context, uuid.UUID) (db.GetAgentWebhookConfigRow, error)
+	CreateWebhookEffectDelivery(context.Context, db.CreateWebhookEffectDeliveryParams) (db.WebhookDelivery, error)
+	GetWebhookDeliveryByID(context.Context, uuid.UUID) (db.GetWebhookDeliveryRow, error)
+	MarkWebhookEffectDeliverySuccess(context.Context, db.MarkWebhookEffectDeliverySuccessParams) (int64, error)
+	MarkWebhookEffectDeliveryRetry(context.Context, db.MarkWebhookEffectDeliveryRetryParams) (int64, error)
+	MarkWebhookEffectDeliveryFailed(context.Context, db.MarkWebhookEffectDeliveryFailedParams) (int64, error)
+	ResetWebhookEffectDelivery(context.Context, uuid.UUID) (int64, error)
+
+	GetTaskCallbackSubscriptionByID(context.Context, uuid.UUID) (db.TaskCallbackSubscription, error)
+	GetTaskCallbackEffectEvent(context.Context, db.GetTaskCallbackEffectEventParams) (db.RunEvent, error)
+	CreateTaskCallbackEffectDelivery(context.Context, db.CreateTaskCallbackEffectDeliveryParams) (db.TaskCallbackDelivery, error)
+	GetTaskCallbackDeliveryByID(context.Context, uuid.UUID) (db.GetTaskCallbackDeliveryByIDRow, error)
+	MarkTaskCallbackEffectDeliverySuccess(context.Context, db.MarkTaskCallbackEffectDeliverySuccessParams) (int64, error)
+	MarkTaskCallbackEffectDeliveryRetry(context.Context, db.MarkTaskCallbackEffectDeliveryRetryParams) (int64, error)
+	MarkTaskCallbackEffectDeliveryFailed(context.Context, db.MarkTaskCallbackEffectDeliveryFailedParams) (int64, error)
+	ResetTaskCallbackEffectDelivery(context.Context, uuid.UUID) (int64, error)
 }
 
 type taskCallbackRunCacheEntry struct {
@@ -148,8 +169,10 @@ func NewService(pool *pgxpool.Pool, cfg ...*config.Config) *Service {
 	if len(cfg) > 0 && cfg[0] != nil {
 		allowLocalHTTP = cfg[0].AllowLocalHTTPEndpoints
 	}
+	queries := db.New(pool)
 	s := &Service{
-		queries:        db.New(pool),
+		queries:        queries,
+		effectQueries:  queries,
 		pool:           pool,
 		httpClient:     endpointurl.NewHTTPClient(httpTimeout, allowLocalHTTP),
 		allowLocalHTTP: allowLocalHTTP,
@@ -690,6 +713,34 @@ func (s *Service) EnqueueRunEvent(ctx context.Context, event db.RunEvent) error 
 		}
 	}
 	return nil
+}
+
+// EnqueueRunEventDurable bypasses the negative subscription cache and returns
+// every materialization error to its caller. The parent-completion Effect uses
+// this path so it cannot be marked succeeded until all matching callback
+// delivery rows exist durably.
+func (s *Service) EnqueueRunEventDurable(ctx context.Context, event db.RunEvent) error {
+	subs, err := s.queries.ListActiveTaskCallbackSubscriptionsForEvent(ctx, db.ListActiveTaskCallbackSubscriptionsForEventParams{
+		RunID:     event.RunID,
+		EventType: event.EventType,
+	})
+	if err != nil {
+		return fmt.Errorf("list task callback subscriptions: %w", err)
+	}
+	if len(subs) == 0 {
+		s.rememberTaskCallbackRun(event.RunID, false)
+		return nil
+	}
+	s.rememberTaskCallbackRun(event.RunID, true)
+	var enqueueErr error
+	for _, sub := range subs {
+		if err := s.enqueueTaskCallbackDelivery(ctx, sub, event); err != nil {
+			enqueueErr = errors.Join(enqueueErr, fmt.Errorf(
+				"subscription %s event %s: %w", sub.ID, event.ID, err,
+			))
+		}
+	}
+	return enqueueErr
 }
 
 func (s *Service) taskCallbackRunMayHaveSubscription(runID uuid.UUID, now time.Time) bool {

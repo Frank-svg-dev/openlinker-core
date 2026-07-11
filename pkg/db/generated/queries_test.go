@@ -4247,6 +4247,7 @@ func runDeliveryRow(id, runID, targetID, userID uuid.UUID, now time.Time, status
 		nextRetry,
 		now,
 		now.Add(time.Minute),
+		(*uuid.UUID)(nil),
 	}
 }
 
@@ -4265,6 +4266,7 @@ func webhookDeliveryRow(id, agentID, runID uuid.UUID, now time.Time, status *int
 		nextRetry,
 		now,
 		now.Add(time.Minute),
+		(*uuid.UUID)(nil),
 	}
 }
 
@@ -4467,6 +4469,7 @@ func taskCallbackDeliveryRow(
 		deliveredAt,
 		now,
 		now.Add(time.Minute),
+		(*uuid.UUID)(nil),
 	}
 }
 
