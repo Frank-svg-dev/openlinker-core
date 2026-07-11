@@ -130,14 +130,6 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
-	if cfg.RuntimePullRunWorkerEnabled {
-		go runtime.StartRuntimePullRunWorker(rootCtx, runtimeSvc, runtime.RuntimePullRunWorkerConfig{
-			Interval:        time.Duration(cfg.RuntimePullRunWorkerIntervalSeconds) * time.Second,
-			DispatchTimeout: time.Duration(cfg.RuntimePullDispatchTimeoutSeconds) * time.Second,
-			ResultTimeout:   time.Duration(cfg.RuntimePullResultTimeoutSeconds) * time.Second,
-			BatchSize:       clampConfigIntToInt32(cfg.RuntimePullRunWorkerTimeoutBatchSize),
-		})
-	}
 	if cfg.RuntimeEndpointRunWorkerEnabled {
 		go runtime.StartEndpointRunWorker(rootCtx, runtimeSvc, runtime.EndpointRunWorkerConfig{
 			Interval:   time.Duration(cfg.RuntimeEndpointRunWorkerIntervalSeconds) * time.Second,
