@@ -68,17 +68,57 @@ type RuntimeInvocationProofRequest struct {
 // capabilities. The configured secret is domain-derived before use so these
 // signatures cannot be confused with user JWTs or another HMAC protocol.
 type RuntimeInvocationSigner struct {
-	tokenKey   [sha256.Size]byte
-	contextKey [sha256.Size]byte
+	activeKeyID string
+	tokenKeys   map[string][sha256.Size]byte
+	contextKeys map[string][sha256.Size]byte
 }
 
 func NewRuntimeInvocationSigner(secret string) (*RuntimeInvocationSigner, error) {
-	if strings.TrimSpace(secret) != secret || len(secret) < runtimeInvocationMinimumKeyBytes {
-		return nil, fmt.Errorf("%w: signing secret must contain at least %d non-whitespace bytes", ErrInvalidRuntimeInvocation, runtimeInvocationMinimumKeyBytes)
+	return NewRuntimeInvocationSignerKeyring("current", map[string]string{"current": secret})
+}
+
+// NewRuntimeInvocationSignerWithPrevious is the configuration-oriented
+// keyring constructor. Both predecessor values are optional together; partial
+// or same-ID rotation configuration fails closed.
+func NewRuntimeInvocationSignerWithPrevious(
+	activeKeyID, activeSecret, previousKeyID, previousSecret string,
+) (*RuntimeInvocationSigner, error) {
+	secrets := map[string]string{activeKeyID: activeSecret}
+	switch {
+	case previousKeyID == "" && previousSecret == "":
+	case previousKeyID == "" || previousSecret == "" || previousKeyID == activeKeyID:
+		return nil, fmt.Errorf("%w: invalid predecessor signing key", ErrInvalidRuntimeInvocation)
+	default:
+		secrets[previousKeyID] = previousSecret
+	}
+	return NewRuntimeInvocationSignerKeyring(activeKeyID, secrets)
+}
+
+// NewRuntimeInvocationSignerKeyring creates a signer that issues with one
+// active key while continuing to verify explicitly configured predecessor
+// keys. Outstanding Attempt capabilities therefore survive a deliberate key
+// rotation only for as long as operators retain the old key in this bounded
+// ring.
+func NewRuntimeInvocationSignerKeyring(activeKeyID string, secrets map[string]string) (*RuntimeInvocationSigner, error) {
+	if !validRuntimeInvocationKeyID(activeKeyID) || len(secrets) == 0 || len(secrets) > 8 {
+		return nil, fmt.Errorf("%w: invalid signing keyring", ErrInvalidRuntimeInvocation)
+	}
+	tokenKeys := make(map[string][sha256.Size]byte, len(secrets))
+	contextKeys := make(map[string][sha256.Size]byte, len(secrets))
+	for keyID, secret := range secrets {
+		if !validRuntimeInvocationKeyID(keyID) || strings.TrimSpace(secret) != secret || len(secret) < runtimeInvocationMinimumKeyBytes {
+			return nil, fmt.Errorf("%w: signing secret %q must contain at least %d non-whitespace bytes", ErrInvalidRuntimeInvocation, keyID, runtimeInvocationMinimumKeyBytes)
+		}
+		tokenKeys[keyID] = deriveRuntimeInvocationKey(secret, runtimeInvocationTokenDomain)
+		contextKeys[keyID] = deriveRuntimeInvocationKey(secret, runtimeInvocationContextDomain)
+	}
+	if _, ok := tokenKeys[activeKeyID]; !ok {
+		return nil, fmt.Errorf("%w: active signing key is absent", ErrInvalidRuntimeInvocation)
 	}
 	return &RuntimeInvocationSigner{
-		tokenKey:   deriveRuntimeInvocationKey(secret, runtimeInvocationTokenDomain),
-		contextKey: deriveRuntimeInvocationKey(secret, runtimeInvocationContextDomain),
+		activeKeyID: activeKeyID,
+		tokenKeys:   tokenKeys,
+		contextKeys: contextKeys,
 	}, nil
 }
 
@@ -93,22 +133,27 @@ func (s *RuntimeInvocationSigner) Issue(capability RuntimeInvocationCapability) 
 	if err != nil {
 		return "", "", err
 	}
-	return encodeSignedRuntimeCapability(runtimeInvocationContextPrefix, payload, s.contextKey[:]),
-		encodeSignedRuntimeCapability(runtimeInvocationTokenPrefix, payload, s.tokenKey[:]), nil
+	contextKey, contextOK := s.contextKeys[s.activeKeyID]
+	tokenKey, tokenOK := s.tokenKeys[s.activeKeyID]
+	if !contextOK || !tokenOK {
+		return "", "", ErrInvalidRuntimeInvocation
+	}
+	return encodeSignedRuntimeCapability(runtimeInvocationContextPrefix, s.activeKeyID, payload, contextKey[:]),
+		encodeSignedRuntimeCapability(runtimeInvocationTokenPrefix, s.activeKeyID, payload, tokenKey[:]), nil
 }
 
 func (s *RuntimeInvocationSigner) VerifyNodeEnvelope(envelope string, databaseNow time.Time) (RuntimeInvocationCapability, error) {
 	if s == nil {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
-	return verifySignedRuntimeCapability(envelope, runtimeInvocationContextPrefix, s.contextKey[:], databaseNow)
+	return verifySignedRuntimeCapability(envelope, runtimeInvocationContextPrefix, s.contextKeys, databaseNow)
 }
 
 func (s *RuntimeInvocationSigner) VerifyInvocationToken(token string, databaseNow time.Time) (RuntimeInvocationCapability, error) {
 	if s == nil {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
-	return verifySignedRuntimeCapability(token, runtimeInvocationTokenPrefix, s.tokenKey[:], databaseNow)
+	return verifySignedRuntimeCapability(token, runtimeInvocationTokenPrefix, s.tokenKeys, databaseNow)
 }
 
 // BuildRuntimeInvocationProof is used by a Node holding the short-lived
@@ -146,26 +191,44 @@ func deriveRuntimeInvocationKey(secret, domain string) [sha256.Size]byte {
 	return key
 }
 
-func encodeSignedRuntimeCapability(prefix string, payload, key []byte) string {
-	encoded := base64.RawURLEncoding.EncodeToString(payload)
-	signature := runtimeInvocationMAC(key, []byte(prefix+"."+encoded))
-	return prefix + "." + encoded + "." + base64.RawURLEncoding.EncodeToString(signature)
+func validRuntimeInvocationKeyID(value string) bool {
+	if len(value) < 1 || len(value) > 64 {
+		return false
+	}
+	for _, char := range value {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') &&
+			(char < '0' || char > '9') && char != '-' && char != '_' {
+			return false
+		}
+	}
+	return true
 }
 
-func verifySignedRuntimeCapability(raw, prefix string, key []byte, databaseNow time.Time) (RuntimeInvocationCapability, error) {
+func encodeSignedRuntimeCapability(prefix, keyID string, payload, key []byte) string {
+	encoded := base64.RawURLEncoding.EncodeToString(payload)
+	signed := prefix + "." + keyID + "." + encoded
+	signature := runtimeInvocationMAC(key, []byte(signed))
+	return signed + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+func verifySignedRuntimeCapability(raw, prefix string, keys map[string][sha256.Size]byte, databaseNow time.Time) (RuntimeInvocationCapability, error) {
 	parts := strings.Split(raw, ".")
-	if len(parts) != 3 || parts[0] != prefix {
+	if len(parts) != 4 || parts[0] != prefix || !validRuntimeInvocationKeyID(parts[1]) {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	key, ok := keys[parts[1]]
+	if !ok {
+		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[2])
 	if err != nil || len(payload) == 0 || len(payload) > 4096 {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
-	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	signature, err := base64.RawURLEncoding.DecodeString(parts[3])
 	if err != nil || len(signature) != sha256.Size {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
-	want := runtimeInvocationMAC(key, []byte(parts[0]+"."+parts[1]))
+	want := runtimeInvocationMAC(key[:], []byte(parts[0]+"."+parts[1]+"."+parts[2]))
 	if subtle.ConstantTimeCompare(signature, want) != 1 {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}

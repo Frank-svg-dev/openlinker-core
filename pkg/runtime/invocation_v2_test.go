@@ -46,11 +46,11 @@ func TestRuntimeInvocationCapabilityRejectsTamperAndDatabaseExpiry(t *testing.T)
 	require.NoError(t, err)
 
 	parts := strings.Split(token, ".")
-	require.Len(t, parts, 3)
-	if parts[2][0] == 'A' {
-		parts[2] = "B" + parts[2][1:]
+	require.Len(t, parts, 4)
+	if parts[3][0] == 'A' {
+		parts[3] = "B" + parts[3][1:]
 	} else {
-		parts[2] = "A" + parts[2][1:]
+		parts[3] = "A" + parts[3][1:]
 	}
 	tampered := strings.Join(parts, ".")
 	_, err = signer.VerifyInvocationToken(tampered, capability.IssuedAt.Add(time.Second))
@@ -63,8 +63,51 @@ func TestRuntimeInvocationCapabilityRejectsTamperAndDatabaseExpiry(t *testing.T)
 	payload, err := canonicalRuntimeInvocationCapability(capability)
 	require.NoError(t, err)
 	payload = []byte(strings.Replace(string(payload), runtimeInvocationAudience, "openlinker.runtime.v2/other", 1))
-	wrongAudience := encodeSignedRuntimeCapability(runtimeInvocationTokenPrefix, payload, signer.tokenKey[:])
+	key := signer.tokenKeys[signer.activeKeyID]
+	wrongAudience := encodeSignedRuntimeCapability(runtimeInvocationTokenPrefix, signer.activeKeyID, payload, key[:])
 	_, err = signer.VerifyInvocationToken(wrongAudience, capability.IssuedAt.Add(time.Second))
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+}
+
+func TestRuntimeInvocationKeyRotationRetainsOnlyConfiguredPredecessors(t *testing.T) {
+	t.Parallel()
+
+	oldSecret := "old-runtime-signing-secret-0000000000"
+	newSecret := "new-runtime-signing-secret-0000000000"
+	oldSigner, err := NewRuntimeInvocationSignerKeyring("old", map[string]string{"old": oldSecret})
+	require.NoError(t, err)
+	capability := runtimeInvocationCapabilityFixture()
+	oldContext, oldToken, err := oldSigner.Issue(capability)
+	require.NoError(t, err)
+
+	rotating, err := NewRuntimeInvocationSignerKeyring("new", map[string]string{
+		"new": newSecret,
+		"old": oldSecret,
+	})
+	require.NoError(t, err)
+	databaseNow := capability.IssuedAt.Add(time.Second)
+	_, err = rotating.VerifyNodeEnvelope(oldContext, databaseNow)
+	require.NoError(t, err)
+	_, err = rotating.VerifyInvocationToken(oldToken, databaseNow)
+	require.NoError(t, err)
+	_, newToken, err := rotating.Issue(capability)
+	require.NoError(t, err)
+	require.Contains(t, newToken, ".new.")
+
+	retired, err := NewRuntimeInvocationSignerKeyring("new", map[string]string{"new": newSecret})
+	require.NoError(t, err)
+	_, err = retired.VerifyInvocationToken(oldToken, databaseNow)
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+	_, err = oldSigner.VerifyInvocationToken(newToken, databaseNow)
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+
+	configured, err := NewRuntimeInvocationSignerWithPrevious("new", newSecret, "old", oldSecret)
+	require.NoError(t, err)
+	_, err = configured.VerifyInvocationToken(oldToken, databaseNow)
+	require.NoError(t, err)
+	_, err = NewRuntimeInvocationSignerWithPrevious("new", newSecret, "old", "")
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+	_, err = NewRuntimeInvocationSignerWithPrevious("new", newSecret, "new", oldSecret)
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 }
 
@@ -108,6 +151,8 @@ func TestRuntimeInvocationCapabilityValidation(t *testing.T) {
 	_, err = NewRuntimeInvocationSigner("too-short")
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 	_, err = NewRuntimeInvocationSigner(" " + runtimeInvocationTestSecret)
+	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
+	_, err = NewRuntimeInvocationSignerKeyring("bad.key", map[string]string{"bad.key": runtimeInvocationTestSecret})
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
