@@ -219,6 +219,54 @@ Use the simplest reachable mode for each Agent:
 
 Every assigned or claimed run must finish with exactly one terminal result.
 
+### Runtime Node certificate provisioning
+
+Reliable Runtime v2 authenticates every Agent Node with a dedicated client
+certificate and a matching `runtime_nodes` record. Keep the client CA private
+key on an operator-controlled provisioning host; never copy it into the Core
+container, put it in `.env`, or mount it beside the serving keys. Core only
+needs the CA certificate configured as `RUNTIME_MTLS_CLIENT_CA_FILE`.
+
+After applying the current migrations, build the Core binary and issue a Node
+identity from a host that can temporarily reach Postgres:
+
+```bash
+make build
+DATABASE_URL='postgres://...' ./bin/api runtime-node issue \
+  --ca-cert /secure/runtime-client-ca.crt \
+  --ca-key /secure/runtime-client-ca.key \
+  --display-name 'Singapore worker 01' \
+  --capacity 4 \
+  --cert-out ./node-pki/runtime-node.crt \
+  --key-out ./node-pki/runtime-node.key
+```
+
+The CA private-key file must be owner-only (`0600` or `0400`) on Unix. The
+output directories must already exist. The command generates an ECDSA
+P-256 key and a client-auth-only certificate, registers its random serial and
+SPKI SHA-256 thumbprint against the current Runtime v2 contract, and then emits
+an audit record as JSON. It refuses to overwrite any file. The private key is
+written with mode `0600`; the certificate uses `0644`. `--node-id` is optional
+and otherwise generated. `--node-version` defaults to the exact version used by
+the current reliable-run-v2 Agent Node; override it only when the Node binary
+advertises a different value.
+
+Inspect a delivered pair before installing it on an Agent Node:
+
+```bash
+./bin/api runtime-node inspect \
+  --cert ./node-pki/runtime-node.crt \
+  --key ./node-pki/runtime-node.key \
+  --ca-cert /secure/runtime-client-ca.crt
+```
+
+Configure the JSON `node_id` as `OPENLINKER_NODE_ID`, keep
+`OPENLINKER_AGENT_NODE_CAPACITY` equal to the registered capacity, and point
+`OPENLINKER_AGENT_NODE_MTLS_CERT_FILE` / `OPENLINKER_AGENT_NODE_MTLS_KEY_FILE`
+at the delivered pair. Agent Node separately needs the Runtime server trust CA
+in `OPENLINKER_AGENT_NODE_MTLS_CA_FILE`. Distribute the client CA certificate
+to Core only; its private key remains outside all running OpenLinker services.
+
 ## Invocation Architecture
 
 Core separates caller-facing protocol bindings from callee-facing Agent

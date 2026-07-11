@@ -207,6 +207,49 @@ make runtime-loadtest  # 执行 runtime_ws/runtime_pull 压测检查
 
 每个已分配或已 claim 的 run 必须最终提交一次终态结果。
 
+### Runtime Node 证书签发
+
+Reliable Runtime v2 会同时校验 Agent Node 的客户端证书和数据库里的
+`runtime_nodes` 记录。客户端 CA 私钥只保存在运维侧的签发主机上，不得复制进 Core
+容器、写入 `.env`，也不得和服务端 TLS 私钥放在同一个挂载目录。Core 运行时只需要
+通过 `RUNTIME_MTLS_CLIENT_CA_FILE` 读取 CA 证书。
+
+应用当前 migration 并构建 Core 后，在能够临时访问 Postgres 的安全签发主机执行：
+
+```bash
+make build
+DATABASE_URL='postgres://...' ./bin/api runtime-node issue \
+  --ca-cert /secure/runtime-client-ca.crt \
+  --ca-key /secure/runtime-client-ca.key \
+  --display-name 'Singapore worker 01' \
+  --capacity 4 \
+  --cert-out ./node-pki/runtime-node.crt \
+  --key-out ./node-pki/runtime-node.key
+```
+
+Unix 上的 CA 私钥文件权限必须仅限 owner（`0600` 或 `0400`）。输出目录必须事先存在。
+该命令会生成 ECDSA P-256 私钥和仅限 `clientAuth` 的证书，
+再把随机 serial、SPKI SHA-256 指纹和当前 Runtime v2 契约一次性登记到数据库，成功后
+输出 JSON 审计记录。命令不会覆盖任何已有文件；私钥权限固定为 `0600`，证书为
+`0644`。`--node-id` 可省略并自动生成。`--node-version` 默认值与当前
+reliable-run-v2 Agent Node 完全一致；只有 Node 二进制声明了不同版本时才应覆盖。
+
+交付前可离线检查证书、私钥和 CA 是否匹配：
+
+```bash
+./bin/api runtime-node inspect \
+  --cert ./node-pki/runtime-node.crt \
+  --key ./node-pki/runtime-node.key \
+  --ca-cert /secure/runtime-client-ca.crt
+```
+
+把 JSON 中的 `node_id` 配置为 `OPENLINKER_NODE_ID`，并确保
+`OPENLINKER_AGENT_NODE_CAPACITY` 与登记 capacity 一致；
+`OPENLINKER_AGENT_NODE_MTLS_CERT_FILE` / `OPENLINKER_AGENT_NODE_MTLS_KEY_FILE`
+指向交付给该 Node 的证书和私钥。Agent Node 还需通过
+`OPENLINKER_AGENT_NODE_MTLS_CA_FILE` 单独信任 Runtime 服务端 CA。客户端 CA 证书只分发
+给 Core，其私钥始终留在所有 OpenLinker 运行服务之外。
+
 ## 安全
 
 - 不要记录或暴露明文 Agent Token。

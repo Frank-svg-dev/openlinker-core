@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test deps demo-a2a demo-a2a-live runtime-loadtest
+.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test deps demo-a2a demo-a2a-live runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -24,6 +24,12 @@ run: build ## 编译并运行
 
 bootstrap-admin: build ## 创建或提升首个管理员; 设置 OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD
 	@set -a; . ./$(ENV_FILE); set +a; ./bin/api bootstrap-admin
+
+runtime-node-issue: build ## 离线签发并登记 Runtime Node; 参数放在 RUNTIME_NODE_ARGS
+	@set -a; . ./$(ENV_FILE); set +a; ./bin/api runtime-node issue $(RUNTIME_NODE_ARGS)
+
+runtime-node-inspect: build ## 审计 Runtime Node 证书; 参数放在 RUNTIME_NODE_ARGS
+	@./bin/api runtime-node inspect $(RUNTIME_NODE_ARGS)
 
 test: ## 运行测试(race + cover)
 	go test ./... -race -cover
