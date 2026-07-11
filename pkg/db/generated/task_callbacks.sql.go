@@ -526,7 +526,9 @@ func (q *Queries) ListPendingTaskCallbackDeliveries(ctx context.Context) ([]Task
 }
 
 const getLatestRunEventForTypes = `-- name: GetLatestRunEventForTypes :one
-SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at
+SELECT id, run_id, parent_run_id, sequence, event_type, payload, created_at,
+       client_event_id, client_event_seq, payload_fingerprint,
+       attempt_id, attempt_no, fencing_token
 FROM run_events
 WHERE run_id = $1
   AND event_type = ANY($2::text[])

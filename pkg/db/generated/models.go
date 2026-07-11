@@ -173,6 +173,15 @@ type RunEvent struct {
 	FencingToken       *int64     `db:"fencing_token" json:"fencing_token"`
 }
 
+// RunEventRetentionWatermark is the monotonic logical retention boundary for
+// one Run's immutable Event stream. Events at or below the boundary remain in
+// storage but are hidden from normal replay reads.
+type RunEventRetentionWatermark struct {
+	RunID                   uuid.UUID `db:"run_id" json:"run_id"`
+	RetainedThroughSequence int32     `db:"retained_through_sequence" json:"retained_through_sequence"`
+	UpdatedAt               time.Time `db:"updated_at" json:"updated_at"`
+}
+
 // RunAttempt is an immutable execution offer identity plus its lifecycle.
 type RunAttempt struct {
 	ID                      uuid.UUID  `db:"id" json:"id"`

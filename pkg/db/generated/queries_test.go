@@ -4219,7 +4219,11 @@ func agentTokenRow(id uuid.UUID, agentID *uuid.UUID, creatorID uuid.UUID, status
 }
 
 func runEventRow(id, runID uuid.UUID, parentRunID *uuid.UUID, sequence int32, eventType string, payload []byte, createdAt time.Time) []any {
-	return []any{id, runID, parentRunID, sequence, eventType, payload, createdAt}
+	return []any{
+		id, runID, parentRunID, sequence, eventType, payload, createdAt,
+		(*uuid.UUID)(nil), (*int64)(nil), []byte(nil),
+		(*uuid.UUID)(nil), (*int32)(nil), (*int64)(nil),
+	}
 }
 
 func deliveryTargetRow(id, userID uuid.UUID, now time.Time) []any {
@@ -4867,10 +4871,14 @@ func (f *fakeDBTX) QueryRow(_ context.Context, sql string, args ...interface{}) 
 }
 
 type fakeTx struct {
-	execSQLs []string
-	execArgs [][]any
-	tag      pgconn.CommandTag
-	err      error
+	execSQLs      []string
+	execArgs      [][]any
+	queryRowSQLs  []string
+	queryRowArgs  [][]any
+	queryRows     []pgx.Row
+	queryRowIndex int
+	tag           pgconn.CommandTag
+	err           error
 }
 
 func (f *fakeTx) Begin(context.Context) (pgx.Tx, error) {
@@ -4917,7 +4925,14 @@ func (f *fakeTx) Query(context.Context, string, ...interface{}) (pgx.Rows, error
 	return nil, f.err
 }
 
-func (f *fakeTx) QueryRow(context.Context, string, ...interface{}) pgx.Row {
+func (f *fakeTx) QueryRow(_ context.Context, sql string, args ...interface{}) pgx.Row {
+	f.queryRowSQLs = append(f.queryRowSQLs, sql)
+	f.queryRowArgs = append(f.queryRowArgs, append([]any(nil), args...))
+	if f.queryRowIndex < len(f.queryRows) {
+		row := f.queryRows[f.queryRowIndex]
+		f.queryRowIndex++
+		return row
+	}
 	return fakeRow{err: f.err}
 }
 

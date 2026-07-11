@@ -227,7 +227,7 @@ const advanceRunAttemptEventSequence = `-- name: AdvanceRunAttemptEventSequence 
 UPDATE run_attempts
 SET last_client_event_seq = GREATEST(last_client_event_seq, $5)
 WHERE run_id = $1 AND id = $2 AND lease_id = $3 AND fencing_token = $4
-  AND finished_at IS NULL
+  AND accepted_at IS NOT NULL AND finished_at IS NULL AND result_id IS NULL
 RETURNING *`
 
 type AdvanceRunAttemptEventSequenceParams struct {

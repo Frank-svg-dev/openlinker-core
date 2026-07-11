@@ -154,10 +154,11 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 			t.Fatalf("events code=%d run=%s after=%d limit=%d", eventsRec.Code, mock.eventsRunID, mock.eventsAfter, mock.eventsLimit)
 		}
 		var eventsBody struct {
-			Events []RunEventResponse `json:"events"`
+			Items []RunEventResponse `json:"items"`
+			Meta  RunEventPageMeta   `json:"meta"`
 		}
 		decodeRuntimeDispatchJSON(t, eventsRec, &eventsBody)
-		if len(eventsBody.Events) != 1 || eventsBody.Events[0].EventType != "run.completed" {
+		if len(eventsBody.Items) != 1 || eventsBody.Items[0].EventType != "run.completed" || eventsBody.Meta.RequestedAfterSequence != 2 {
 			t.Fatalf("events body = %#v", eventsBody)
 		}
 
@@ -508,6 +509,224 @@ func TestRuntimeHandlerStreamRunEventsEdges(t *testing.T) {
 	}
 }
 
+func TestRuntimeHandlerRunEventPageIncludesRetentionMetadata(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	earliest := int32(6)
+	latest := int32(8)
+	event := RunEventResponse{
+		EventID:   uuid.NewString(),
+		RunID:     runID.String(),
+		Sequence:  6,
+		EventType: "run.status.changed",
+		Payload:   map[string]interface{}{"status": "running"},
+		CreatedAt: time.Now(),
+	}
+	mock := &mockRuntimeService{runEventsPage: &RunEventPageResponse{
+		Items: []RunEventResponse{event},
+		Meta: RunEventPageMeta{
+			RequestedAfterSequence:    2,
+			EffectiveAfterSequence:    5,
+			RetainedThroughSequence:   5,
+			EarliestAvailableSequence: &earliest,
+			LatestAvailableSequence:   &latest,
+			RetentionGap:              true,
+		},
+	}}
+	ctx, rec := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:     http.MethodGet,
+		target:     "/api/v1/runs/" + runID.String() + "/events?after_sequence=2&limit=10",
+		userID:     userID.String(),
+		authMethod: "jwt",
+		params:     map[string]string{"id": runID.String()},
+	})
+	if err := NewHandler(mock).GetRunEvents(ctx); err != nil {
+		t.Fatalf("GetRunEvents error = %v", err)
+	}
+	var got RunEventPageResponse
+	decodeRuntimeDispatchJSON(t, rec, &got)
+	if rec.Code != http.StatusOK || len(got.Items) != 1 || got.Meta.EffectiveAfterSequence != 5 || !got.Meta.RetentionGap {
+		t.Fatalf("event page code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), `"events"`) {
+		t.Fatalf("event page unexpectedly exposed legacy events field: %s", rec.Body.String())
+	}
+}
+
+func TestRuntimeHandlerStreamRunEventsRetentionGap(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	earliest := int32(6)
+	latest := int32(6)
+	terminal := RunEventResponse{
+		EventID:   uuid.NewString(),
+		RunID:     runID.String(),
+		Sequence:  6,
+		EventType: "run.completed",
+		Payload:   map[string]interface{}{"status": "success"},
+		CreatedAt: time.Now(),
+	}
+
+	t.Run("gap is the first frame and has no synthetic id", func(t *testing.T) {
+		mock := &mockRuntimeService{runEventsPage: &RunEventPageResponse{
+			Items: []RunEventResponse{terminal},
+			Meta: RunEventPageMeta{
+				RequestedAfterSequence:    1,
+				EffectiveAfterSequence:    5,
+				RetainedThroughSequence:   5,
+				EarliestAvailableSequence: &earliest,
+				LatestAvailableSequence:   &latest,
+				RetentionGap:              true,
+			},
+		}}
+		ctx, rec := newRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:     http.MethodGet,
+			target:     "/api/v1/runs/" + runID.String() + "/stream?after_sequence=1",
+			userID:     userID.String(),
+			authMethod: "jwt",
+			params:     map[string]string{"id": runID.String()},
+		})
+		if err := NewHandler(mock).StreamRunEvents(ctx); err != nil {
+			t.Fatalf("StreamRunEvents error = %v", err)
+		}
+		body := rec.Body.String()
+		frames := strings.Split(body, "\n\n")
+		if len(frames) < 2 || !strings.HasPrefix(frames[0], "event: run.stream.gap\n") || strings.Contains(frames[0], "id:") {
+			t.Fatalf("first SSE frame = %q", frames[0])
+		}
+		if !strings.Contains(frames[0], `"retention_gap":true`) || !strings.Contains(frames[1], "id: 6") {
+			t.Fatalf("SSE body = %s", body)
+		}
+	})
+
+	t.Run("complete retained history emits no gap", func(t *testing.T) {
+		mock := &mockRuntimeService{runEventsPage: &RunEventPageResponse{
+			Items: []RunEventResponse{terminal},
+			Meta: RunEventPageMeta{
+				RequestedAfterSequence:    5,
+				EffectiveAfterSequence:    5,
+				RetainedThroughSequence:   5,
+				EarliestAvailableSequence: &earliest,
+				LatestAvailableSequence:   &latest,
+			},
+		}}
+		ctx, rec := newRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:     http.MethodGet,
+			target:     "/api/v1/runs/" + runID.String() + "/stream?after_sequence=5",
+			userID:     userID.String(),
+			authMethod: "jwt",
+			params:     map[string]string{"id": runID.String()},
+		})
+		if err := NewHandler(mock).StreamRunEvents(ctx); err != nil {
+			t.Fatalf("StreamRunEvents error = %v", err)
+		}
+		if strings.Contains(rec.Body.String(), "run.stream.gap") || !strings.Contains(rec.Body.String(), "id: 6") {
+			t.Fatalf("SSE body = %s", rec.Body.String())
+		}
+	})
+
+	t.Run("fully retained terminal run emits gap then closes", func(t *testing.T) {
+		mock := &mockRuntimeService{runEventsPage: &RunEventPageResponse{
+			Items: []RunEventResponse{},
+			Meta: RunEventPageMeta{
+				RequestedAfterSequence:  0,
+				EffectiveAfterSequence:  6,
+				RetainedThroughSequence: 6,
+				RetentionGap:            true,
+				Terminal:                true,
+				StreamComplete:          true,
+			},
+		}}
+		ctx, rec := newRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:     http.MethodGet,
+			target:     "/api/v1/runs/" + runID.String() + "/stream",
+			userID:     userID.String(),
+			authMethod: "jwt",
+			params:     map[string]string{"id": runID.String()},
+		})
+		if err := NewHandler(mock).StreamRunEvents(ctx); err != nil {
+			t.Fatalf("StreamRunEvents error = %v", err)
+		}
+		body := rec.Body.String()
+		if !strings.HasPrefix(body, "event: run.stream.gap\n") || strings.Contains(body, "id:") || mock.eventsAfter != 0 {
+			t.Fatalf("SSE body=%s after=%d", body, mock.eventsAfter)
+		}
+	})
+}
+
+func TestRuntimeHandlerStreamRunEventsCursorValidationAndPrecedence(t *testing.T) {
+	userID := uuid.New()
+	runID := uuid.New()
+	terminal := RunEventResponse{
+		EventID:   uuid.NewString(),
+		RunID:     runID.String(),
+		Sequence:  8,
+		EventType: "run.completed",
+		Payload:   map[string]interface{}{"status": "success"},
+		CreatedAt: time.Now(),
+	}
+
+	t.Run("query cursor wins over Last-Event-ID", func(t *testing.T) {
+		mock := &mockRuntimeService{runEventsResp: []RunEventResponse{terminal}}
+		ctx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+			method:     http.MethodGet,
+			target:     "/api/v1/runs/" + runID.String() + "/stream?after_sequence=7",
+			userID:     userID.String(),
+			authMethod: "jwt",
+			params:     map[string]string{"id": runID.String()},
+			headers:    map[string]string{"Last-Event-ID": "not-an-integer"},
+		})
+		if err := NewHandler(mock).StreamRunEvents(ctx); err != nil {
+			t.Fatalf("StreamRunEvents error = %v", err)
+		}
+		if mock.eventsAfter != 7 {
+			t.Fatalf("service after_sequence = %d, want 7", mock.eventsAfter)
+		}
+	})
+
+	for _, test := range []struct {
+		name   string
+		query  string
+		header string
+	}{
+		{name: "negative query", query: "?after_sequence=-1"},
+		{name: "overflow query", query: "?after_sequence=2147483648"},
+		{name: "empty query", query: "?after_sequence=", header: "7"},
+		{name: "negative header", header: "-1"},
+		{name: "overflow header", header: "2147483648"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+				method:     http.MethodGet,
+				target:     "/api/v1/runs/" + runID.String() + "/stream" + test.query,
+				userID:     userID.String(),
+				authMethod: "jwt",
+				params:     map[string]string{"id": runID.String()},
+				headers:    map[string]string{"Last-Event-ID": test.header},
+			})
+			err := NewHandler(&mockRuntimeService{}).StreamRunEvents(ctx)
+			requireRuntimeHTTPStatus(t, err, http.StatusBadRequest)
+		})
+	}
+}
+
+func TestWriteSSEEventsDoesNotMoveCursorBackward(t *testing.T) {
+	runID := uuid.NewString()
+	events := []RunEventResponse{
+		{EventID: uuid.NewString(), RunID: runID, Sequence: 4, EventType: "run.started"},
+		{EventID: uuid.NewString(), RunID: runID, Sequence: 5, EventType: "run.status.changed"},
+		{EventID: uuid.NewString(), RunID: runID, Sequence: 3, EventType: "run.completed"},
+	}
+	recorder := httptest.NewRecorder()
+	terminal, next, err := writeSSEEvents(recorder, events, 4)
+	if err != nil {
+		t.Fatalf("writeSSEEvents error = %v", err)
+	}
+	if terminal || next != 5 || strings.Contains(recorder.Body.String(), "id: 4") || strings.Contains(recorder.Body.String(), "id: 3") {
+		t.Fatalf("terminal=%t next=%d body=%s", terminal, next, recorder.Body.String())
+	}
+}
+
 func TestRuntimeHandlerRuntimeAuthAndResultValidationEdges(t *testing.T) {
 	runID := uuid.New()
 	runtimeCalls := []struct {
@@ -674,6 +893,7 @@ type mockRuntimeService struct {
 	eventsAfter   int32
 	eventsLimit   int32
 	runEventsResp []RunEventResponse
+	runEventsPage *RunEventPageResponse
 
 	artifactsUserID uuid.UUID
 	artifactsRunID  uuid.UUID
@@ -735,6 +955,34 @@ func (m *mockRuntimeService) ListRunEvents(_ context.Context, userID, runID uuid
 	m.eventsAfter = afterSequence
 	m.eventsLimit = limit
 	return m.runEventsResp, m.err
+}
+
+func (m *mockRuntimeService) ListRunEventsPage(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) (*RunEventPageResponse, error) {
+	m.eventsUserID = userID
+	m.eventsRunID = runID
+	m.eventsAfter = afterSequence
+	m.eventsLimit = limit
+	if m.err != nil {
+		return nil, m.err
+	}
+	if m.runEventsPage != nil {
+		return m.runEventsPage, nil
+	}
+	items := append([]RunEventResponse(nil), m.runEventsResp...)
+	page := &RunEventPageResponse{
+		Items: items,
+		Meta: RunEventPageMeta{
+			RequestedAfterSequence: afterSequence,
+			EffectiveAfterSequence: afterSequence,
+		},
+	}
+	if len(items) > 0 {
+		earliest := items[0].Sequence
+		latest := items[len(items)-1].Sequence
+		page.Meta.EarliestAvailableSequence = &earliest
+		page.Meta.LatestAvailableSequence = &latest
+	}
+	return page, nil
 }
 
 func (m *mockRuntimeService) ListRunArtifacts(_ context.Context, userID, runID uuid.UUID) ([]RunArtifactResponse, error) {
@@ -821,6 +1069,24 @@ func (m *pollingRuntimeService) ListRunEvents(_ context.Context, userID, runID u
 	m.eventsLimit = limit
 	if m.calls == 1 {
 		return m.firstEvents, nil
+	}
+	return nil, m.pollErr
+}
+
+func (m *pollingRuntimeService) ListRunEventsPage(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) (*RunEventPageResponse, error) {
+	m.calls++
+	m.eventsUserID = userID
+	m.eventsRunID = runID
+	m.eventsAfter = afterSequence
+	m.eventsLimit = limit
+	if m.calls == 1 {
+		return &RunEventPageResponse{
+			Items: append([]RunEventResponse(nil), m.firstEvents...),
+			Meta: RunEventPageMeta{
+				RequestedAfterSequence: afterSequence,
+				EffectiveAfterSequence: afterSequence,
+			},
+		}, nil
 	}
 	return nil, m.pollErr
 }

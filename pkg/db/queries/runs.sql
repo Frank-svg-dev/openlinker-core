@@ -213,14 +213,36 @@ LIMIT $2
 FOR UPDATE SKIP LOCKED;
 
 -- name: LockRunEventSequence :exec
--- 在事务内按 run_id 串行化事件序列分配。调用方必须先执行本查询，再用新语句执行
--- CreateRunEvent；否则高并发语句会沿用旧 MVCC 快照，仍可能读到相同 MAX(sequence)。
+-- 在事务内按 run_id 串行化事件序列分配。调用方必须先锁定 Run 行，再执行本查询；
+-- 否则会与 Event INSERT 的 Run FK 或其他 Event writer 形成逆序锁依赖。
 SELECT pg_advisory_xact_lock(hashtextextended($1::uuid::text, 0));
 
+-- name: LockRunForSystemEventAppend :one
+-- system Event 不需要 runtime Attempt 摘要，但必须与所有写入路径统一采用
+-- Run row -> advisory lock 的顺序。
+SELECT r.id
+FROM runs r
+WHERE r.id = $1
+FOR UPDATE;
+
+-- name: LockRunForEventAppend :one
+-- 追加客户端 Event 前先锁定 v2 Run 摘要，完成 replay/new 校验后，再执行
+-- LockRunEventSequence。所有 Event writer 固定采用 Run row -> advisory lock 顺序。
+SELECT r.id, r.agent_id, r.status, r.runtime_contract_id, r.dispatch_state,
+       r.active_attempt_id, r.lease_id, r.fencing_token, r.executor_type,
+       r.runtime_node_id, r.runtime_worker_id, r.runtime_session_id,
+       r.lease_token_id, r.lease_accepted_at, r.lease_expires_at,
+       r.attempt_deadline_at, r.run_deadline_at,
+       clock_timestamp() AS database_now
+FROM runs r
+WHERE r.id = $1
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+FOR UPDATE;
+
 -- name: CreateRunEvent :one
--- 追加 run event；调用方需先在同一事务中执行 LockRunEventSequence，保证同一个
--- run 内 sequence 单调递增。advisory lock 已提供同 run 串行化，这里只验证 run
--- 存在，避免和 claim/result 对 runs 行争用 FOR UPDATE 锁。
+-- 追加 system Event；generated wrapper 会在同一事务中先执行
+-- LockRunForSystemEventAppend，再执行 LockRunEventSequence，保证所有 Event writer
+-- 统一采用 Run row -> advisory lock 顺序并单调分配全局 sequence。
 WITH target_run AS (
     SELECT r.id
     FROM runs r
@@ -239,14 +261,134 @@ SELECT
 FROM target_run, next_sequence
 RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
           run_events.sequence, run_events.event_type, run_events.payload,
-          run_events.created_at;
+          run_events.created_at, run_events.client_event_id,
+          run_events.client_event_seq, run_events.payload_fingerprint,
+          run_events.attempt_id, run_events.attempt_no,
+          run_events.fencing_token;
 
--- name: ListRunEventsByRun :many
-SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload, e.created_at
+-- name: GetRunEventByClientID :one
+SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload,
+       e.created_at, e.client_event_id, e.client_event_seq,
+       e.payload_fingerprint, e.attempt_id, e.attempt_no, e.fencing_token
 FROM run_events e
-WHERE e.run_id = $1 AND e.sequence > $2
+WHERE e.run_id = $1
+  AND e.client_event_id = $2;
+
+-- name: GetRunEventByAttemptSequence :one
+SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload,
+       e.created_at, e.client_event_id, e.client_event_seq,
+       e.payload_fingerprint, e.attempt_id, e.attempt_no, e.fencing_token
+FROM run_events e
+WHERE e.run_id = $1
+  AND e.attempt_id = $2
+  AND e.attempt_no = $3
+  AND e.client_event_seq = $4;
+
+-- name: CreateRuntimeRunEvent :one
+-- 调用方必须已在同一事务中先执行 LockRunForEventAppend，再执行
+-- LockRunEventSequence。该语句保存完整客户端/Attempt identity，并只分配
+-- Core 全局 sequence；客户端 sequence 始终由 runtime 从 1 开始稳定提供。
+WITH target_run AS (
+    SELECT r.id
+    FROM runs r
+    WHERE r.id = $1::uuid
+      AND r.runtime_contract_id = 'openlinker.runtime.v2'
+),
+next_sequence AS (
+    SELECT COALESCE(MAX(e.sequence), 0)::int + 1 AS sequence
+    FROM run_events e
+    JOIN target_run r ON r.id = e.run_id
+)
+INSERT INTO run_events (
+    run_id, parent_run_id, sequence, event_type, payload,
+    client_event_id, client_event_seq, payload_fingerprint,
+    attempt_id, attempt_no, fencing_token
+)
+SELECT target_run.id, $2, next_sequence.sequence, $3, $4,
+       $5, $6, $7, $8, $9, $10
+FROM target_run, next_sequence
+RETURNING run_events.id, run_events.run_id, run_events.parent_run_id,
+          run_events.sequence, run_events.event_type, run_events.payload,
+          run_events.created_at, run_events.client_event_id,
+          run_events.client_event_seq, run_events.payload_fingerprint,
+          run_events.attempt_id, run_events.attempt_no,
+          run_events.fencing_token;
+
+-- name: GetRunEventRetentionWatermark :one
+-- 没有 retention 行时返回逻辑水位 0；updated_at 为 NULL，调用方无需把
+-- “尚未 retention”误判为真实 evidence row。
+SELECT requested.run_id,
+       COALESCE(w.retained_through_sequence, 0)::int AS retained_through_sequence,
+       w.updated_at
+FROM (VALUES ($1::uuid)) AS requested(run_id)
+LEFT JOIN run_event_retention_watermarks w ON w.run_id = requested.run_id;
+
+-- name: UpsertRetentionWatermark :one
+-- 水位只前进；migration trigger 还会校验它不超过当前 MAX(sequence)，并强制
+-- updated_at 使用数据库时钟。advisory lock 与 Event append 共享同一锁域。
+WITH target_run AS MATERIALIZED (
+    SELECT r.id
+    FROM runs r
+    WHERE r.id = $1
+    FOR UPDATE
+),
+event_lock AS MATERIALIZED (
+    SELECT pg_advisory_xact_lock(hashtextextended(target_run.id::text, 0))
+    FROM target_run
+)
+INSERT INTO run_event_retention_watermarks (
+    run_id, retained_through_sequence
+)
+SELECT $1, $2
+FROM event_lock
+ON CONFLICT (run_id) DO UPDATE
+SET retained_through_sequence = GREATEST(
+        run_event_retention_watermarks.retained_through_sequence,
+        EXCLUDED.retained_through_sequence
+    )
+RETURNING run_id, retained_through_sequence, updated_at;
+
+-- name: ListRunEvents :many
+SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload,
+       e.created_at, e.client_event_id, e.client_event_seq,
+       e.payload_fingerprint, e.attempt_id, e.attempt_no, e.fencing_token
+FROM run_events e
+LEFT JOIN run_event_retention_watermarks w ON w.run_id = e.run_id
+WHERE e.run_id = $1
+  AND e.sequence > GREATEST($2, COALESCE(w.retained_through_sequence, 0))
 ORDER BY e.sequence ASC
 LIMIT $3;
+
+-- name: ListRunEventsByRun :many
+SELECT e.id, e.run_id, e.parent_run_id, e.sequence, e.event_type, e.payload,
+       e.created_at, e.client_event_id, e.client_event_seq,
+       e.payload_fingerprint, e.attempt_id, e.attempt_no, e.fencing_token
+FROM run_events e
+LEFT JOIN run_event_retention_watermarks w ON w.run_id = e.run_id
+WHERE e.run_id = $1
+  AND e.sequence > GREATEST($2, COALESCE(w.retained_through_sequence, 0))
+ORDER BY e.sequence ASC
+LIMIT $3;
+
+-- name: GetRunEventBounds :one
+SELECT COALESCE(w.retained_through_sequence, 0)::int AS retained_through_sequence,
+       MIN(e.sequence) FILTER (
+           WHERE e.sequence > COALESCE(w.retained_through_sequence, 0)
+       )::int AS first_available_sequence,
+       COALESCE(MAX(e.sequence), 0)::int AS last_sequence
+FROM (VALUES ($1::uuid)) AS requested(run_id)
+LEFT JOIN run_event_retention_watermarks w ON w.run_id = requested.run_id
+LEFT JOIN run_events e ON e.run_id = requested.run_id
+GROUP BY requested.run_id, w.retained_through_sequence;
+
+-- name: ListClientEventSequencesThrough :many
+SELECT e.client_event_seq
+FROM run_events e
+WHERE e.run_id = $1
+  AND e.attempt_id = $2
+  AND e.attempt_no = $3
+  AND e.client_event_seq BETWEEN 1 AND $4
+ORDER BY e.client_event_seq ASC;
 
 -- ## 模块 6（双面板数据查询）
 -- subagent-6a 在此区块下追加 query

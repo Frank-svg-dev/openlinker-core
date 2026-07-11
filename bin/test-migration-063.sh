@@ -683,6 +683,40 @@ SET output = '{"ok":true}',
 WHERE id = '10000000-0000-4000-8000-000000000010';
 COMMIT;
 
+INSERT INTO run_event_retention_watermarks (
+  run_id, retained_through_sequence, updated_at
+) VALUES (
+  '10000000-0000-4000-8000-000000000010', 1, '2000-01-01T00:00:00Z'
+);
+
+UPDATE run_event_retention_watermarks
+SET retained_through_sequence = 2,
+    updated_at = '2000-01-01T00:00:00Z'
+WHERE run_id = '10000000-0000-4000-8000-000000000010';
+
+DO $$
+BEGIN
+  IF (
+    SELECT retained_through_sequence <> 2
+           OR updated_at <= '2020-01-01T00:00:00Z'::timestamptz
+    FROM run_event_retention_watermarks
+    WHERE run_id = '10000000-0000-4000-8000-000000000010'
+  ) THEN
+    RAISE EXCEPTION 'retention watermark did not advance with DB-clock evidence';
+  END IF;
+
+  IF (
+    SELECT COUNT(*)
+    FROM run_events e
+    LEFT JOIN run_event_retention_watermarks w ON w.run_id = e.run_id
+    WHERE e.run_id = '10000000-0000-4000-8000-000000000010'
+      AND e.sequence > COALESCE(w.retained_through_sequence, 0)
+  ) <> 1 THEN
+    RAISE EXCEPTION 'logical retention watermark did not hide retained events';
+  END IF;
+END
+$$;
+
 INSERT INTO webhook_deliveries (
   id, agent_id, run_id, url, payload, status, next_retry_at, effect_outbox_id
 ) VALUES (
@@ -1537,6 +1571,25 @@ SQL
     "run events are append-only" \
     "DELETE FROM run_events
      WHERE id = '10000000-0000-4000-8000-000000000041'"
+  expect_sql_failure \
+    "run event retention watermark cannot move backwards" \
+    "UPDATE run_event_retention_watermarks
+     SET retained_through_sequence = 1
+     WHERE run_id = '10000000-0000-4000-8000-000000000010'"
+  expect_sql_failure \
+    "run event retention watermark cannot exceed latest event sequence" \
+    "UPDATE run_event_retention_watermarks
+     SET retained_through_sequence = 4
+     WHERE run_id = '10000000-0000-4000-8000-000000000010'"
+  expect_sql_failure \
+    "run event retention watermark identity cannot change" \
+    "UPDATE run_event_retention_watermarks
+     SET run_id = '10000000-0000-4000-8000-000000000099'
+     WHERE run_id = '10000000-0000-4000-8000-000000000010'"
+  expect_sql_failure \
+    "run event retention watermark evidence cannot be deleted" \
+    "DELETE FROM run_event_retention_watermarks
+     WHERE run_id = '10000000-0000-4000-8000-000000000010'"
   expect_sql_failure \
     "terminal Run artifact is immutable" \
     "UPDATE run_accounting_ledger

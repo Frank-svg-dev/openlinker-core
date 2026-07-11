@@ -120,6 +120,7 @@ BEGIN
     END IF;
 
     IF EXISTS (SELECT 1 FROM run_attempts)
+       OR EXISTS (SELECT 1 FROM run_event_retention_watermarks)
        OR EXISTS (SELECT 1 FROM run_cancellations)
        OR EXISTS (SELECT 1 FROM run_dead_letters)
        OR EXISTS (SELECT 1 FROM runtime_signal_outbox)
@@ -183,6 +184,52 @@ BEGIN
         RAISE EXCEPTION 'Run request metadata object constraint is missing or mismatched';
     END IF;
 
+    IF to_regclass('run_event_retention_watermarks') IS NULL THEN
+        RAISE EXCEPTION 'Run event retention watermark table is missing';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'run_event_retention_watermarks'
+          AND column_name = 'retained_through_sequence'
+          AND data_type = 'integer'
+          AND is_nullable = 'NO'
+          AND column_default = '0'
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'run_event_retention_watermarks'
+          AND column_name = 'updated_at'
+          AND data_type = 'timestamp with time zone'
+          AND is_nullable = 'NO'
+          AND column_default = 'clock_timestamp()'
+    ) THEN
+        RAISE EXCEPTION 'Run event retention watermark columns are mismatched';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_event_retention_watermarks'::regclass
+          AND c.conname = 'run_event_retention_watermarks_sequence_nonnegative'
+          AND c.contype = 'c'
+          AND c.convalidated
+    ) OR NOT EXISTS (
+        SELECT 1
+        FROM pg_constraint c
+        WHERE c.conrelid = 'run_event_retention_watermarks'::regclass
+          AND c.conname = 'run_event_retention_watermarks_run_fk'
+          AND c.contype = 'f'
+          AND c.confrelid = 'runs'::regclass
+          AND c.confdeltype = 'a'
+          AND c.convalidated
+    ) THEN
+        RAISE EXCEPTION 'Run event retention watermark constraints are mismatched';
+    END IF;
+
     IF to_regclass('idx_runs_runtime_pull_claim') IS NOT NULL
        OR to_regclass('idx_runs_runtime_claim_stale') IS NOT NULL
        OR to_regclass('idx_runs_runtime_claimed_token') IS NOT NULL THEN
@@ -198,6 +245,7 @@ BEGIN
           AND t.relname IN (
               'runs',
               'run_events',
+              'run_event_retention_watermarks',
               'run_attempts',
               'run_cancellations',
               'run_dead_letters',
@@ -293,6 +341,7 @@ BEGIN
             ('run_attempts_event_sequence_consistency', 'run_attempts', 'enforce_attempt_event_sequence_consistency'),
             ('run_events_immutable', 'run_events', 'enforce_run_event_immutable'),
             ('run_events_attempt_sequence_consistency', 'run_events', 'enforce_attempt_event_sequence_consistency'),
+            ('run_event_retention_watermarks_forward_only', 'run_event_retention_watermarks', 'enforce_run_event_retention_watermark'),
             ('runs_active_attempt_consistency', 'runs', 'enforce_run_active_attempt_consistency'),
             ('run_attempts_active_run_consistency', 'run_attempts', 'enforce_run_active_attempt_consistency'),
             ('runs_terminal_artifacts_consistency', 'runs', 'enforce_run_terminal_artifacts_consistency'),
@@ -327,6 +376,8 @@ BEGIN
               AND t.tgenabled = 'O'
               AND t.tgtype = CASE
                   WHEN required.trigger_name = 'runs_v2_contract_identity'
+                      THEN 31
+                  WHEN required.trigger_name = 'run_event_retention_watermarks_forward_only'
                       THEN 31
                   WHEN required.trigger_name IN (
                       'run_attempts_identity_immutable',

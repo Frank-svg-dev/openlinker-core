@@ -21,6 +21,7 @@ $$;
 
 LOCK TABLE runs IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE run_events IN ACCESS EXCLUSIVE MODE;
+LOCK TABLE run_event_retention_watermarks IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE webhook_deliveries IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE run_deliveries IN ACCESS EXCLUSIVE MODE;
 LOCK TABLE task_callback_deliveries IN ACCESS EXCLUSIVE MODE;
@@ -49,6 +50,7 @@ BEGIN
     END IF;
 
     IF EXISTS (SELECT 1 FROM run_attempts)
+       OR EXISTS (SELECT 1 FROM run_event_retention_watermarks)
        OR EXISTS (SELECT 1 FROM run_cancellations)
        OR EXISTS (SELECT 1 FROM run_dead_letters)
        OR EXISTS (SELECT 1 FROM runtime_signal_outbox)
@@ -123,6 +125,8 @@ DROP TRIGGER IF EXISTS run_attempts_identity_immutable ON run_attempts;
 DROP TRIGGER IF EXISTS run_attempts_event_sequence_consistency ON run_attempts;
 DROP TRIGGER IF EXISTS run_events_attempt_sequence_consistency ON run_events;
 DROP TRIGGER IF EXISTS run_events_immutable ON run_events;
+DROP TRIGGER IF EXISTS run_event_retention_watermarks_forward_only
+    ON run_event_retention_watermarks;
 DROP TRIGGER IF EXISTS run_cancellations_state_forward_only ON run_cancellations;
 DROP TRIGGER IF EXISTS runtime_sessions_identity_immutable ON runtime_sessions;
 DROP TRIGGER IF EXISTS runtime_sessions_principal_valid ON runtime_sessions;
@@ -145,6 +149,7 @@ DROP FUNCTION IF EXISTS enforce_run_v2_contract_identity();
 DROP FUNCTION IF EXISTS enforce_run_attempt_identity_immutable();
 DROP FUNCTION IF EXISTS enforce_attempt_event_sequence_consistency();
 DROP FUNCTION IF EXISTS enforce_run_event_immutable();
+DROP FUNCTION IF EXISTS enforce_run_event_retention_watermark();
 DROP FUNCTION IF EXISTS enforce_run_cancellation_transition();
 DROP FUNCTION IF EXISTS enforce_runtime_session_identity_immutable();
 DROP FUNCTION IF EXISTS enforce_runtime_session_principal();
@@ -191,6 +196,7 @@ ALTER TABLE runs
 ALTER TABLE run_events
     DROP CONSTRAINT run_events_attempt_identity_fk;
 
+DROP TABLE run_event_retention_watermarks;
 DROP TABLE run_dead_letters;
 DROP TABLE run_cancellations;
 DROP TABLE run_effect_outbox;

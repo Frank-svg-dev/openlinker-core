@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 )
 
 func TestRuntimeV2AttemptAndCancellationQueries(t *testing.T) {
@@ -85,6 +86,173 @@ func TestRuntimeV2AttemptAndCancellationQueries(t *testing.T) {
 		t.Fatalf("CreateRunCancellation = %#v, %v", cancellation, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CreateRunCancellation")
+}
+
+func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
+	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
+	runID, agentID, attemptID := uuid.New(), uuid.New(), uuid.New()
+	clientEventID, leaseID, sessionID := uuid.New(), uuid.New(), uuid.New()
+	attemptNo, clientSequence, fence := int32(2), int64(7), int64(3)
+	fingerprint := []byte("0123456789abcdef0123456789abcdef")
+
+	eventValues := runEventRow(
+		uuid.New(), runID, nil, 11, "run.progress", []byte(`{"progress":50}`), now,
+	)
+	eventValues[7] = &clientEventID
+	eventValues[8] = &clientSequence
+	eventValues[9] = fingerprint
+	eventValues[10] = &attemptID
+	eventValues[11] = &attemptNo
+	eventValues[12] = &fence
+
+	// System Events must acquire the Run row before the advisory sequence lock.
+	tx := &fakeTx{
+		queryRows: []pgx.Row{
+			fakeRow{values: []any{runID}},
+			fakeRow{values: eventValues},
+		},
+	}
+	systemEvent, err := New(tx).CreateRunEvent(context.Background(), CreateRunEventParams{
+		RunID: runID, EventType: "run.created", Payload: []byte(`{"created":true}`),
+	})
+	if err != nil || systemEvent.ID != eventValues[0].(uuid.UUID) {
+		t.Fatalf("CreateRunEvent in tx = %#v, %v", systemEvent, err)
+	}
+	if len(tx.queryRowSQLs) != 2 || len(tx.execSQLs) != 1 {
+		t.Fatalf("CreateRunEvent lock operations = queryRows:%d execs:%d", len(tx.queryRowSQLs), len(tx.execSQLs))
+	}
+	requireSQLName(t, tx.queryRowSQLs[0], "LockRunForSystemEventAppend")
+	requireSQLName(t, tx.execSQLs[0], "LockRunEventSequence")
+	requireSQLName(t, tx.queryRowSQLs[1], "CreateRunEvent")
+
+	leaseAcceptedAt := now.Add(-time.Minute)
+	leaseExpiresAt := now.Add(time.Minute)
+	attemptDeadlineAt := now.Add(2 * time.Minute)
+	runDeadlineAt := now.Add(5 * time.Minute)
+	executorType, workerID := "agent_node", "worker-a"
+	dbtx := &fakeDBTX{row: fakeRow{values: []any{
+		runID, agentID, "running", "openlinker.runtime.v2", "executing",
+		&attemptID, &leaseID, fence, &executorType,
+		(*uuid.UUID)(nil), &workerID, &sessionID, (*uuid.UUID)(nil),
+		&leaseAcceptedAt, &leaseExpiresAt, &attemptDeadlineAt, &runDeadlineAt, now,
+	}}}
+	q := New(dbtx)
+	locked, err := q.LockRunForEventAppend(context.Background(), runID)
+	if err != nil || locked.ID != runID || locked.ActiveAttemptID == nil || locked.RuntimeSessionID == nil {
+		t.Fatalf("LockRunForEventAppend = %#v, %v", locked, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "LockRunForEventAppend")
+	if !strings.Contains(dbtx.queryRowSQL, "FOR UPDATE") {
+		t.Fatal("LockRunForEventAppend must take a Run row lock")
+	}
+
+	if err := q.LockRunEventSequence(context.Background(), runID); err != nil {
+		t.Fatalf("LockRunEventSequence = %v", err)
+	}
+	requireSQLName(t, dbtx.execSQL, "LockRunEventSequence")
+
+	dbtx.row = fakeRow{values: eventValues}
+	byClientID, err := q.GetRunEventByClientID(context.Background(), GetRunEventByClientIDParams{
+		RunID: runID, ClientEventID: clientEventID,
+	})
+	if err != nil || byClientID.ClientEventID == nil || byClientID.AttemptID == nil {
+		t.Fatalf("GetRunEventByClientID = %#v, %v", byClientID, err)
+	}
+	if len(dbtx.queryRowArgs) != 2 {
+		t.Fatalf("GetRunEventByClientID args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: eventValues}
+	bySequence, err := q.GetRunEventByAttemptSequence(context.Background(), GetRunEventByAttemptSequenceParams{
+		RunID: runID, AttemptID: attemptID, AttemptNo: attemptNo, ClientEventSeq: clientSequence,
+	})
+	if err != nil || bySequence.ClientEventSeq == nil || *bySequence.ClientEventSeq != clientSequence {
+		t.Fatalf("GetRunEventByAttemptSequence = %#v, %v", bySequence, err)
+	}
+
+	dbtx.row = fakeRow{values: eventValues}
+	created, err := q.CreateRuntimeRunEvent(context.Background(), CreateRuntimeRunEventParams{
+		RunID: runID, EventType: "run.progress", Payload: []byte(`{"progress":50}`),
+		ClientEventID: clientEventID, ClientEventSeq: clientSequence,
+		PayloadFingerprint: fingerprint, AttemptID: attemptID,
+		AttemptNo: attemptNo, FencingToken: fence,
+	})
+	if err != nil || created.PayloadFingerprint == nil || created.FencingToken == nil {
+		t.Fatalf("CreateRuntimeRunEvent = %#v, %v", created, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateRuntimeRunEvent")
+	if len(dbtx.queryRowArgs) != 10 {
+		t.Fatalf("CreateRuntimeRunEvent args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: []any{runID, int32(0), (*time.Time)(nil)}}
+	watermark, err := q.GetRunEventRetentionWatermark(context.Background(), runID)
+	if err != nil || watermark.RunID != runID || watermark.RetainedThroughSequence != 0 || watermark.UpdatedAt != nil {
+		t.Fatalf("GetRunEventRetentionWatermark = %#v, %v", watermark, err)
+	}
+
+	dbtx.row = fakeRow{values: []any{runID, int32(5), now}}
+	storedWatermark, err := q.UpsertRetentionWatermark(context.Background(), UpsertRetentionWatermarkParams{
+		RunID: runID, RetainedThroughSequence: 5,
+	})
+	if err != nil || storedWatermark.RetainedThroughSequence != 5 {
+		t.Fatalf("UpsertRetentionWatermark = %#v, %v", storedWatermark, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "UpsertRetentionWatermark")
+	rowLockAt := strings.Index(dbtx.queryRowSQL, "FOR UPDATE")
+	advisoryLockAt := strings.Index(dbtx.queryRowSQL, "pg_advisory_xact_lock")
+	if rowLockAt < 0 || advisoryLockAt < 0 || rowLockAt > advisoryLockAt {
+		t.Fatal("UpsertRetentionWatermark must lock Run row before advisory lock")
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{eventValues}}
+	listed, err := q.ListRunEvents(context.Background(), ListRunEventsParams{
+		RunID: runID, AfterSequence: 3, Limit: 20,
+	})
+	if err != nil || len(listed) != 1 || listed[0].ClientEventID == nil {
+		t.Fatalf("ListRunEvents = %#v, %v", listed, err)
+	}
+	if !strings.Contains(dbtx.querySQL, "GREATEST($2, COALESCE(w.retained_through_sequence, 0))") {
+		t.Fatal("ListRunEvents must apply the logical retention watermark")
+	}
+
+	firstAvailable := int32(6)
+	dbtx.row = fakeRow{values: []any{int32(5), &firstAvailable, int32(11)}}
+	bounds, err := q.GetRunEventBounds(context.Background(), runID)
+	if err != nil || bounds.FirstAvailableSequence == nil || bounds.LastSequence != 11 {
+		t.Fatalf("GetRunEventBounds = %#v, %v", bounds, err)
+	}
+
+	dbtx.queryRows = &fakeRows{rows: [][]any{{int64(1)}, {int64(2)}, {int64(4)}}}
+	sequences, err := q.ListClientEventSequencesThrough(context.Background(), ListClientEventSequencesThroughParams{
+		RunID: runID, AttemptID: attemptID, AttemptNo: attemptNo, ThroughSequence: 4,
+	})
+	if err != nil || !reflect.DeepEqual(sequences, []int64{1, 2, 4}) {
+		t.Fatalf("ListClientEventSequencesThrough = %#v, %v", sequences, err)
+	}
+
+	attemptValues := []any{
+		attemptID, runID, agentID, int32(1), &attemptNo, "agent_node",
+		leaseID, fence, (*uuid.UUID)(nil), &workerID, &sessionID,
+		(*uuid.UUID)(nil), uuid.New(), uuid.New(), now, now.Add(time.Minute),
+		&leaseAcceptedAt, &leaseAcceptedAt, leaseExpiresAt, attemptDeadlineAt,
+		(*time.Time)(nil), (*string)(nil), (*uuid.UUID)(nil), []byte(nil),
+		(*string)(nil), (*time.Time)(nil), clientSequence, (*int64)(nil),
+		(*string)(nil), (*string)(nil), now,
+	}
+	dbtx.row = fakeRow{values: attemptValues}
+	_, err = q.AdvanceRunAttemptEventSequence(context.Background(), AdvanceRunAttemptEventSequenceParams{
+		RunID: runID, ID: attemptID, LeaseID: leaseID,
+		FencingToken: fence, ClientEventSeq: clientSequence,
+	})
+	if err != nil {
+		t.Fatalf("AdvanceRunAttemptEventSequence = %v", err)
+	}
+	for _, guard := range []string{"accepted_at IS NOT NULL", "finished_at IS NULL", "result_id IS NULL"} {
+		if !strings.Contains(dbtx.queryRowSQL, guard) {
+			t.Fatalf("AdvanceRunAttemptEventSequence missing guard %q", guard)
+		}
+	}
 }
 
 func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {

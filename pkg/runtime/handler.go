@@ -38,6 +38,7 @@ type runtimeService interface {
 	StartRun(context.Context, uuid.UUID, *RunRequest, string) (*RunResponse, error)
 	GetRun(context.Context, uuid.UUID, uuid.UUID) (*RunResponse, error)
 	ListRunEvents(context.Context, uuid.UUID, uuid.UUID, int32, int32) ([]RunEventResponse, error)
+	ListRunEventsPage(context.Context, uuid.UUID, uuid.UUID, int32, int32) (*RunEventPageResponse, error)
 	ListRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]RunArtifactResponse, error)
 	ListRunMessages(context.Context, uuid.UUID, uuid.UUID) ([]RunMessageResponse, error)
 	ReportRunEvent(context.Context, uuid.UUID, string, *ReportRunEventRequest) (*RunEventResponse, error)
@@ -335,16 +336,19 @@ func (h *Handler) GetRunEvents(c echo.Context) error {
 	if err != nil {
 		return httpx.BadRequest("after_sequence 不是合法整数")
 	}
+	if afterSequence < 0 {
+		return httpx.BadRequest("after_sequence 不能小于 0")
+	}
 	limit, err := parseOptionalInt32(c.QueryParam("limit"))
 	if err != nil {
 		return httpx.BadRequest("limit 不是合法整数")
 	}
 
-	events, err := h.svc.ListRunEvents(c.Request().Context(), uid, runID, afterSequence, limit)
+	page, err := h.svc.ListRunEventsPage(c.Request().Context(), uid, runID, afterSequence, limit)
 	if err != nil {
 		return err
 	}
-	return c.JSON(http.StatusOK, map[string]interface{}{"events": events})
+	return c.JSON(http.StatusOK, page)
 }
 
 // GetRunArtifacts 查询 run 持久化产物。只返回给 run owner。
@@ -407,7 +411,7 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 		return httpx.BadRequest("after_sequence / Last-Event-ID 不是合法整数")
 	}
 
-	events, err := h.svc.ListRunEvents(c.Request().Context(), uid, runID, afterSequence, defaultRunEventsLimit)
+	page, err := h.svc.ListRunEventsPage(c.Request().Context(), uid, runID, afterSequence, defaultRunEventsLimit)
 	if err != nil {
 		return err
 	}
@@ -429,13 +433,26 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 	defer heartbeatTicker.Stop()
 
 	for {
-		terminal, nextSequence, err := writeSSEEvents(res.Writer, events, afterSequence)
+		if page.Meta.RetentionGap {
+			if err := writeSSERetentionGap(res.Writer, page.Meta); err != nil {
+				return nil
+			}
+		}
+		if page.Meta.EffectiveAfterSequence > afterSequence {
+			afterSequence = page.Meta.EffectiveAfterSequence
+		}
+		terminal, nextSequence, err := writeSSEEvents(res.Writer, page.Items, afterSequence)
 		if err != nil {
 			return nil
 		}
+		streamComplete := page.Meta.StreamComplete
 		afterSequence = nextSequence
+		page = &RunEventPageResponse{Meta: RunEventPageMeta{
+			RequestedAfterSequence: afterSequence,
+			EffectiveAfterSequence: afterSequence,
+		}}
 		flusher.Flush()
-		if terminal {
+		if terminal || streamComplete {
 			return nil
 		}
 
@@ -447,9 +464,8 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 				return nil
 			}
 			flusher.Flush()
-			events = nil
 		case <-pollTicker.C:
-			events, err = h.svc.ListRunEvents(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
+			page, err = h.svc.ListRunEventsPage(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return nil
@@ -729,17 +745,42 @@ func parseOptionalInt32(raw string) (int32, error) {
 }
 
 func afterSequenceFromSSE(c echo.Context) (int32, error) {
-	raw := c.QueryParam("after_sequence")
-	if raw == "" {
-		raw = c.Request().Header.Get("Last-Event-ID")
+	if values, present := c.QueryParams()["after_sequence"]; present {
+		if len(values) != 1 {
+			return 0, errors.New("after_sequence must appear once")
+		}
+		return parseSSESequence(values[0])
 	}
-	return parseOptionalInt32(raw)
+	raw := c.Request().Header.Get("Last-Event-ID")
+	if raw == "" {
+		return 0, nil
+	}
+	return parseSSESequence(raw)
+}
+
+func parseSSESequence(raw string) (int32, error) {
+	if raw == "" {
+		return 0, errors.New("sequence is empty")
+	}
+	for _, digit := range raw {
+		if digit < '0' || digit > '9' {
+			return 0, errors.New("sequence must be a non-negative decimal integer")
+		}
+	}
+	n, err := strconv.ParseInt(raw, 10, 32)
+	if err != nil {
+		return 0, err
+	}
+	return int32(n), nil
 }
 
 func writeSSEEvents(w http.ResponseWriter, events []RunEventResponse, afterSequence int32) (bool, int32, error) {
 	terminal := false
 	nextSequence := afterSequence
 	for _, event := range events {
+		if event.Sequence <= nextSequence {
+			continue
+		}
 		payload, err := json.Marshal(event)
 		if err != nil {
 			return terminal, nextSequence, err
@@ -753,6 +794,15 @@ func writeSSEEvents(w http.ResponseWriter, events []RunEventResponse, afterSeque
 		}
 	}
 	return terminal, nextSequence, nil
+}
+
+func writeSSERetentionGap(w http.ResponseWriter, meta RunEventPageMeta) error {
+	payload, err := json.Marshal(meta)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(w, "event: run.stream.gap\ndata: %s\n\n", payload)
+	return err
 }
 
 func writeSSEHeartbeat(w http.ResponseWriter) error {

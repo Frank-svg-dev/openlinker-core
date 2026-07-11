@@ -100,7 +100,9 @@ WHERE run_id = $1
   AND id = $2
   AND lease_id = $3
   AND fencing_token = $4
+  AND accepted_at IS NOT NULL
   AND finished_at IS NULL
+  AND result_id IS NULL
 RETURNING *;
 
 -- name: FinishRunAttempt :one

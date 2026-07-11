@@ -277,6 +277,18 @@ ALTER TABLE run_events
 
 DROP INDEX IF EXISTS idx_run_events_run_sequence;
 
+CREATE TABLE run_event_retention_watermarks (
+    run_id UUID PRIMARY KEY,
+    retained_through_sequence INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT run_event_retention_watermarks_run_fk
+        FOREIGN KEY (run_id)
+        REFERENCES runs (id)
+        ON DELETE NO ACTION,
+    CONSTRAINT run_event_retention_watermarks_sequence_nonnegative
+        CHECK (retained_through_sequence >= 0)
+);
+
 CREATE TABLE runtime_nodes (
     node_id UUID PRIMARY KEY,
     display_name TEXT NOT NULL,
@@ -1812,6 +1824,57 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER run_events_immutable
     BEFORE UPDATE OR DELETE ON run_events
     FOR EACH ROW EXECUTE FUNCTION enforce_run_event_immutable();
+
+CREATE OR REPLACE FUNCTION enforce_run_event_retention_watermark()
+RETURNS TRIGGER AS $$
+DECLARE
+    latest_sequence INTEGER;
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'run event retention watermark evidence cannot be deleted';
+    END IF;
+
+    IF TG_OP = 'UPDATE' AND NEW.run_id IS DISTINCT FROM OLD.run_id THEN
+        RAISE EXCEPTION 'run event retention watermark identity cannot change';
+    END IF;
+
+    IF TG_OP = 'UPDATE'
+       AND NEW.retained_through_sequence < OLD.retained_through_sequence THEN
+        RAISE EXCEPTION 'run event retention watermark cannot move backwards';
+    END IF;
+
+    -- Every Event/retention writer takes locks in Run row -> advisory order.
+    -- Taking the row lock first also prevents the INSERT's FK check from
+    -- creating the inverse advisory -> Run dependency.
+    PERFORM 1
+    FROM runs
+    WHERE id = NEW.run_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run event retention watermark references a missing Run';
+    END IF;
+
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.run_id::text, 0));
+
+    SELECT COALESCE(MAX(sequence), 0)::INTEGER
+    INTO latest_sequence
+    FROM run_events
+    WHERE run_id = NEW.run_id;
+
+    IF NEW.retained_through_sequence > latest_sequence THEN
+        RAISE EXCEPTION
+            'run event retention watermark cannot exceed latest event sequence';
+    END IF;
+
+    NEW.updated_at := clock_timestamp();
+    RETURN NEW;
+END
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER run_event_retention_watermarks_forward_only
+    BEFORE INSERT OR UPDATE OR DELETE ON run_event_retention_watermarks
+    FOR EACH ROW EXECUTE FUNCTION enforce_run_event_retention_watermark();
 
 CREATE OR REPLACE FUNCTION enforce_attempt_event_sequence_consistency()
 RETURNS TRIGGER AS $$

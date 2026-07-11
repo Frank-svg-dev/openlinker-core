@@ -211,6 +211,26 @@ type RunEventResponse struct {
 	CreatedAt   time.Time              `json:"created_at"`
 }
 
+// RunEventPageResponse is an owner-readable event page plus the durable
+// retention boundary used to interpret that page.
+type RunEventPageResponse struct {
+	Items []RunEventResponse `json:"items"`
+	Meta  RunEventPageMeta   `json:"meta"`
+}
+
+// RunEventPageMeta makes an incomplete event history explicit. Sequence zero
+// is the cursor before the first event; unavailable bounds are encoded as null.
+type RunEventPageMeta struct {
+	RequestedAfterSequence    int32  `json:"requested_after_sequence"`
+	EffectiveAfterSequence    int32  `json:"effective_after_sequence"`
+	RetainedThroughSequence   int32  `json:"retained_through_sequence"`
+	EarliestAvailableSequence *int32 `json:"earliest_available_sequence"`
+	LatestAvailableSequence   *int32 `json:"latest_available_sequence"`
+	RetentionGap              bool   `json:"retention_gap"`
+	Terminal                  bool   `json:"terminal"`
+	StreamComplete            bool   `json:"stream_complete"`
+}
+
 // RunArtifactResponse is a persisted, owner-readable artifact produced by a run.
 type RunArtifactResponse struct {
 	ID               string                 `json:"id"`

@@ -109,6 +109,7 @@ type Service struct {
 	deliverySvc     DeliveryEnqueuer
 	wsHub           *runtimeWSHub
 	pullNotifier    *runtimePullNotifier
+	eventStore      *EventStore
 	bestEffortDBSem chan struct{}
 	tokenTouchMu    sync.Mutex
 	tokenTouchAt    map[uuid.UUID]time.Time
@@ -202,6 +203,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		cfg:          cfg,
 		wsHub:        newRuntimeWSHub(),
 		pullNotifier: newRuntimePullNotifier(),
+		eventStore:   NewEventStore(pool),
 		bestEffortDBSem: make(
 			chan struct{},
 			runtimeBestEffortWriteConcurrency,
@@ -209,6 +211,68 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		tokenTouchAt: map[uuid.UUID]time.Time{},
 		httpClient:   endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 	}
+}
+
+// AppendRuntimeEvent persists one runtime v2 execution Event and emits
+// projections only for the transaction winner. A replay receives its original
+// ACK without duplicating callbacks, messages, or artifacts.
+func (s *Service) AppendRuntimeEvent(
+	ctx context.Context,
+	principal RuntimeEventPrincipal,
+	identity RuntimeAttemptIdentity,
+	req RuntimeEventRequest,
+) (RuntimeEventAck, error) {
+	if s == nil || s.eventStore == nil {
+		return RuntimeEventAck{}, httpx.Internal("运行事件存储未初始化")
+	}
+	ack, err := s.eventStore.Append(ctx, principal, identity, req)
+	if err != nil {
+		return RuntimeEventAck{}, err
+	}
+	if !ack.Inserted {
+		return ack, nil
+	}
+
+	payloadJSON, canonicalErr := CanonicalizeRFC8785(req.Payload)
+	if canonicalErr != nil {
+		// EventStore already validated and committed these exact semantics. Never
+		// turn a post-commit projection failure into a false append failure.
+		log.Error().Err(canonicalErr).Str("run_id", identity.RunID.String()).
+			Str("event_id", ack.EventID.String()).Msg("runtime.AppendRuntimeEvent: canonical projection payload")
+		return ack, nil
+	}
+	clientEventID := ack.ClientEventID
+	clientEventSeq := ack.ClientEventSeq
+	attemptID := identity.AttemptID
+	fencingToken := identity.FencingToken
+	event := db.RunEvent{
+		ID:                 ack.EventID,
+		RunID:              identity.RunID,
+		Sequence:           ack.Sequence,
+		EventType:          req.EventType,
+		Payload:            payloadJSON,
+		CreatedAt:          ack.CreatedAt,
+		ClientEventID:      &clientEventID,
+		ClientEventSeq:     &clientEventSeq,
+		AttemptID:          &attemptID,
+		FencingToken:       &fencingToken,
+		PayloadFingerprint: nil,
+	}
+	s.triggerTaskCallbackEvent(&event)
+	if req.EventType == "run.message.delta" {
+		s.recordRunMessageBestEffort(
+			ctx,
+			identity.RunID,
+			&ack.Sequence,
+			"agent",
+			messageContentFromMap(req.Payload),
+			req.Payload,
+		)
+	}
+	if req.EventType == "run.artifact.delta" {
+		s.recordArtifactDeltaBestEffort(ctx, identity.RunID, &ack.Sequence, req.Payload)
+	}
+	return ack, nil
 }
 
 func (s *Service) agentA2AContext(runID uuid.UUID, delegation *Delegation) *AgentA2AContext {
