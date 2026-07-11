@@ -99,7 +99,7 @@ func TestResolveRuntimeWorkerSessionPrincipalIsFailClosed(t *testing.T) {
 	credentialID, coreID := uuid.New(), uuid.New()
 	features := append([]string(nil), runtimeV2RequiredFeatures...)
 	dbtx := &fakeDBTX{row: fakeRow{values: []any{
-		sessionID, nodeID, agentID, credentialID, "worker-resolve", coreID,
+		sessionID, nodeID, agentID, credentialID, "worker-resolve", int64(7), coreID,
 		"cert-resolve", "spki-resolve", "v2", int32(2),
 		"openlinker.runtime.v2", runtimeV2ContractDigest, features,
 		"active", now, now,
@@ -110,7 +110,7 @@ func TestResolveRuntimeWorkerSessionPrincipalIsFailClosed(t *testing.T) {
 		WorkerID: "worker-resolve", DeviceCertificateSerial: "cert-resolve",
 		DevicePublicKeyThumbprint: "spki-resolve", CoreInstanceID: coreID,
 	})
-	if err != nil || principal.RuntimeSessionID != sessionID || principal.DatabaseNow != now {
+	if err != nil || principal.RuntimeSessionID != sessionID || principal.SessionEpoch != 7 || principal.DatabaseNow != now {
 		t.Fatalf("ResolveRuntimeWorkerSessionPrincipal = %#v, %v", principal, err)
 	}
 	if len(dbtx.queryRowArgs) != 7 || dbtx.queryRowArgs[6] != coreID {

@@ -121,7 +121,7 @@ func scanRuntimeSessionAttachment(row runtimeNodeScanner, a *RuntimeSessionAttac
 
 const resolveRuntimeWorkerSessionPrincipal = `-- name: ResolveRuntimeWorkerSessionPrincipal :one
 SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
-       s.worker_id, s.attached_core_instance_id,
+       s.worker_id, s.session_epoch, s.attached_core_instance_id,
        s.device_certificate_serial, n.device_public_key_thumbprint,
        s.node_version, s.protocol_version, s.runtime_contract_id,
        s.runtime_contract_digest, s.features, s.status, s.heartbeat_at,
@@ -171,6 +171,7 @@ type ResolveRuntimeWorkerSessionPrincipalRow struct {
 	AgentID                   uuid.UUID `db:"agent_id" json:"agent_id"`
 	CredentialID              uuid.UUID `db:"credential_id" json:"credential_id"`
 	WorkerID                  string    `db:"worker_id" json:"worker_id"`
+	SessionEpoch              int64     `db:"session_epoch" json:"session_epoch"`
 	AttachedCoreInstanceID    uuid.UUID `db:"attached_core_instance_id" json:"attached_core_instance_id"`
 	DeviceCertificateSerial   string    `db:"device_certificate_serial" json:"device_certificate_serial"`
 	DevicePublicKeyThumbprint string    `db:"device_public_key_thumbprint" json:"device_public_key_thumbprint"`
@@ -201,6 +202,7 @@ func (q *Queries) ResolveRuntimeWorkerSessionPrincipal(ctx context.Context, arg 
 		&principal.AgentID,
 		&principal.CredentialID,
 		&principal.WorkerID,
+		&principal.SessionEpoch,
 		&principal.AttachedCoreInstanceID,
 		&principal.DeviceCertificateSerial,
 		&principal.DevicePublicKeyThumbprint,

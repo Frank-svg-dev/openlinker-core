@@ -15,7 +15,7 @@
 -- currently attached target Session from those facts; never accept an
 -- Attempt's immutable source Session ID as the acting Session after resume.
 SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
-       s.worker_id, s.attached_core_instance_id,
+       s.worker_id, s.session_epoch, s.attached_core_instance_id,
        s.device_certificate_serial, n.device_public_key_thumbprint,
        s.node_version, s.protocol_version, s.runtime_contract_id,
        s.runtime_contract_digest, s.features, s.status, s.heartbeat_at,

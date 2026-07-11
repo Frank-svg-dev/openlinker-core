@@ -1194,6 +1194,7 @@ func (r *postgresRuntimeSessionRepository) ResolveRuntimeWorkerSessionPrincipal(
 		AgentID:                         row.AgentID,
 		CredentialID:                    row.CredentialID,
 		WorkerID:                        row.WorkerID,
+		SessionEpoch:                    row.SessionEpoch,
 		CoreInstanceID:                  row.AttachedCoreInstanceID,
 		DeviceCertificateSerial:         row.DeviceCertificateSerial,
 		DevicePublicKeyThumbprintSHA256: row.DevicePublicKeyThumbprint,
