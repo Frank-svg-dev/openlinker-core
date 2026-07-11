@@ -60,6 +60,47 @@ WHERE t.id = sqlc.arg(credential_id)
   AND t.scopes @> ARRAY['agent:pull']::text[]
 FOR SHARE OF t;
 
+-- name: LockRuntimeSessionForOfferRelease :one
+-- Disconnect cleanup may run only after Session close committed. Preserve the
+-- global Session -> Node -> Token lock order while accepting either the still
+-- attached live Session (send failure/ACK timeout) or an exact offline Session
+-- with detached attachment evidence for this Core. If another Core has already
+-- reattached the Session, neither branch matches and the old Core cannot clear
+-- its offer underneath the new owner.
+SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
+       s.worker_id, s.session_epoch, s.device_certificate_serial,
+       s.node_version, s.protocol_version, s.runtime_contract_id,
+       s.runtime_contract_digest, s.features, s.capacity, s.inflight,
+       s.status, s.attached_core_instance_id, s.connected_at,
+       s.heartbeat_at, s.disconnected_at, s.created_at, s.updated_at,
+       clock_timestamp() AS database_now
+FROM runtime_sessions s
+WHERE s.runtime_session_id = sqlc.arg(runtime_session_id)
+  AND s.node_id = sqlc.arg(node_id)
+  AND s.agent_id = sqlc.arg(agent_id)
+  AND s.credential_id = sqlc.arg(credential_id)
+  AND s.worker_id = sqlc.arg(worker_id)
+  AND s.protocol_version = 2
+  AND s.runtime_contract_id = 'openlinker.runtime.v2'
+  AND (
+      (
+          s.status IN ('active', 'draining')
+          AND s.attached_core_instance_id = sqlc.arg(core_instance_id)
+      )
+      OR (
+          s.status IN ('offline', 'closed')
+          AND s.attached_core_instance_id IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM runtime_session_attachments detached
+              WHERE detached.runtime_session_id = s.runtime_session_id
+                AND detached.core_instance_id = sqlc.arg(core_instance_id)
+                AND detached.detached_at IS NOT NULL
+          )
+      )
+  )
+FOR UPDATE OF s;
+
 -- name: GetExistingUnacceptedRunOfferForSession :one
 WITH existing_offer AS MATERIALIZED (
     SELECT a.run_id, a.id AS attempt_id
@@ -529,8 +570,24 @@ WHERE a.run_id = sqlc.arg(run_id)
         AND current_owner.agent_id = a.agent_id
         AND current_owner.credential_id = a.runtime_token_id
         AND current_owner.worker_id = a.runtime_worker_id
-        AND current_owner.attached_core_instance_id = sqlc.arg(core_instance_id)
-        AND current_owner.status IN ('active', 'draining')
+        AND (
+            (
+                current_owner.attached_core_instance_id = sqlc.arg(core_instance_id)
+                AND current_owner.status IN ('active', 'draining')
+            )
+            OR (
+                current_owner.attached_core_instance_id IS NULL
+                AND current_owner.status IN ('offline', 'closed')
+                AND a.attached_core_instance_id = sqlc.arg(core_instance_id)
+                AND EXISTS (
+                    SELECT 1
+                    FROM runtime_session_attachments detached
+                    WHERE detached.runtime_session_id = current_owner.runtime_session_id
+                      AND detached.core_instance_id = sqlc.arg(core_instance_id)
+                      AND detached.detached_at IS NOT NULL
+                )
+            )
+        )
   )
 RETURNING a.*;
 

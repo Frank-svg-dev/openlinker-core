@@ -118,6 +118,33 @@ func TestResolveRuntimeWorkerSessionPrincipalIsFailClosed(t *testing.T) {
 	}
 }
 
+func TestRuntimeOfferReleaseSupportsOnlyExactDetachedSession(t *testing.T) {
+	t.Parallel()
+
+	for _, fragment := range []string{
+		"s.status IN ('offline', 'closed')",
+		"s.attached_core_instance_id IS NULL",
+		"detached.core_instance_id = $6",
+		"detached.detached_at IS NOT NULL",
+		"FOR UPDATE OF s",
+	} {
+		if !strings.Contains(lockRuntimeSessionForOfferRelease, fragment) {
+			t.Fatalf("LockRuntimeSessionForOfferRelease missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"a.accepted_at IS NULL",
+		"a.attempt_no IS NULL",
+		"a.attached_core_instance_id = $12",
+		"detached.core_instance_id = $12",
+		"detached.detached_at IS NOT NULL",
+	} {
+		if !strings.Contains(finishUnacceptedRunOffer, fragment) {
+			t.Fatalf("FinishUnacceptedRunOffer detached cleanup missing %q", fragment)
+		}
+	}
+}
+
 func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 	t.Parallel()
 

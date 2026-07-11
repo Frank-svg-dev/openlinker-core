@@ -270,6 +270,41 @@ func TestRuntimeLeaseSessionClosePreservesExecutingAttempt(t *testing.T) {
 	require.Zero(t, fixture.tx.signalCalls)
 }
 
+func TestRuntimeLeaseSessionCloseReleasesOnlyUnacceptedOfferAfterOfflineCommit(t *testing.T) {
+	fixture := newRuntimeLeaseFixture(t)
+	fixture.tx.offerReleaseStatus = "offline"
+	fixture.tx.existing = existingOfferFixture(fixture)
+	fixture.tx.sessionInflight = 1
+	fixture.tx.nodeInflight = 1
+
+	err := fixture.service.ReleaseUnackedOffer(context.Background(), fixture.principal, "SESSION_DISCONNECTED")
+	require.NoError(t, err)
+	require.Zero(t, fixture.tx.sessionInflight)
+	require.Zero(t, fixture.tx.nodeInflight)
+	require.Equal(t, 1, fixture.tx.finishCalls)
+	require.Equal(t, 1, fixture.tx.resetCalls)
+	require.Equal(t, []string{
+		"lock_offer_release_session", "lock_node", "lock_credential", "existing_offer",
+		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
+		"reset_run", "create_signal",
+	}, fixture.tx.calls)
+}
+
+func TestRuntimeLeaseOldCoreCannotReleaseAfterSessionReattach(t *testing.T) {
+	fixture := newRuntimeLeaseFixture(t)
+	fixture.tx.offerReleaseErr = pgx.ErrNoRows
+	fixture.tx.existing = existingOfferFixture(fixture)
+	fixture.tx.sessionInflight = 1
+	fixture.tx.nodeInflight = 1
+
+	err := fixture.service.ReleaseUnackedOffer(context.Background(), fixture.principal, "SESSION_DISCONNECTED")
+	require.True(t, IsRuntimeLeaseError(err, RuntimeLeaseErrorIdentityMismatch), err)
+	require.Equal(t, int32(1), fixture.tx.sessionInflight)
+	require.Equal(t, int32(1), fixture.tx.nodeInflight)
+	require.Zero(t, fixture.tx.finishCalls)
+	require.Equal(t, []string{"lock_offer_release_session"}, fixture.tx.calls)
+}
+
 func TestRuntimeLeaseCapacityCASLoserNeverDecrementsCounters(t *testing.T) {
 	fixture := newRuntimeLeaseFixture(t)
 	fixture.tx.existing = existingOfferFixture(fixture)
@@ -445,6 +480,8 @@ type runtimeLeaseTransactionFake struct {
 	capacityReleaseCASCalls int
 	capacityReleaseCASErr   error
 	signalCalls             int
+	offerReleaseStatus      string
+	offerReleaseErr         error
 }
 
 func (f *runtimeLeaseTransactionFake) call(name string) { f.calls = append(f.calls, name) }
@@ -457,6 +494,29 @@ func (f *runtimeLeaseTransactionFake) LockRuntimeSessionForPrincipalValidation(_
 		CredentialID: f.principal.CredentialID, WorkerID: f.principal.WorkerID, SessionEpoch: f.principal.SessionEpoch,
 		DeviceCertificateSerial: f.principal.DeviceCertificateSerial, Status: "active", AttachedCoreInstanceID: &coreID,
 		HeartbeatAt: f.databaseNow, DatabaseNow: f.databaseNow,
+	}, nil
+}
+
+func (f *runtimeLeaseTransactionFake) LockRuntimeSessionForOfferRelease(_ context.Context, _ db.LockRuntimeSessionForOfferReleaseParams) (db.LockRuntimeSessionForOfferReleaseRow, error) {
+	f.call("lock_offer_release_session")
+	if f.offerReleaseErr != nil {
+		return db.LockRuntimeSessionForOfferReleaseRow{}, f.offerReleaseErr
+	}
+	status := f.offerReleaseStatus
+	if status == "" {
+		status = "active"
+	}
+	coreID := f.principal.CoreInstanceID
+	attachedCoreID := &coreID
+	if status == "offline" || status == "closed" {
+		attachedCoreID = nil
+	}
+	return db.LockRuntimeSessionForOfferReleaseRow{
+		RuntimeSessionID: f.principal.RuntimeSessionID,
+		NodeID:           f.principal.NodeID, AgentID: f.principal.AgentID, CredentialID: f.principal.CredentialID,
+		WorkerID: f.principal.WorkerID, SessionEpoch: f.principal.SessionEpoch,
+		DeviceCertificateSerial: f.principal.DeviceCertificateSerial, Status: status,
+		AttachedCoreInstanceID: attachedCoreID, HeartbeatAt: f.databaseNow, DatabaseNow: f.databaseNow,
 	}, nil
 }
 

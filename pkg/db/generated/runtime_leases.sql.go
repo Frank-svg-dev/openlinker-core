@@ -333,8 +333,24 @@ WHERE a.run_id = $4
         AND current_owner.agent_id = a.agent_id
         AND current_owner.credential_id = a.runtime_token_id
         AND current_owner.worker_id = a.runtime_worker_id
-        AND current_owner.attached_core_instance_id = $12
-        AND current_owner.status IN ('active', 'draining')
+        AND (
+            (
+                current_owner.attached_core_instance_id = $12
+                AND current_owner.status IN ('active', 'draining')
+            )
+            OR (
+                current_owner.attached_core_instance_id IS NULL
+                AND current_owner.status IN ('offline', 'closed')
+                AND a.attached_core_instance_id = $12
+                AND EXISTS (
+                    SELECT 1
+                    FROM runtime_session_attachments detached
+                    WHERE detached.runtime_session_id = current_owner.runtime_session_id
+                      AND detached.core_instance_id = $12
+                      AND detached.detached_at IS NOT NULL
+                )
+            )
+        )
   )
 RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
 `
@@ -817,6 +833,113 @@ func (q *Queries) LockRuntimeCredentialForPrincipalValidation(ctx context.Contex
 		&i.RevokedAt,
 		&i.RotationPredecessorID,
 		&i.RevocationKind,
+		&i.DatabaseNow,
+	)
+	return i, err
+}
+
+const lockRuntimeSessionForOfferRelease = `-- name: LockRuntimeSessionForOfferRelease :one
+SELECT s.runtime_session_id, s.node_id, s.agent_id, s.credential_id,
+       s.worker_id, s.session_epoch, s.device_certificate_serial,
+       s.node_version, s.protocol_version, s.runtime_contract_id,
+       s.runtime_contract_digest, s.features, s.capacity, s.inflight,
+       s.status, s.attached_core_instance_id, s.connected_at,
+       s.heartbeat_at, s.disconnected_at, s.created_at, s.updated_at,
+       clock_timestamp() AS database_now
+FROM runtime_sessions s
+WHERE s.runtime_session_id = $1
+  AND s.node_id = $2
+  AND s.agent_id = $3
+  AND s.credential_id = $4
+  AND s.worker_id = $5
+  AND s.protocol_version = 2
+  AND s.runtime_contract_id = 'openlinker.runtime.v2'
+  AND (
+      (
+          s.status IN ('active', 'draining')
+          AND s.attached_core_instance_id = $6
+      )
+      OR (
+          s.status IN ('offline', 'closed')
+          AND s.attached_core_instance_id IS NULL
+          AND EXISTS (
+              SELECT 1
+              FROM runtime_session_attachments detached
+              WHERE detached.runtime_session_id = s.runtime_session_id
+                AND detached.core_instance_id = $6
+                AND detached.detached_at IS NOT NULL
+          )
+      )
+  )
+FOR UPDATE OF s
+`
+
+type LockRuntimeSessionForOfferReleaseParams struct {
+	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID           uuid.UUID `db:"node_id" json:"node_id"`
+	AgentID          uuid.UUID `db:"agent_id" json:"agent_id"`
+	CredentialID     uuid.UUID `db:"credential_id" json:"credential_id"`
+	WorkerID         string    `db:"worker_id" json:"worker_id"`
+	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+}
+
+type LockRuntimeSessionForOfferReleaseRow struct {
+	RuntimeSessionID        uuid.UUID  `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID                  uuid.UUID  `db:"node_id" json:"node_id"`
+	AgentID                 uuid.UUID  `db:"agent_id" json:"agent_id"`
+	CredentialID            uuid.UUID  `db:"credential_id" json:"credential_id"`
+	WorkerID                string     `db:"worker_id" json:"worker_id"`
+	SessionEpoch            int64      `db:"session_epoch" json:"session_epoch"`
+	DeviceCertificateSerial string     `db:"device_certificate_serial" json:"device_certificate_serial"`
+	NodeVersion             string     `db:"node_version" json:"node_version"`
+	ProtocolVersion         int32      `db:"protocol_version" json:"protocol_version"`
+	RuntimeContractID       string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest   string     `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	Features                []string   `db:"features" json:"features"`
+	Capacity                int32      `db:"capacity" json:"capacity"`
+	Inflight                int32      `db:"inflight" json:"inflight"`
+	Status                  string     `db:"status" json:"status"`
+	AttachedCoreInstanceID  *uuid.UUID `db:"attached_core_instance_id" json:"attached_core_instance_id"`
+	ConnectedAt             time.Time  `db:"connected_at" json:"connected_at"`
+	HeartbeatAt             time.Time  `db:"heartbeat_at" json:"heartbeat_at"`
+	DisconnectedAt          *time.Time `db:"disconnected_at" json:"disconnected_at"`
+	CreatedAt               time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt               time.Time  `db:"updated_at" json:"updated_at"`
+	DatabaseNow             time.Time  `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) LockRuntimeSessionForOfferRelease(ctx context.Context, arg LockRuntimeSessionForOfferReleaseParams) (LockRuntimeSessionForOfferReleaseRow, error) {
+	row := q.db.QueryRow(ctx, lockRuntimeSessionForOfferRelease,
+		arg.RuntimeSessionID,
+		arg.NodeID,
+		arg.AgentID,
+		arg.CredentialID,
+		arg.WorkerID,
+		arg.CoreInstanceID,
+	)
+	var i LockRuntimeSessionForOfferReleaseRow
+	err := row.Scan(
+		&i.RuntimeSessionID,
+		&i.NodeID,
+		&i.AgentID,
+		&i.CredentialID,
+		&i.WorkerID,
+		&i.SessionEpoch,
+		&i.DeviceCertificateSerial,
+		&i.NodeVersion,
+		&i.ProtocolVersion,
+		&i.RuntimeContractID,
+		&i.RuntimeContractDigest,
+		&i.Features,
+		&i.Capacity,
+		&i.Inflight,
+		&i.Status,
+		&i.AttachedCoreInstanceID,
+		&i.ConnectedAt,
+		&i.HeartbeatAt,
+		&i.DisconnectedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
 		&i.DatabaseNow,
 	)
 	return i, err

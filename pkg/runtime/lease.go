@@ -507,7 +507,7 @@ func (s *RuntimeLeaseService) ReleaseUnackedOffer(
 	}
 
 	return s.repository.WithTransaction(ctx, func(tx runtimeLeaseTransaction) error {
-		if _, err := s.lockPrincipal(ctx, tx, principal); err != nil {
+		if err := s.lockOfferReleasePrincipal(ctx, tx, principal); err != nil {
 			return err
 		}
 		existing, err := tx.GetExistingUnacceptedRunOfferForSession(ctx, existingOfferParams(principal))
@@ -519,6 +519,50 @@ func (s *RuntimeLeaseService) ReleaseUnackedOffer(
 		}
 		return s.finishAndReleaseOffer(ctx, tx, principal, offerEvidenceFromExisting(existing), "offer_rejected", reasonCode)
 	})
+}
+
+func (s *RuntimeLeaseService) lockOfferReleasePrincipal(
+	ctx context.Context,
+	tx runtimeLeaseTransaction,
+	principal RuntimeSessionPrincipal,
+) error {
+	session, err := tx.LockRuntimeSessionForOfferRelease(ctx, db.LockRuntimeSessionForOfferReleaseParams{
+		RuntimeSessionID: principal.RuntimeSessionID,
+		NodeID:           principal.NodeID,
+		AgentID:          principal.AgentID,
+		CredentialID:     principal.CredentialID,
+		WorkerID:         principal.WorkerID,
+		CoreInstanceID:   s.coreInstanceID,
+	})
+	if err != nil {
+		return principalLockError(err)
+	}
+	if session.SessionEpoch != principal.SessionEpoch ||
+		session.DeviceCertificateSerial != principal.DeviceCertificateSerial ||
+		(session.Status != "active" && session.Status != "draining" &&
+			session.Status != "offline" && session.Status != "closed") {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
+	}
+
+	node, err := tx.LockRuntimeNodeForPrincipalValidation(ctx, db.LockRuntimeNodeForPrincipalValidationParams{
+		NodeID:                    principal.NodeID,
+		DeviceCertificateSerial:   principal.DeviceCertificateSerial,
+		DevicePublicKeyThumbprint: principal.DevicePublicKeyThumbprintSHA256,
+	})
+	if err != nil {
+		return principalLockError(err)
+	}
+	credential, err := tx.LockRuntimeCredentialForPrincipalValidation(ctx, db.LockRuntimeCredentialForPrincipalValidationParams{
+		CredentialID: principal.CredentialID,
+		AgentID:      &principal.AgentID,
+	})
+	if err != nil {
+		return principalLockError(err)
+	}
+	if node.NodeID != principal.NodeID || credential.AgentID == nil || *credential.AgentID != principal.AgentID {
+		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
+	}
+	return nil
 }
 
 type lockedRuntimeLeasePrincipal struct {
@@ -995,6 +1039,7 @@ type runtimeLeaseRepository interface {
 
 type runtimeLeaseTransaction interface {
 	LockRuntimeSessionForPrincipalValidation(context.Context, db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error)
+	LockRuntimeSessionForOfferRelease(context.Context, db.LockRuntimeSessionForOfferReleaseParams) (db.LockRuntimeSessionForOfferReleaseRow, error)
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
 	GetExistingUnacceptedRunOfferForSession(context.Context, db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error)
@@ -1041,6 +1086,9 @@ type postgresRuntimeLeaseTransaction struct {
 
 func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error) {
 	return t.queries.LockRuntimeSessionForPrincipalValidation(ctx, params)
+}
+func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionForOfferRelease(ctx context.Context, params db.LockRuntimeSessionForOfferReleaseParams) (db.LockRuntimeSessionForOfferReleaseRow, error) {
+	return t.queries.LockRuntimeSessionForOfferRelease(ctx, params)
 }
 func (t *postgresRuntimeLeaseTransaction) LockRuntimeNodeForPrincipalValidation(ctx context.Context, params db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error) {
 	return t.queries.LockRuntimeNodeForPrincipalValidation(ctx, params)
