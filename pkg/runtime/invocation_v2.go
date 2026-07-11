@@ -291,10 +291,12 @@ func rejectTrailingRuntimeInvocationJSON(decoder *json.Decoder) error {
 func canonicalRuntimeInvocationProof(request RuntimeInvocationProofRequest) ([]byte, error) {
 	method := strings.ToUpper(strings.TrimSpace(request.Method))
 	path := strings.TrimSpace(request.Path)
-	idempotencyKey := strings.TrimSpace(request.IdempotencyKey)
+	idempotencyKey := request.IdempotencyKey
 	contextValue := strings.TrimSpace(request.Context)
-	if method == "" || path == "" || idempotencyKey == "" || contextValue == "" ||
-		len(idempotencyKey) > 200 || !strings.HasPrefix(path, "/") {
+	if method == "" || path == "" || contextValue == "" || !strings.HasPrefix(path, "/") {
+		return nil, ErrInvalidRuntimeInvocation
+	}
+	if _, err := HashIdempotencyKey(idempotencyKey); err != nil {
 		return nil, ErrInvalidRuntimeInvocation
 	}
 	bodyDigest := sha256.Sum256(request.Body)

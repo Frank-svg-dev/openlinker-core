@@ -83,6 +83,7 @@ func TestRuntimeInvocationProofBindsContextMethodPathKeyAndBody(t *testing.T) {
 		func(req *RuntimeInvocationProofRequest) { req.Method = "PUT" },
 		func(req *RuntimeInvocationProofRequest) { req.Path += "/other" },
 		func(req *RuntimeInvocationProofRequest) { req.IdempotencyKey += "-other" },
+		func(req *RuntimeInvocationProofRequest) { req.IdempotencyKey = " " + req.IdempotencyKey + " " },
 		func(req *RuntimeInvocationProofRequest) { req.Context += "x" },
 		func(req *RuntimeInvocationProofRequest) { req.Body = append(req.Body, ' ') },
 	}
