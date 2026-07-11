@@ -36,6 +36,7 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 		"POST /api/v1/agent-runtime/v2/runs/:id/lease-renew",
 		"POST /api/v1/agent-runtime/v2/runs/:id/events",
 		"POST /api/v1/agent-runtime/v2/runs/:id/result",
+		"POST /api/v1/agent-runtime/v2/runs/resume",
 		"GET /api/v1/agent-runtime/v2/ws",
 	} {
 		require.True(t, routes[route], route)
@@ -284,6 +285,51 @@ func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
 	require.True(t, resultAck.Replayed)
 }
 
+func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
+	fixture := newRuntimeV2HandlerFixture()
+	identity := fixture.attemptIdentity()
+	sourceSessionID := uuid.New()
+	identity.RuntimeSessionID = sourceSessionID
+	request := RuntimeResumePayload{
+		NodeID:           fixture.acting.NodeID,
+		AgentID:          fixture.acting.AgentID,
+		WorkerID:         fixture.acting.WorkerID,
+		RuntimeSessionID: fixture.acting.RuntimeSessionID,
+		Attempts: []ResumeAttempt{{
+			AttemptIdentity:          identity,
+			LastAckedClientEventSeq:  0,
+			PendingClientEventRanges: []EventRange{{Start: 1, End: 1}},
+		}},
+	}
+	fixture.resume.response = RuntimeResumeResponse{Decisions: []RunResumeAcceptedPayload{{
+		AttemptIdentity: identity,
+		Decision:        RuntimeResumeUploadSpoolOnly,
+		AllowedActions:  []RuntimeResumeAction{RuntimeActionUploadEvents},
+	}}}
+
+	recorder := serveRuntimeV2(
+		t, fixture.controller(), http.MethodPost,
+		"/api/v1/agent-runtime/v2/runs/resume", request,
+	)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.sessions.resolvedSessionID)
+	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.resume.principal.RuntimeSessionID)
+	require.Equal(t, sourceSessionID, fixture.resume.payload.Attempts[0].AttemptIdentity.RuntimeSessionID)
+	var response RuntimeResumeResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, fixture.resume.response, response)
+
+	request.NodeID = uuid.New()
+	request.Attempts[0].AttemptIdentity.NodeID = request.NodeID
+	recorder = serveRuntimeV2(
+		t, fixture.controller(), http.MethodPost,
+		"/api/v1/agent-runtime/v2/runs/resume", request,
+	)
+	require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
+	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorPermissionDenied)
+	require.Equal(t, 1, fixture.resume.calls)
+}
+
 func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.T) {
 	fixture := newRuntimeV2HandlerFixture()
 	identity := fixture.attemptIdentity()
@@ -374,6 +420,7 @@ type runtimeV2HandlerFixture struct {
 	leases        *runtimeV2LeaseServiceFake
 	events        *runtimeV2EventStoreFake
 	finalizer     *runtimeV2ResultFinalizerFake
+	resume        *runtimeV2ResumeServiceFake
 }
 
 func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
@@ -413,6 +460,7 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 		leases:    &runtimeV2LeaseServiceFake{},
 		events:    &runtimeV2EventStoreFake{},
 		finalizer: &runtimeV2ResultFinalizerFake{},
+		resume:    &runtimeV2ResumeServiceFake{},
 	}
 	fixture.sessions.resolveResponse = acting
 	fixture.sessions.workerResolveResponse = acting
@@ -427,6 +475,7 @@ func (f *runtimeV2HandlerFixture) controller() *RuntimeV2HTTPController {
 		Leases:              f.leases,
 		EventStore:          f.events,
 		Finalizer:           f.finalizer,
+		Resume:              f.resume,
 	})
 }
 
@@ -648,6 +697,25 @@ type runtimeV2ResultFinalizerFake struct {
 	request   RuntimeResultRequest
 }
 
+type runtimeV2ResumeServiceFake struct {
+	response  RuntimeResumeResponse
+	err       error
+	principal RuntimeSessionPrincipal
+	payload   RuntimeResumePayload
+	calls     int
+}
+
+func (f *runtimeV2ResumeServiceFake) Resume(
+	_ context.Context,
+	principal RuntimeSessionPrincipal,
+	payload RuntimeResumePayload,
+) (RuntimeResumeResponse, error) {
+	f.calls++
+	f.principal = principal
+	f.payload = payload
+	return f.response, f.err
+}
+
 func (f *runtimeV2ResultFinalizerFake) Finalize(_ context.Context, principal RuntimeResultPrincipal, request RuntimeResultRequest) (RuntimeResultAck, error) {
 	f.principal = principal
 	f.request = request
@@ -661,4 +729,5 @@ var (
 	_ RuntimeV2LeaseService        = (*runtimeV2LeaseServiceFake)(nil)
 	_ RuntimeV2EventStore          = (*runtimeV2EventStoreFake)(nil)
 	_ RuntimeV2ResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
+	_ RuntimeV2ResumeService       = (*runtimeV2ResumeServiceFake)(nil)
 )

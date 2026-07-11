@@ -259,6 +259,7 @@ func configureRuntimeV2(
 		Leases:              leases,
 		EventStore:          runtime.NewRuntimeEventStore(pool),
 		Finalizer:           runtime.NewResultFinalizer(pool, nil, nil),
+		Resume:              runtime.NewRuntimeResumeService(pool, coreInstanceID, 0),
 	})
 }
 

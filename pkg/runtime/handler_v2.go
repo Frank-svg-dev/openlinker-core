@@ -116,6 +116,7 @@ func (h *RuntimeV2HTTPController) Register(api *echo.Group) {
 	api.POST("/agent-runtime/v2/runs/:id/lease-renew", h.RenewLease)
 	api.POST("/agent-runtime/v2/runs/:id/events", h.AppendEvent)
 	api.POST("/agent-runtime/v2/runs/:id/result", h.FinalizeResult)
+	api.POST("/agent-runtime/v2/runs/resume", h.ResumeRuns)
 	api.GET("/agent-runtime/v2/ws", h.WebSocket)
 }
 
@@ -399,6 +400,47 @@ func (h *RuntimeV2HTTPController) FinalizeResult(c echo.Context) error {
 		DispatchState:  RuntimeDispatchState(ack.DispatchState),
 		Replayed:       ack.Replayed,
 		NextAttemptAt:  ack.NextAttemptAt,
+	}
+	return writeRuntimeV2Payload(c, http.StatusOK, response)
+}
+
+// ResumeRuns authorizes recovery against the currently authenticated target
+// Session. Attempt identities in the payload continue to name their immutable
+// source Sessions; the body therefore cannot be resolved through an Attempt's
+// source runtime_session_id.
+func (h *RuntimeV2HTTPController) ResumeRuns(c echo.Context) error {
+	authenticated, transportErr := h.authenticate(c)
+	if transportErr != nil {
+		return writeRuntimeV2Error(c, transportErr)
+	}
+	if h.dependencies.Sessions == nil || h.dependencies.Resume == nil {
+		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+	}
+	payload, err := DecodeRuntimeBody[RuntimeResumePayload](c.Request().Body)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	if payload.AgentID != authenticated.AgentID || payload.NodeID != authenticated.Device.NodeID {
+		return writeRuntimeV2Error(c, newRuntimeTransportError(
+			RuntimeErrorPermissionDenied,
+			runtimeErrorDefaultMessage(RuntimeErrorPermissionDenied),
+			nil,
+		))
+	}
+	principal, err := h.resolveSession(c, authenticated, payload.RuntimeSessionID)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+	}
+	if principal.WorkerID != payload.WorkerID {
+		return writeRuntimeV2Error(c, newRuntimeTransportError(
+			RuntimeErrorLeaseIdentityMismatch,
+			runtimeErrorDefaultMessage(RuntimeErrorLeaseIdentityMismatch),
+			nil,
+		))
+	}
+	response, err := h.dependencies.Resume.Resume(c.Request().Context(), principal, payload)
+	if err != nil {
+		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
 	}
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
