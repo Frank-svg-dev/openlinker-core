@@ -201,6 +201,33 @@ func TestValidateRuntimeReplyCorrelation(t *testing.T) {
 	}
 }
 
+func TestRuntimeResumePreservesSourceAttemptSessionDuringTakeover(t *testing.T) {
+	identity := AttemptIdentity{
+		RunID:            uuid.New(),
+		AttemptID:        uuid.New(),
+		LeaseID:          uuid.New(),
+		FencingToken:     3,
+		NodeID:           uuid.New(),
+		AgentID:          uuid.New(),
+		WorkerID:         "worker-a",
+		RuntimeSessionID: uuid.New(),
+	}
+	payload := RuntimeResumePayload{
+		NodeID:           identity.NodeID,
+		AgentID:          identity.AgentID,
+		WorkerID:         identity.WorkerID,
+		RuntimeSessionID: uuid.New(),
+		Attempts: []ResumeAttempt{{
+			AttemptIdentity:          identity,
+			PendingClientEventRanges: []EventRange{},
+		}},
+	}
+	require.NoError(t, ValidateRuntimePayload(payload))
+
+	payload.AgentID = uuid.New()
+	requireRuntimeTransportCode(t, ValidateRuntimePayload(payload), RuntimeErrorValidationFailed)
+}
+
 func TestRuntimeTransportErrorMappings(t *testing.T) {
 	t.Parallel()
 

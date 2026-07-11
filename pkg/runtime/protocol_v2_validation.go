@@ -587,7 +587,10 @@ func validateRuntimeResume(value RuntimeResumePayload) error {
 			return err
 		}
 		identity := attempt.AttemptIdentity
-		if identity.NodeID != value.NodeID || identity.AgentID != value.AgentID || identity.WorkerID != value.WorkerID || identity.RuntimeSessionID != value.RuntimeSessionID {
+		// AttemptIdentity remains immutable and therefore names the source
+		// Session. RuntimeResumePayload names the currently authenticated target
+		// Session, which may differ during an authorized process takeover.
+		if identity.NodeID != value.NodeID || identity.AgentID != value.AgentID || identity.WorkerID != value.WorkerID {
 			return runtimeValidationError("resume attempt identity does not match session", nil)
 		}
 	}
