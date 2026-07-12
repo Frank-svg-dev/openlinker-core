@@ -50,7 +50,7 @@ UPDATE runtime_signal_outbox
 SET status = 'pending',
     lease_owner = NULL,
     lease_expires_at = NULL,
-    available_at = $3,
+    available_at = clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond'),
     last_error = $4
 WHERE id = $1
   AND status = 'processing'

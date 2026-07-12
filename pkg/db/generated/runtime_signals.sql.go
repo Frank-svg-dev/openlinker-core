@@ -107,21 +107,22 @@ func (q *Queries) MarkRuntimeSignalPublished(ctx context.Context, arg MarkRuntim
 const retryRuntimeSignal = `-- name: RetryRuntimeSignal :one
 UPDATE runtime_signal_outbox
 SET status = 'pending', lease_owner = NULL, lease_expires_at = NULL,
-    available_at = $3, last_error = $4
+    available_at = clock_timestamp() + ($3::bigint * INTERVAL '1 millisecond'),
+    last_error = $4
 WHERE id = $1 AND status = 'processing' AND lease_owner = $2
 RETURNING *`
 
 type RetryRuntimeSignalParams struct {
-	ID          uuid.UUID `db:"id" json:"id"`
-	LeaseOwner  uuid.UUID `db:"lease_owner" json:"lease_owner"`
-	AvailableAt time.Time `db:"available_at" json:"available_at"`
-	LastError   string    `db:"last_error" json:"last_error"`
+	ID           uuid.UUID `db:"id" json:"id"`
+	LeaseOwner   uuid.UUID `db:"lease_owner" json:"lease_owner"`
+	RetryAfterMs int64     `db:"retry_after_ms" json:"retry_after_ms"`
+	LastError    string    `db:"last_error" json:"last_error"`
 }
 
 func (q *Queries) RetryRuntimeSignal(ctx context.Context, arg RetryRuntimeSignalParams) (RuntimeSignalOutbox, error) {
 	var signal RuntimeSignalOutbox
 	err := scanRuntimeSignal(q.db.QueryRow(ctx, retryRuntimeSignal,
-		arg.ID, arg.LeaseOwner, arg.AvailableAt, arg.LastError,
+		arg.ID, arg.LeaseOwner, arg.RetryAfterMs, arg.LastError,
 	), &signal)
 	return signal, err
 }

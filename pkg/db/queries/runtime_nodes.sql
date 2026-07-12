@@ -10,6 +10,64 @@
 -- Pass the complete scope to each phase; every query sorts UUIDs itself, so
 -- callers must not rely on input-array order or lock a principal first.
 
+-- name: HasActiveRuntimeV2SessionForAgent :one
+-- Availability is PostgreSQL truth. Redis presence is only an advisory hint.
+-- Keep this query parameter-free beyond agent_id so every caller applies the
+-- same heartbeat and current-contract boundary.
+SELECT EXISTS (
+    SELECT 1
+    FROM runtime_sessions s
+    JOIN runtime_nodes n
+      ON n.node_id = s.node_id
+    JOIN agent_tokens t
+      ON t.id = s.credential_id
+     AND t.agent_id = s.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = s.runtime_contract_id
+     AND contract.runtime_contract_digest = s.runtime_contract_digest
+     AND contract.is_current
+    WHERE s.agent_id = $1
+      AND s.status IN ('active', 'draining')
+      AND s.attached_core_instance_id IS NOT NULL
+      AND s.disconnected_at IS NULL
+      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '15 seconds'
+      AND s.protocol_version = 2
+      AND s.runtime_contract_id = 'openlinker.runtime.v2'
+      AND s.runtime_contract_digest = '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61'
+      AND s.features @> ARRAY[
+          'lease_fence',
+          'assignment_confirm',
+          'renew',
+          'resume',
+          'event_ack',
+          'result_ack',
+          'cancel',
+          'persistent_spool'
+      ]::text[]
+      AND n.status IN ('active', 'draining')
+      AND n.revoked_at IS NULL
+      AND n.protocol_version = s.protocol_version
+      AND n.runtime_contract_id = s.runtime_contract_id
+      AND n.runtime_contract_digest = s.runtime_contract_digest
+      AND n.device_certificate_serial = s.device_certificate_serial
+      AND n.node_version = s.node_version
+      AND n.features @> s.features
+      AND s.features @> n.features
+      AND n.last_seen_at IS NOT NULL
+      AND n.last_seen_at >= clock_timestamp() - INTERVAL '15 seconds'
+      AND t.status = 'active_runtime'
+      AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
+      AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = s.runtime_session_id
+            AND attachment.core_instance_id = s.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
+);
+
 -- name: ResolveRuntimeWorkerSessionPrincipal :one
 -- Transport authentication proves Node/Agent/Credential/worker. Resolve the
 -- currently attached target Session from those facts; never accept an
