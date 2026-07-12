@@ -39,13 +39,13 @@ func TestSkillHandlerDispatchesServiceSuccess(t *testing.T) {
 			CategoryFilter: "data",
 			Sort:           "name_asc",
 		}}
-		c, rec := newSkillDispatchContext(http.MethodGet, "/skills?q=sql&category=data&sort=name_asc&page=2&size=5", "", "", nil)
+		c, rec := newSkillDispatchContext(http.MethodGet, "/skills?q=sql&category=data&sort=name_asc&locale=en&page=2&size=5", "", "", nil)
 
 		if err := NewHandler(mock, nil).ListAll(c); err != nil {
 			t.Fatalf("ListAll error = %v", err)
 		}
-		if rec.Code != http.StatusOK || mock.listPageQuery != "sql" || mock.listPageCategory != "data" || mock.listPageSort != "name_asc" || mock.listPagePage != 2 || mock.listPageSize != 5 {
-			t.Fatalf("list page code=%d query=%q category=%q sort=%q page=%d size=%d", rec.Code, mock.listPageQuery, mock.listPageCategory, mock.listPageSort, mock.listPagePage, mock.listPageSize)
+		if rec.Code != http.StatusOK || mock.listPageQuery != "sql" || mock.listPageCategory != "data" || mock.listPageSort != "name_asc" || mock.listPageLocale != "en" || mock.listPagePage != 2 || mock.listPageSize != 5 {
+			t.Fatalf("list page code=%d query=%q category=%q sort=%q locale=%q page=%d size=%d", rec.Code, mock.listPageQuery, mock.listPageCategory, mock.listPageSort, mock.listPageLocale, mock.listPagePage, mock.listPageSize)
 		}
 		var body SkillListResponse
 		decodeSkillDispatchJSON(t, rec, &body)
@@ -421,6 +421,7 @@ type mockSkillService struct {
 	listPageQuery    string
 	listPageCategory string
 	listPageSort     string
+	listPageLocale   string
 	listPagePage     int32
 	listPageSize     int32
 	listPageResp     *SkillListResponse
@@ -458,10 +459,11 @@ func (m *mockSkillService) ListAll(context.Context) ([]db.Skill, error) {
 	return m.listAllResp, m.listAllErr
 }
 
-func (m *mockSkillService) ListPage(_ context.Context, query, category, sort string, page, size int32) (*SkillListResponse, error) {
+func (m *mockSkillService) ListPage(_ context.Context, query, category, sort, locale string, page, size int32) (*SkillListResponse, error) {
 	m.listPageQuery = query
 	m.listPageCategory = category
 	m.listPageSort = sort
+	m.listPageLocale = locale
 	m.listPagePage = page
 	m.listPageSize = size
 	return m.listPageResp, m.listPageErr

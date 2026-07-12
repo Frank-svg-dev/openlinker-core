@@ -26,7 +26,7 @@ type Handler struct {
 
 type skillService interface {
 	ListAll(context.Context) ([]db.Skill, error)
-	ListPage(context.Context, string, string, string, int32, int32) (*SkillListResponse, error)
+	ListPage(context.Context, string, string, string, string, int32, int32) (*SkillListResponse, error)
 	SetAgentSkills(context.Context, uuid.UUID, []string) error
 	ListForAgent(context.Context, uuid.UUID) ([]db.Skill, error)
 	CreateProposal(context.Context, uuid.UUID, *CreateSkillProposalRequest) (*SkillProposalItem, error)
@@ -74,6 +74,7 @@ func (h *Handler) ListAll(c echo.Context) error {
 		c.QueryParam("q"),
 		c.QueryParam("category"),
 		c.QueryParam("sort"),
+		c.QueryParam("locale"),
 		queryInt32(c, "page", 1),
 		queryInt32(c, "size", 50),
 	)
@@ -181,11 +182,12 @@ func (h *Handler) ListProposals(c echo.Context) error {
 // toSkillItem db.Skill → API DTO。
 func toSkillItem(s *db.Skill) SkillItem {
 	return SkillItem{
-		ID:          s.ID,
-		Category:    s.Category,
-		Name:        s.Name,
-		Description: s.Description,
-		SortOrder:   s.SortOrder,
+		ID:           s.ID,
+		Category:     s.Category,
+		Name:         s.Name,
+		Description:  s.Description,
+		SortOrder:    s.SortOrder,
+		Translations: translationsForSkill(s.ID),
 	}
 }
 

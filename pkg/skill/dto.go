@@ -6,11 +6,19 @@ import "github.com/google/uuid"
 
 // SkillItem 单个 skill 的对外 DTO。
 type SkillItem struct {
-	ID          string `json:"id"`
-	Category    string `json:"category"`
+	ID           string                      `json:"id"`
+	Category     string                      `json:"category"`
+	Name         string                      `json:"name"`
+	Description  string                      `json:"description"`
+	SortOrder    int32                       `json:"sort_order"`
+	Translations map[string]SkillTranslation `json:"translations,omitempty"`
+}
+
+// SkillTranslation is locale-specific public copy for one canonical Skill.
+// The top-level fields remain the catalog's default copy for compatibility.
+type SkillTranslation struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
-	SortOrder   int32  `json:"sort_order"`
 }
 
 // SkillListResponse 是公开 Skill 目录列表响应。

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -53,16 +54,19 @@ func (s *Service) ListAll(ctx context.Context) ([]db.Skill, error) {
 }
 
 // ListPage 返回公开 Skill 目录分页结果。
-func (s *Service) ListPage(ctx context.Context, query, category, sort string, page, size int32) (*SkillListResponse, error) {
+func (s *Service) ListPage(ctx context.Context, query, category, listSort, locale string, page, size int32) (*SkillListResponse, error) {
 	page, size = normalizeSkillPage(page, size, 50, 200)
 	query = normalizeSkillListQuery(query)
 	category = normalizeSkillCategoryFilter(category)
-	sort = normalizeSkillListSort(sort)
+	listSort = normalizeSkillListSort(listSort)
+	if normalizeSkillLocale(locale) == "en" {
+		return s.listEnglishPage(ctx, query, category, listSort, page, size)
+	}
 	offset := (page - 1) * size
 	rows, err := s.q.ListSkills(ctx, db.ListSkillsParams{
 		Query:    query,
 		Category: category,
-		Sort:     sort,
+		Sort:     listSort,
 		Limit:    size,
 		Offset:   offset,
 	})
@@ -89,8 +93,98 @@ func (s *Service) ListPage(ctx context.Context, query, category, sort string, pa
 		Size:           size,
 		Query:          query,
 		CategoryFilter: category,
-		Sort:           sort,
+		Sort:           listSort,
 	}, nil
+}
+
+// listEnglishPage keeps the canonical Chinese catalog in PostgreSQL while
+// applying public English copy at the API boundary. The curated Skill catalog
+// is deliberately small, so filtering before pagination keeps search, total,
+// and name ordering consistent with what an English client displays.
+func (s *Service) listEnglishPage(ctx context.Context, query, category, listSort string, page, size int32) (*SkillListResponse, error) {
+	dbSort := listSort
+	if listSort == "name_asc" || listSort == "name_desc" {
+		dbSort = "order"
+	}
+	rows, err := s.q.ListSkills(ctx, db.ListSkillsParams{
+		Category: category,
+		Sort:     dbSort,
+		Limit:    200,
+	})
+	if err != nil {
+		log.Error().Err(err).Msg("skill.ListPage: ListSkills English catalog")
+		return nil, httpx.Internal("查询 skill 列表失败")
+	}
+
+	rows = filterEnglishSkillRows(rows, query)
+	if listSort == "name_asc" || listSort == "name_desc" {
+		sortEnglishSkillRows(rows, listSort == "name_desc")
+	}
+	total := int64(len(rows))
+	rows = paginateSkillRows(rows, page, size)
+	items := make([]SkillItem, 0, len(rows))
+	for i := range rows {
+		items = append(items, toSkillItem(&rows[i]))
+	}
+	return &SkillListResponse{
+		Items:          items,
+		Total:          total,
+		Page:           page,
+		Size:           size,
+		Query:          query,
+		CategoryFilter: category,
+		Sort:           listSort,
+	}, nil
+}
+
+func filterEnglishSkillRows(rows []db.Skill, query string) []db.Skill {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return rows
+	}
+	filtered := make([]db.Skill, 0, len(rows))
+	for i := range rows {
+		translation, ok := englishSkillTranslations[rows[i].ID]
+		if strings.Contains(strings.ToLower(rows[i].ID), needle) ||
+			(ok && (strings.Contains(strings.ToLower(translation.Name), needle) ||
+				strings.Contains(strings.ToLower(translation.Description), needle))) {
+			filtered = append(filtered, rows[i])
+		}
+	}
+	return filtered
+}
+
+func sortEnglishSkillRows(rows []db.Skill, descending bool) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		left := englishSkillName(rows[i].ID)
+		right := englishSkillName(rows[j].ID)
+		if left == right {
+			return rows[i].ID < rows[j].ID
+		}
+		if descending {
+			return left > right
+		}
+		return left < right
+	})
+}
+
+func englishSkillName(skillID string) string {
+	if translation, ok := englishSkillTranslations[skillID]; ok && strings.TrimSpace(translation.Name) != "" {
+		return strings.ToLower(strings.TrimSpace(translation.Name))
+	}
+	return strings.ToLower(strings.TrimSpace(skillID))
+}
+
+func paginateSkillRows(rows []db.Skill, page, size int32) []db.Skill {
+	start := int64(page-1) * int64(size)
+	if start >= int64(len(rows)) {
+		return []db.Skill{}
+	}
+	end := start + int64(size)
+	if end > int64(len(rows)) {
+		end = int64(len(rows))
+	}
+	return rows[int(start):int(end)]
 }
 
 // ListForAgent 返回某 Agent 已声明的 skill 详情。
@@ -395,6 +489,13 @@ func normalizeSkillListSort(sort string) string {
 	default:
 		return "order"
 	}
+}
+
+func normalizeSkillLocale(locale string) string {
+	if strings.EqualFold(strings.TrimSpace(locale), "en") {
+		return "en"
+	}
+	return "zh"
 }
 
 func normalizeSkillProposalStatus(status string) string {
