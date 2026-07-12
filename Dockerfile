@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 # core-api 独立镜像(开源版,不含 wallet/payment/provider-specific LLM client 等)。
 # build context = openlinker-core/
 
@@ -8,10 +10,19 @@ ARG TARGETOS
 ARG TARGETARCH
 
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    set -eu; \
+    attempt=1; \
+    until GODEBUG=http2client=0 go mod download; do \
+      if [ "${attempt}" -ge 3 ]; then exit 1; fi; \
+      sleep "$((attempt * 2))"; \
+      attempt=$((attempt + 1)); \
+    done
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o api ./cmd/api && \
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o api ./cmd/api && \
     CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o runtime-cutover ./cmd/runtime-cutover
 
 FROM alpine:3.19
