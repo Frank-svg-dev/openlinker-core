@@ -60,7 +60,7 @@ type Control struct {
 	CutoverID         uuid.UUID  `json:"cutover_id"`
 	DrainStartedAt    *time.Time `json:"drain_started_at,omitempty"`
 	DrainDeadlineAt   *time.Time `json:"drain_deadline_at,omitempty"`
-	HardMaintenanceAt *time.Time `json:"hard_maintenance_at,omitempty"`
+	HardMaintenanceAt time.Time  `json:"hard_maintenance_at"`
 	ReopenedAt        *time.Time `json:"reopened_at,omitempty"`
 	Version           int64      `json:"version"`
 	UpdatedAt         time.Time  `json:"updated_at"`

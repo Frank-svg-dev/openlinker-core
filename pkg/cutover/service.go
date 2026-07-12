@@ -511,24 +511,7 @@ SELECT (SELECT COUNT(*)::bigint FROM runs WHERE status = 'running'),
 	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
 		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
 	}
-	newControl := control
-	switch target {
-	case "draining":
-		newControl.Mode = target
-		newControl.ExpectedReplicas = req.ExpectedReplicas
-		newControl.CutoverID = uuid.New()
-		newControl.DrainStartedAt = &now
-		newControl.DrainDeadlineAt = req.DrainDeadline
-		newControl.HardMaintenanceAt = nil
-		newControl.ReopenedAt = nil
-	case "hard_maintenance":
-		newControl.Mode = target
-		newControl.HardMaintenanceAt = &now
-		newControl.ReopenedAt = nil
-	case "normal":
-		newControl.Mode = target
-		newControl.ReopenedAt = &now
-	}
+	newControl := controlAfterTransition(control, target, req, now)
 	commandID := uuid.New()
 	tag, err := tx.Exec(ctx, `
 UPDATE runtime_cluster_control
@@ -556,6 +539,35 @@ WHERE singleton_id = 1 AND version = $1
 	}
 	report.Changed = true
 	return report, nil
+}
+
+func controlAfterTransition(control Control, target string, req TransitionRequest, now time.Time) Control {
+	newControl := control
+	switch target {
+	case "draining":
+		newControl.Mode = target
+		newControl.ExpectedReplicas = req.ExpectedReplicas
+		newControl.CutoverID = uuid.New()
+		newControl.DrainStartedAt = &now
+		newControl.DrainDeadlineAt = req.DrainDeadline
+		newControl.ReopenedAt = nil
+	case "hard_maintenance":
+		newControl.Mode = target
+		switch control.Mode {
+		case "normal":
+			newControl.CutoverID = uuid.New()
+			newControl.DrainStartedAt = nil
+			newControl.DrainDeadlineAt = nil
+			newControl.HardMaintenanceAt = now
+		case "draining":
+			newControl.HardMaintenanceAt = now
+		}
+		newControl.ReopenedAt = nil
+	case "normal":
+		newControl.Mode = target
+		newControl.ReopenedAt = &now
+	}
+	return newControl
 }
 
 func transitionAllowed(current, target string) bool {

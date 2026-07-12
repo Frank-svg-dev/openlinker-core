@@ -153,6 +153,137 @@ func TestTransitionMatrixIsBreakingAndExplicit(t *testing.T) {
 	}
 }
 
+func TestDrainPreservesNonNullableHardMaintenanceEvidence(t *testing.T) {
+	lastMaintenance := time.Date(2026, 7, 12, 1, 2, 3, 0, time.UTC)
+	lastReopen := lastMaintenance.Add(time.Minute)
+	deadline := lastReopen.Add(10 * time.Minute)
+	control := Control{
+		Mode:              "normal",
+		ExpectedReplicas:  1,
+		CutoverID:         uuid.New(),
+		HardMaintenanceAt: lastMaintenance,
+		ReopenedAt:        &lastReopen,
+	}
+
+	draining := controlAfterTransition(control, "draining", TransitionRequest{
+		ExpectedReplicas: 2,
+		DrainDeadline:    &deadline,
+	}, lastReopen)
+
+	if draining.Mode != "draining" || draining.ExpectedReplicas != 2 {
+		t.Fatalf("drain state = %#v", draining)
+	}
+	if draining.CutoverID == uuid.Nil || draining.CutoverID == control.CutoverID {
+		t.Fatalf("drain cutover id = %s, previous = %s", draining.CutoverID, control.CutoverID)
+	}
+	if draining.HardMaintenanceAt.IsZero() || !draining.HardMaintenanceAt.Equal(lastMaintenance) {
+		t.Fatalf("hard maintenance evidence = %s, want %s", draining.HardMaintenanceAt, lastMaintenance)
+	}
+	if draining.DrainStartedAt == nil || !draining.DrainStartedAt.Equal(lastReopen) {
+		t.Fatalf("drain started at = %v, want %s", draining.DrainStartedAt, lastReopen)
+	}
+	if draining.DrainDeadlineAt == nil || !draining.DrainDeadlineAt.Equal(deadline) {
+		t.Fatalf("drain deadline at = %v, want %s", draining.DrainDeadlineAt, deadline)
+	}
+	if draining.ReopenedAt != nil {
+		t.Fatalf("reopened at = %v, want nil", draining.ReopenedAt)
+	}
+}
+
+func TestDirectHardMaintenanceStartsFreshCutoverAndClearsStaleDrainEvidence(t *testing.T) {
+	previousMaintenance := time.Date(2026, 7, 11, 1, 2, 3, 0, time.UTC)
+	previousDrainStart := previousMaintenance.Add(time.Minute)
+	previousDrainDeadline := previousDrainStart.Add(10 * time.Minute)
+	previousReopen := previousDrainDeadline.Add(time.Minute)
+	now := previousReopen.Add(time.Hour)
+	control := Control{
+		Mode:              "normal",
+		ExpectedReplicas:  2,
+		CutoverID:         uuid.New(),
+		DrainStartedAt:    &previousDrainStart,
+		DrainDeadlineAt:   &previousDrainDeadline,
+		HardMaintenanceAt: previousMaintenance,
+		ReopenedAt:        &previousReopen,
+	}
+
+	hard := controlAfterTransition(control, "hard_maintenance", TransitionRequest{}, now)
+
+	if hard.Mode != "hard_maintenance" || hard.ExpectedReplicas != control.ExpectedReplicas {
+		t.Fatalf("hard-maintenance state = %#v", hard)
+	}
+	if hard.CutoverID == uuid.Nil || hard.CutoverID == control.CutoverID {
+		t.Fatalf("hard-maintenance cutover id = %s, previous = %s", hard.CutoverID, control.CutoverID)
+	}
+	if hard.DrainStartedAt != nil || hard.DrainDeadlineAt != nil {
+		t.Fatalf("stale drain evidence survived direct hard maintenance: start=%v deadline=%v", hard.DrainStartedAt, hard.DrainDeadlineAt)
+	}
+	if !hard.HardMaintenanceAt.Equal(now) {
+		t.Fatalf("hard maintenance at = %s, want %s", hard.HardMaintenanceAt, now)
+	}
+	if hard.ReopenedAt != nil {
+		t.Fatalf("reopened at = %v, want nil", hard.ReopenedAt)
+	}
+}
+
+func TestDrainingToHardMaintenancePreservesCurrentCutoverEvidence(t *testing.T) {
+	previousMaintenance := time.Date(2026, 7, 11, 1, 2, 3, 0, time.UTC)
+	drainStart := previousMaintenance.Add(24 * time.Hour)
+	drainDeadline := drainStart.Add(10 * time.Minute)
+	now := drainStart.Add(time.Minute)
+	control := Control{
+		Mode:              "draining",
+		ExpectedReplicas:  2,
+		CutoverID:         uuid.New(),
+		DrainStartedAt:    &drainStart,
+		DrainDeadlineAt:   &drainDeadline,
+		HardMaintenanceAt: previousMaintenance,
+	}
+
+	hard := controlAfterTransition(control, "hard_maintenance", TransitionRequest{}, now)
+
+	if hard.CutoverID != control.CutoverID {
+		t.Fatalf("hard-maintenance cutover id = %s, want %s", hard.CutoverID, control.CutoverID)
+	}
+	if hard.DrainStartedAt != control.DrainStartedAt || hard.DrainDeadlineAt != control.DrainDeadlineAt {
+		t.Fatalf("hard maintenance changed drain evidence: start=%v deadline=%v", hard.DrainStartedAt, hard.DrainDeadlineAt)
+	}
+	if !hard.HardMaintenanceAt.Equal(now) {
+		t.Fatalf("hard maintenance at = %s, want %s", hard.HardMaintenanceAt, now)
+	}
+	if hard.ReopenedAt != nil {
+		t.Fatalf("reopened at = %v, want nil", hard.ReopenedAt)
+	}
+}
+
+func TestHardMaintenanceReassertionPreservesEntryEvidence(t *testing.T) {
+	hardAt := time.Date(2026, 7, 12, 1, 2, 3, 0, time.UTC)
+	drainStart := hardAt.Add(-time.Minute)
+	drainDeadline := hardAt.Add(time.Minute)
+	control := Control{
+		Mode:              "hard_maintenance",
+		ExpectedReplicas:  2,
+		CutoverID:         uuid.New(),
+		DrainStartedAt:    &drainStart,
+		DrainDeadlineAt:   &drainDeadline,
+		HardMaintenanceAt: hardAt,
+	}
+
+	reasserted := controlAfterTransition(control, "hard_maintenance", TransitionRequest{}, hardAt.Add(time.Hour))
+
+	if reasserted.CutoverID != control.CutoverID {
+		t.Fatalf("reasserted cutover id = %s, want %s", reasserted.CutoverID, control.CutoverID)
+	}
+	if !reasserted.HardMaintenanceAt.Equal(hardAt) {
+		t.Fatalf("reasserted hard maintenance at = %s, want %s", reasserted.HardMaintenanceAt, hardAt)
+	}
+	if reasserted.DrainStartedAt != control.DrainStartedAt || reasserted.DrainDeadlineAt != control.DrainDeadlineAt {
+		t.Fatalf("reassertion changed drain evidence: start=%v deadline=%v", reasserted.DrainStartedAt, reasserted.DrainDeadlineAt)
+	}
+	if reasserted.ReopenedAt != nil {
+		t.Fatalf("reopened at = %v, want nil", reasserted.ReopenedAt)
+	}
+}
+
 func TestIdentityRequiresCanonicalSHA256Evidence(t *testing.T) {
 	identity := testIdentity()
 	if !validIdentity(identity) {
