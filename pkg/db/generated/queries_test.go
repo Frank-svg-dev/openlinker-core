@@ -171,6 +171,7 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 		int32(100), int32(25), int32(75), "api",
 		idempotencyKeyHash, idempotencyFingerprint, requestMetadata, "direct_http", &endpointIdempotency,
 		int32(3), int32(2), int64(30_000), int64(120_000),
+		(*uuid.UUID)(nil),
 	}) {
 		t.Fatalf("CreateRun args = %#v", dbtx.queryRowArgs)
 	}
@@ -4101,6 +4102,19 @@ func runRow(
 		started,
 		finished,
 		source,
+		"openlinker.runtime.v2",
+		"terminal",
+		int32(1),
+		int32(3),
+		(*time.Time)(nil),
+		(*uuid.UUID)(nil),
+		(*uuid.UUID)(nil),
+		(*string)(nil),
+		(*time.Time)(nil),
+		(*time.Time)(nil),
+		(*string)(nil),
+		(*time.Time)(nil),
+		(*uuid.UUID)(nil),
 	}
 }
 

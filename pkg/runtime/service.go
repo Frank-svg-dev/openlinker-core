@@ -119,6 +119,7 @@ type runInvocation struct {
 type createRunOptions struct {
 	delegation                *Delegation
 	allowOfflineQueuedRuntime bool
+	replayOfRunID             *uuid.UUID
 	// beforeCreate runs inside the same transaction, immediately before the
 	// child Run is inserted. Runtime-scoped delegation uses it to revalidate
 	// the accepted parent Attempt under durable locks; a successful return is
@@ -738,9 +739,19 @@ func (s *Service) Run(ctx context.Context, userID uuid.UUID, req *RunRequest, so
 
 // StartRun 创建 running run 并在后台执行；调用方可用 GetRun/ListRunEvents/SSE 查询进度。
 func (s *Service) StartRun(ctx context.Context, userID uuid.UUID, req *RunRequest, source string) (*RunResponse, error) {
-	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, createRunOptions{
+	return s.startRunWithOptions(ctx, userID, req, source, createRunOptions{
 		allowOfflineQueuedRuntime: true,
 	})
+}
+
+func (s *Service) startRunWithOptions(
+	ctx context.Context,
+	userID uuid.UUID,
+	req *RunRequest,
+	source string,
+	opts createRunOptions,
+) (*RunResponse, error) {
+	invocation, resp, err := s.createRunningRun(ctx, userID, req, source, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -906,6 +917,21 @@ func (s *Service) createRunningRun(
 		AccessMode: pgx.ReadWrite,
 	}, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
+		if opts.replayOfRunID != nil {
+			lockedSource, lockErr := q.LockReplaySourceForCreate(ctx, db.LockReplaySourceForCreateParams{
+				ID:     *opts.replayOfRunID,
+				UserID: userID,
+			})
+			if lockErr != nil {
+				if errors.Is(lockErr, pgx.ErrNoRows) {
+					return errReplaySourceNotReplayable
+				}
+				return lockErr
+			}
+			if !lockedSource.InputAvailable {
+				return errReplayInputUnavailable
+			}
+		}
 		if opts.beforeCreate != nil {
 			if authorizeErr := opts.beforeCreate(ctx, tx); authorizeErr != nil {
 				return authorizeErr
@@ -930,6 +956,7 @@ func (s *Service) createRunningRun(
 			MaxAttempts:                 maxAttempts,
 			DispatchDeadlineAfterMs:     dispatchDeadlineAfter.Milliseconds(),
 			RunDeadlineAfterMs:          runDeadlineAfter.Milliseconds(),
+			ReplayOfRunID:               opts.replayOfRunID,
 		})
 		if errors.Is(createErr, pgx.ErrNoRows) {
 			record, lookupErr := q.GetRunIdempotencyRecord(ctx, db.GetRunIdempotencyRecordParams{
@@ -1021,6 +1048,9 @@ func (s *Service) createRunningRun(
 			"status":     "running",
 			"cost_cents": cost,
 		}
+		if opts.replayOfRunID != nil {
+			payload["replay_of_run_id"] = opts.replayOfRunID.String()
+		}
 		if opts.delegation != nil {
 			payload["caller_agent_id"] = opts.delegation.CallerAgentID.String()
 			payload["billing_mode"] = "free_delegation"
@@ -1063,6 +1093,12 @@ func (s *Service) createRunningRun(
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errReplayInputUnavailable) {
+			return nil, nil, replayInputUnavailableError()
+		}
+		if errors.Is(err, errReplaySourceNotReplayable) {
+			return nil, nil, httpx.Conflict("原调用已不在可回放的死信状态")
+		}
 		var httpErr *httpx.HTTPError
 		if errors.As(err, &httpErr) {
 			return nil, nil, err
@@ -1089,12 +1125,21 @@ func (s *Service) createRunningRun(
 		runtimeAvailable: runtimeAvailable,
 	}
 	resp := &RunResponse{
-		RunID:        runID.String(),
-		Status:       "running",
-		CostCents:    cost,
-		Source:       source,
-		A2AContext:   runA2AContextResponseFromRequest(runA2AContext),
-		TaskCallback: taskCallbackResp,
+		RunID:               runID.String(),
+		AgentID:             agentID.String(),
+		AgentConnectionMode: agent.ConnectionMode,
+		Status:              "running",
+		CostCents:           cost,
+		Source:              source,
+		RuntimeContractID:   RuntimeContractID,
+		DispatchState:       string(RuntimeDispatchPending),
+		AttemptCount:        0,
+		MaxAttempts:         maxAttempts,
+		A2AContext:          runA2AContextResponseFromRequest(runA2AContext),
+		TaskCallback:        taskCallbackResp,
+	}
+	if opts.replayOfRunID != nil {
+		resp.ReplayOfRunID = opts.replayOfRunID.String()
 	}
 	if opts.delegation != nil {
 		resp.ParentRunID = opts.delegation.ParentRunID.String()
@@ -3148,10 +3193,23 @@ func (s *Service) shouldTriggerExternalDelivery(ctx context.Context, runID uuid.
 // 这里取保守做法：失败时 CostCents = 0（已退款），与同步响应一致。
 func runToResponse(r *db.Run) *RunResponse {
 	resp := &RunResponse{
-		RunID:   r.ID.String(),
-		AgentID: r.AgentID.String(),
-		Status:  r.Status,
-		Source:  r.Source,
+		RunID:                r.ID.String(),
+		AgentID:              r.AgentID.String(),
+		Status:               r.Status,
+		Source:               r.Source,
+		RuntimeContractID:    r.RuntimeContractID,
+		DispatchState:        r.DispatchState,
+		AttemptCount:         r.AttemptCount,
+		MaxAttempts:          r.MaxAttempts,
+		NextAttemptAt:        r.NextAttemptAt,
+		LatestAttemptID:      uuidPtrString(r.LatestAttemptID),
+		ActiveAttemptID:      uuidPtrString(r.ActiveAttemptID),
+		CancelState:          stringPtrValue(r.CancelState),
+		CancelRequestedAt:    r.CancelRequestedAt,
+		CancelAcknowledgedAt: r.CancelAcknowledgedAt,
+		CancelReason:         stringPtrValue(r.CancelReason),
+		DeadLetteredAt:       r.DeadLetteredAt,
+		ReplayOfRunID:        uuidPtrString(r.ReplayOfRunID),
 	}
 	if len(r.Input) > 0 {
 		var in map[string]interface{}
@@ -3186,6 +3244,13 @@ func runToResponse(r *db.Run) *RunResponse {
 	}
 	decorateNextAction(resp)
 	return resp
+}
+
+func uuidPtrString(value *uuid.UUID) string {
+	if value == nil {
+		return ""
+	}
+	return value.String()
 }
 
 func runArtifactToResponse(a db.RunArtifact) RunArtifactResponse {

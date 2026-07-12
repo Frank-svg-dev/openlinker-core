@@ -17,16 +17,26 @@ func TestUserDashServiceListRuns(t *testing.T) {
 	userID := uuid.New()
 	creatorID := uuid.New()
 	agentID := uuid.New()
+	latestAttemptID := uuid.New()
+	replayOfRunID := uuid.New()
 	started := time.Date(2026, 6, 20, 12, 30, 0, 0, time.UTC)
+	nextAttemptAt := started.Add(time.Minute)
 	runRow := db.ListRunsByUserWithAgentRow{
 		Run: db.Run{
-			ID:        uuid.New(),
-			UserID:    userID,
-			AgentID:   agentID,
-			Status:    "success",
-			CostCents: 35,
-			StartedAt: started,
-			Source:    "api",
+			ID:                uuid.New(),
+			UserID:            userID,
+			AgentID:           agentID,
+			Status:            "success",
+			CostCents:         35,
+			StartedAt:         started,
+			Source:            "api",
+			RuntimeContractID: "openlinker.runtime.v2",
+			DispatchState:     "retry_wait",
+			AttemptCount:      2,
+			MaxAttempts:       3,
+			NextAttemptAt:     &nextAttemptAt,
+			LatestAttemptID:   &latestAttemptID,
+			ReplayOfRunID:     &replayOfRunID,
 		},
 		AgentSlug: "writer",
 		AgentName: "Writer",
@@ -48,6 +58,12 @@ func TestUserDashServiceListRuns(t *testing.T) {
 	}
 	if resp.Items[0].AgentSlug != "writer" || resp.Items[0].StartedAt != "2026-06-20T12:30:00Z" {
 		t.Fatalf("ListUserRuns item = %#v", resp.Items[0])
+	}
+	if resp.Items[0].RuntimeContractID != "openlinker.runtime.v2" ||
+		resp.Items[0].DispatchState != "retry_wait" || resp.Items[0].AttemptCount != 2 ||
+		resp.Items[0].MaxAttempts != 3 || resp.Items[0].LatestAttemptID != latestAttemptID.String() ||
+		resp.Items[0].ReplayOfRunID != replayOfRunID.String() {
+		t.Fatalf("ListUserRuns runtime fields = %#v", resp.Items[0])
 	}
 
 	creatorQueries := &fakeDashboardQueries{
@@ -90,6 +106,10 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 			DurationMs:          &duration,
 			StartedAt:           started,
 			Source:              "api",
+			RuntimeContractID:   "openlinker.runtime.v2",
+			DispatchState:       "terminal",
+			AttemptCount:        1,
+			MaxAttempts:         3,
 			AgentSlug:           "child",
 			AgentName:           "Child Agent",
 			Direction:           "made",
@@ -140,6 +160,10 @@ func TestUserDashServiceListCallRecords(t *testing.T) {
 	}
 	if got.A2AContext == nil || got.A2AContext.SessionID != "ctx-root" || got.A2AContext.ProtocolContextID != "ctx-protocol" {
 		t.Fatalf("a2a context = %#v", got.A2AContext)
+	}
+	if got.RuntimeContractID != "openlinker.runtime.v2" || got.DispatchState != "terminal" ||
+		got.AttemptCount != 1 || got.MaxAttempts != 3 {
+		t.Fatalf("call record runtime fields = %#v", got)
 	}
 }
 

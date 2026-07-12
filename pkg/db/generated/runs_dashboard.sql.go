@@ -23,7 +23,11 @@ import (
 func scanRun(row interface {
 	Scan(dest ...any) error
 }, r *Run) error {
-	return row.Scan(
+	return row.Scan(runScanDestinations(r)...)
+}
+
+func runScanDestinations(r *Run) []any {
+	return []any{
 		&r.ID,
 		&r.UserID,
 		&r.AgentID,
@@ -39,13 +43,30 @@ func scanRun(row interface {
 		&r.StartedAt,
 		&r.FinishedAt,
 		&r.Source,
-	)
+		&r.RuntimeContractID,
+		&r.DispatchState,
+		&r.AttemptCount,
+		&r.MaxAttempts,
+		&r.NextAttemptAt,
+		&r.LatestAttemptID,
+		&r.ActiveAttemptID,
+		&r.CancelState,
+		&r.CancelRequestedAt,
+		&r.CancelAcknowledgedAt,
+		&r.CancelReason,
+		&r.DeadLetteredAt,
+		&r.ReplayOfRunID,
+	}
 }
 
 const listRunsByUser = `-- name: ListRunsByUser :many
 SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
        cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-       started_at, finished_at, source
+       started_at, finished_at, source, runtime_contract_id, dispatch_state,
+       attempt_count, max_attempts, next_attempt_at, latest_attempt_id,
+       active_attempt_id, cancel_state, cancel_requested_at,
+       cancel_acknowledged_at, cancel_reason, dead_lettered_at,
+       replay_of_run_id
 FROM runs
 WHERE user_id = $1
 ORDER BY started_at DESC
@@ -83,7 +104,11 @@ const listRunsByUserWithAgent = `-- name: ListRunsByUserWithAgent :many
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
-       r.source,
+       r.source, r.runtime_contract_id, r.dispatch_state, r.attempt_count,
+       r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
+       r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
+       r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
+       r.replay_of_run_id,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
@@ -115,25 +140,8 @@ func (q *Queries) ListRunsByUserWithAgent(ctx context.Context, arg ListRunsByUse
 	var items []ListRunsByUserWithAgentRow
 	for rows.Next() {
 		var r ListRunsByUserWithAgentRow
-		if err := rows.Scan(
-			&r.ID,
-			&r.UserID,
-			&r.AgentID,
-			&r.Input,
-			&r.Output,
-			&r.Status,
-			&r.ErrorCode,
-			&r.ErrorMessage,
-			&r.CostCents,
-			&r.PlatformFeeCents,
-			&r.CreatorRevenueCents,
-			&r.DurationMs,
-			&r.StartedAt,
-			&r.FinishedAt,
-			&r.Source,
-			&r.AgentSlug,
-			&r.AgentName,
-		); err != nil {
+		dest := append(runScanDestinations(&r.Run), &r.AgentSlug, &r.AgentName)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		items = append(items, r)
@@ -147,7 +155,11 @@ func (q *Queries) ListRunsByUserWithAgent(ctx context.Context, arg ListRunsByUse
 const listRunsByUserAndAgent = `-- name: ListRunsByUserAndAgent :many
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
        r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
-       r.started_at, r.finished_at, r.source
+       r.started_at, r.finished_at, r.source, r.runtime_contract_id,
+       r.dispatch_state, r.attempt_count, r.max_attempts, r.next_attempt_at,
+       r.latest_attempt_id, r.active_attempt_id, r.cancel_state,
+       r.cancel_requested_at, r.cancel_acknowledged_at, r.cancel_reason,
+       r.dead_lettered_at, r.replay_of_run_id
 FROM runs r
 LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
 WHERE r.user_id = $1
@@ -238,7 +250,11 @@ const listRunsByCreatorAgentWithAgent = `-- name: ListRunsByCreatorAgentWithAgen
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
-       r.source, r.claimed_by_runtime_token_id, r.claimed_at,
+       r.source, r.runtime_contract_id, r.dispatch_state, r.attempt_count,
+       r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
+       r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
+       r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
+       r.replay_of_run_id, r.claimed_by_runtime_token_id, r.claimed_at,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
@@ -271,27 +287,13 @@ func (q *Queries) ListRunsByCreatorAgentWithAgent(ctx context.Context, arg ListR
 	var items []ListRunsByCreatorAgentWithAgentRow
 	for rows.Next() {
 		var r ListRunsByCreatorAgentWithAgentRow
-		if err := rows.Scan(
-			&r.ID,
-			&r.UserID,
-			&r.AgentID,
-			&r.Input,
-			&r.Output,
-			&r.Status,
-			&r.ErrorCode,
-			&r.ErrorMessage,
-			&r.CostCents,
-			&r.PlatformFeeCents,
-			&r.CreatorRevenueCents,
-			&r.DurationMs,
-			&r.StartedAt,
-			&r.FinishedAt,
-			&r.Source,
+		dest := append(runScanDestinations(&r.Run),
 			&r.ClaimedByRuntimeTokenID,
 			&r.ClaimedAt,
 			&r.AgentSlug,
 			&r.AgentName,
-		); err != nil {
+		)
+		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}
 		items = append(items, r)

@@ -334,15 +334,28 @@ func normalizeCallRecordRelation(relation string) string {
 
 func toRunListItem(r db.Run, agentSlug, agentName string) RunListItem {
 	return RunListItem{
-		ID:         r.ID.String(),
-		AgentID:    r.AgentID.String(),
-		AgentSlug:  agentSlug,
-		AgentName:  agentName,
-		Status:     r.Status,
-		CostCents:  r.CostCents,
-		DurationMs: r.DurationMs,
-		StartedAt:  r.StartedAt.UTC().Format(time.RFC3339),
-		Source:     r.Source,
+		ID:                   r.ID.String(),
+		AgentID:              r.AgentID.String(),
+		AgentSlug:            agentSlug,
+		AgentName:            agentName,
+		Status:               r.Status,
+		CostCents:            r.CostCents,
+		DurationMs:           r.DurationMs,
+		StartedAt:            r.StartedAt.UTC().Format(time.RFC3339),
+		Source:               r.Source,
+		RuntimeContractID:    r.RuntimeContractID,
+		DispatchState:        r.DispatchState,
+		AttemptCount:         r.AttemptCount,
+		MaxAttempts:          r.MaxAttempts,
+		NextAttemptAt:        r.NextAttemptAt,
+		LatestAttemptID:      optionalDashboardUUID(r.LatestAttemptID),
+		ActiveAttemptID:      optionalDashboardUUID(r.ActiveAttemptID),
+		CancelState:          optionalDashboardString(r.CancelState),
+		CancelRequestedAt:    r.CancelRequestedAt,
+		CancelAcknowledgedAt: r.CancelAcknowledgedAt,
+		CancelReason:         optionalDashboardString(r.CancelReason),
+		DeadLetteredAt:       r.DeadLetteredAt,
+		ReplayOfRunID:        optionalDashboardUUID(r.ReplayOfRunID),
 	}
 }
 
@@ -374,27 +387,54 @@ func toCallRecordItem(r db.ListCallRecordsForUserRow) CallRecordItem {
 	}
 
 	return CallRecordItem{
-		ID:                  r.ID.String(),
-		RunID:               r.ID.String(),
-		Direction:           r.Direction,
-		Relation:            relation,
-		AgentID:             r.AgentID.String(),
-		AgentSlug:           r.AgentSlug,
-		AgentName:           r.AgentName,
-		TargetAgent:         target,
-		CallerAgent:         caller,
-		Status:              r.Status,
-		CostCents:           r.CostCents,
-		CreatorRevenueCents: r.CreatorRevenueCents,
-		DurationMs:          r.DurationMs,
-		StartedAt:           r.StartedAt.UTC().Format(time.RFC3339),
-		FinishedAt:          finishedAt,
-		Source:              r.Source,
-		ParentRunID:         r.ParentRunID,
-		ChildCount:          r.ChildCount,
-		CallID:              firstNonEmpty(r.CallID, r.ProtocolTaskID, r.ID.String()),
-		A2AContext:          toCallRecordA2AContext(r),
+		ID:                   r.ID.String(),
+		RunID:                r.ID.String(),
+		Direction:            r.Direction,
+		Relation:             relation,
+		AgentID:              r.AgentID.String(),
+		AgentSlug:            r.AgentSlug,
+		AgentName:            r.AgentName,
+		TargetAgent:          target,
+		CallerAgent:          caller,
+		Status:               r.Status,
+		CostCents:            r.CostCents,
+		CreatorRevenueCents:  r.CreatorRevenueCents,
+		DurationMs:           r.DurationMs,
+		StartedAt:            r.StartedAt.UTC().Format(time.RFC3339),
+		FinishedAt:           finishedAt,
+		Source:               r.Source,
+		RuntimeContractID:    r.RuntimeContractID,
+		DispatchState:        r.DispatchState,
+		AttemptCount:         r.AttemptCount,
+		MaxAttempts:          r.MaxAttempts,
+		NextAttemptAt:        r.NextAttemptAt,
+		LatestAttemptID:      optionalDashboardUUID(r.LatestAttemptID),
+		ActiveAttemptID:      optionalDashboardUUID(r.ActiveAttemptID),
+		CancelState:          optionalDashboardString(r.CancelState),
+		CancelRequestedAt:    r.CancelRequestedAt,
+		CancelAcknowledgedAt: r.CancelAcknowledgedAt,
+		CancelReason:         optionalDashboardString(r.CancelReason),
+		DeadLetteredAt:       r.DeadLetteredAt,
+		ReplayOfRunID:        optionalDashboardUUID(r.ReplayOfRunID),
+		ParentRunID:          r.ParentRunID,
+		ChildCount:           r.ChildCount,
+		CallID:               firstNonEmpty(r.CallID, r.ProtocolTaskID, r.ID.String()),
+		A2AContext:           toCallRecordA2AContext(r),
 	}
+}
+
+func optionalDashboardUUID(value *uuid.UUID) string {
+	if value == nil {
+		return ""
+	}
+	return value.String()
+}
+
+func optionalDashboardString(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 func toCallRecordA2AContext(r db.ListCallRecordsForUserRow) *CallRecordA2AContext {

@@ -119,19 +119,64 @@ type RunResponse struct {
 	ErrorCode           string                 `json:"error_code,omitempty"`
 	// ErrorMsg keeps the historical Go field name while preserving the public
 	// JSON contract as error_message.
-	ErrorMsg            string                          `json:"error_message,omitempty"`
-	CostCents           int32                           `json:"cost_cents"`
-	DurationMs          int32                           `json:"duration_ms"`
-	Source              string                          `json:"source,omitempty"`
-	ParentRunID         string                          `json:"parent_run_id,omitempty"`
-	CallerAgentID       string                          `json:"caller_agent_id,omitempty"`
-	BillingMode         string                          `json:"billing_mode,omitempty"`
-	A2AContext          *RunA2AContextResponse          `json:"a2a_context,omitempty"`
-	TaskCallback        *RunTaskCallbackResponse        `json:"task_callback,omitempty"`
-	RequirementEvidence *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
-	EvidenceSummary     *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
-	NextAction          *RunNextAction                  `json:"next_action,omitempty"`
-	Replayed            bool                            `json:"replayed"`
+	ErrorMsg             string                          `json:"error_message,omitempty"`
+	CostCents            int32                           `json:"cost_cents"`
+	DurationMs           int32                           `json:"duration_ms"`
+	Source               string                          `json:"source,omitempty"`
+	RuntimeContractID    string                          `json:"runtime_contract_id"`
+	DispatchState        string                          `json:"dispatch_state"`
+	AttemptCount         int32                           `json:"attempt_count"`
+	MaxAttempts          int32                           `json:"max_attempts"`
+	NextAttemptAt        *time.Time                      `json:"next_attempt_at,omitempty"`
+	LatestAttemptID      string                          `json:"latest_attempt_id,omitempty"`
+	ActiveAttemptID      string                          `json:"active_attempt_id,omitempty"`
+	CancelState          string                          `json:"cancel_state,omitempty"`
+	CancelRequestedAt    *time.Time                      `json:"cancel_requested_at,omitempty"`
+	CancelAcknowledgedAt *time.Time                      `json:"cancel_acknowledged_at,omitempty"`
+	CancelReason         string                          `json:"cancel_reason,omitempty"`
+	DeadLetteredAt       *time.Time                      `json:"dead_lettered_at,omitempty"`
+	ReplayOfRunID        string                          `json:"replay_of_run_id,omitempty"`
+	ParentRunID          string                          `json:"parent_run_id,omitempty"`
+	CallerAgentID        string                          `json:"caller_agent_id,omitempty"`
+	BillingMode          string                          `json:"billing_mode,omitempty"`
+	A2AContext           *RunA2AContextResponse          `json:"a2a_context,omitempty"`
+	TaskCallback         *RunTaskCallbackResponse        `json:"task_callback,omitempty"`
+	RequirementEvidence  *RunRequirementEvidenceResponse `json:"requirement_evidence,omitempty"`
+	EvidenceSummary      *RunEvidenceSummary             `json:"evidence_summary,omitempty"`
+	NextAction           *RunNextAction                  `json:"next_action,omitempty"`
+	Replayed             bool                            `json:"replayed"`
+}
+
+// RuntimeDeadLetterListResponse is the admin-only, input-free DLQ inventory.
+// It intentionally exposes only redacted execution evidence and replay lineage.
+type RuntimeDeadLetterListResponse struct {
+	Items  []RuntimeDeadLetterListItem `json:"items"`
+	Total  int32                       `json:"total"`
+	Limit  int32                       `json:"limit"`
+	Offset int32                       `json:"offset"`
+}
+
+type RuntimeDeadLetterListItem struct {
+	DeadLetterID     string     `json:"dead_letter_id"`
+	RunID            string     `json:"run_id"`
+	AgentID          string     `json:"agent_id"`
+	AgentSlug        string     `json:"agent_slug"`
+	AgentName        string     `json:"agent_name"`
+	Status           string     `json:"status"`
+	DispatchState    string     `json:"dispatch_state"`
+	AttemptCount     int32      `json:"attempt_count"`
+	MaxAttempts      int32      `json:"max_attempts"`
+	FinalAttemptID   string     `json:"final_attempt_id,omitempty"`
+	FinalAttemptNo   int32      `json:"final_attempt_no"`
+	ErrorCode        string     `json:"error_code,omitempty"`
+	ErrorMessage     string     `json:"error_message,omitempty"`
+	ErrorDetail      string     `json:"error_detail_redacted,omitempty"`
+	ReasonCode       string     `json:"reason_code"`
+	Reason           string     `json:"reason_redacted,omitempty"`
+	DeadLetteredAt   *time.Time `json:"dead_lettered_at,omitempty"`
+	CreatedAt        time.Time  `json:"created_at"`
+	ReplayOfRunID    string     `json:"replay_of_run_id,omitempty"`
+	ReplayedAsRunIDs []string   `json:"replayed_as_run_ids"`
 }
 
 // RunTaskCallbackResponse describes a caller-owned task callback created while

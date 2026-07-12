@@ -226,6 +226,87 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 
 }
 
+func TestRuntimeReplayAndDeadLetterHandlers(t *testing.T) {
+	userID := uuid.New()
+	agentID := uuid.New()
+	sourceRunID := uuid.New()
+	newRunID := uuid.New()
+	now := time.Date(2026, 7, 12, 1, 2, 3, 0, time.UTC)
+	mock := &mockRuntimeService{
+		getRunResp: &RunResponse{
+			RunID:   sourceRunID.String(),
+			AgentID: agentID.String(),
+			Status:  "failed",
+		},
+		replayResp: &RunResponse{
+			RunID:             newRunID.String(),
+			AgentID:           agentID.String(),
+			Status:            "running",
+			RuntimeContractID: RuntimeContractID,
+			DispatchState:     string(RuntimeDispatchPending),
+			MaxAttempts:       3,
+			ReplayOfRunID:     sourceRunID.String(),
+		},
+		deadLetterResp: &RuntimeDeadLetterListResponse{
+			Items: []RuntimeDeadLetterListItem{{
+				DeadLetterID: sourceRunID.String(),
+				RunID:        sourceRunID.String(),
+				AgentID:      agentID.String(),
+				ReasonCode:   "RUNTIME_RETRY_EXHAUSTED",
+				CreatedAt:    now,
+			}},
+			Total: 1,
+			Limit: 25,
+		},
+	}
+	h := NewHandler(mock)
+
+	replayCtx, replayRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:     http.MethodPost,
+		target:     "/api/v1/runs/" + sourceRunID.String() + "/replay",
+		userID:     userID.String(),
+		authMethod: "user_token",
+		scopes:     []string{"agents:run"},
+		params:     map[string]string{"id": sourceRunID.String()},
+		headers:    map[string]string{"Idempotency-Key": "replay-once"},
+	})
+	require.NoError(t, h.ReplayRun(replayCtx))
+	require.Equal(t, http.StatusCreated, replayRecorder.Code)
+	require.Equal(t, "/api/v1/runs/"+newRunID.String(), replayRecorder.Header().Get(echo.HeaderLocation))
+	require.Equal(t, userID, mock.replayUserID)
+	require.Equal(t, sourceRunID, mock.replaySourceRunID)
+	require.Equal(t, "replay-once", mock.replayIdempotencyKey)
+	require.Equal(t, "api", mock.replaySource)
+
+	missingKeyCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method:     http.MethodPost,
+		target:     "/api/v1/runs/" + sourceRunID.String() + "/replay",
+		userID:     userID.String(),
+		authMethod: "user_token",
+		scopes:     []string{"agents:run"},
+		params:     map[string]string{"id": sourceRunID.String()},
+	})
+	err := h.ReplayRun(missingKeyCtx)
+	var httpErr *httpx.HTTPError
+	require.ErrorAs(t, err, &httpErr)
+	require.Equal(t, http.StatusUnprocessableEntity, httpErr.Status)
+	require.Equal(t, httpx.ErrorCode(IdempotencyErrorKeyRequired), httpErr.Code)
+
+	dlqCtx, dlqRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodGet,
+		target: "/api/v1/admin/runtime/dead-letters?limit=25&offset=5",
+	})
+	require.NoError(t, h.ListRuntimeDeadLetters(dlqCtx))
+	require.Equal(t, http.StatusOK, dlqRecorder.Code)
+	require.Equal(t, int32(25), mock.deadLetterLimit)
+	require.Equal(t, int32(5), mock.deadLetterOffset)
+	var listed RuntimeDeadLetterListResponse
+	decodeRuntimeDispatchJSON(t, dlqRecorder, &listed)
+	require.Equal(t, int32(1), listed.Total)
+	require.Len(t, listed.Items, 1)
+	require.Equal(t, "RUNTIME_RETRY_EXHAUSTED", listed.Items[0].ReasonCode)
+}
+
 func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
@@ -615,6 +696,16 @@ type mockRuntimeService struct {
 	getRunID     uuid.UUID
 	getRunResp   *RunResponse
 
+	replayUserID         uuid.UUID
+	replaySourceRunID    uuid.UUID
+	replayIdempotencyKey string
+	replaySource         string
+	replayResp           *RunResponse
+
+	deadLetterLimit  int32
+	deadLetterOffset int32
+	deadLetterResp   *RuntimeDeadLetterListResponse
+
 	eventsUserID  uuid.UUID
 	eventsRunID   uuid.UUID
 	eventsAfter   int32
@@ -658,6 +749,27 @@ func (m *mockRuntimeService) GetRun(_ context.Context, userID, runID uuid.UUID) 
 	m.getRunUserID = userID
 	m.getRunID = runID
 	return m.getRunResp, m.err
+}
+
+func (m *mockRuntimeService) ReplayRun(
+	_ context.Context,
+	userID, sourceRunID uuid.UUID,
+	idempotencyKey, source string,
+) (*RunResponse, error) {
+	m.replayUserID = userID
+	m.replaySourceRunID = sourceRunID
+	m.replayIdempotencyKey = idempotencyKey
+	m.replaySource = source
+	return m.replayResp, m.err
+}
+
+func (m *mockRuntimeService) ListRuntimeDeadLetters(
+	_ context.Context,
+	limit, offset int32,
+) (*RuntimeDeadLetterListResponse, error) {
+	m.deadLetterLimit = limit
+	m.deadLetterOffset = offset
+	return m.deadLetterResp, m.err
 }
 
 func (m *mockRuntimeService) ListRunEvents(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) ([]RunEventResponse, error) {

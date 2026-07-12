@@ -35,12 +35,14 @@ INSERT INTO runs (
     cost_cents, platform_fee_cents, creator_revenue_cents, source,
     idempotency_key_hash, idempotency_fingerprint, request_metadata,
     connection_mode_snapshot, endpoint_idempotency_snapshot,
-    max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at
+    max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at,
+    replay_of_run_id
 ) VALUES (
     $1, $2, $3, $4, 'running', $5, $6, $7, $8,
     $9, $10, $11, $12, $13, $14, $15,
     clock_timestamp() + ($16::bigint * INTERVAL '1 millisecond'),
-    clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond')
+    clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond'),
+    $18
 )
 ON CONFLICT (user_id, idempotency_key_hash)
     WHERE idempotency_key_hash IS NOT NULL
@@ -48,7 +50,12 @@ ON CONFLICT (user_id, idempotency_key_hash)
 RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
           runs.status, runs.error_code, runs.error_message, runs.cost_cents,
           runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
-          runs.started_at, runs.finished_at, runs.source`
+          runs.started_at, runs.finished_at, runs.source,
+          runs.runtime_contract_id, runs.dispatch_state, runs.attempt_count,
+          runs.max_attempts, runs.next_attempt_at, runs.latest_attempt_id,
+          runs.active_attempt_id, runs.cancel_state, runs.cancel_requested_at,
+          runs.cancel_acknowledged_at, runs.cancel_reason,
+          runs.dead_lettered_at, runs.replay_of_run_id`
 
 // CreateRunParams 入参。
 //
@@ -56,23 +63,24 @@ RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
 // CostCents = PlatformFeeCents + CreatorRevenueCents（service 层计算）。
 // Source 取值 'web' / 'mcp' / 'api'，由 handler 从 auth_method 派生。
 type CreateRunParams struct {
-	ID                          uuid.UUID `db:"id" json:"id"`
-	UserID                      uuid.UUID `db:"user_id" json:"user_id"`
-	AgentID                     uuid.UUID `db:"agent_id" json:"agent_id"`
-	Input                       []byte    `db:"input" json:"input"`
-	CostCents                   int32     `db:"cost_cents" json:"cost_cents"`
-	PlatformFeeCents            int32     `db:"platform_fee_cents" json:"platform_fee_cents"`
-	CreatorRevenueCents         int32     `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	Source                      string    `db:"source" json:"source"`
-	IdempotencyKeyHash          []byte    `db:"idempotency_key_hash" json:"-"`
-	IdempotencyFingerprint      []byte    `db:"idempotency_fingerprint" json:"-"`
-	RequestMetadata             []byte    `db:"request_metadata" json:"request_metadata"`
-	ConnectionModeSnapshot      string    `db:"connection_mode_snapshot" json:"connection_mode_snapshot"`
-	EndpointIdempotencySnapshot *bool     `db:"endpoint_idempotency_snapshot" json:"endpoint_idempotency_snapshot"`
-	MaxOfferCount               int32     `db:"max_offer_count" json:"max_offer_count"`
-	MaxAttempts                 int32     `db:"max_attempts" json:"max_attempts"`
-	DispatchDeadlineAfterMs     int64     `db:"dispatch_deadline_after_ms" json:"dispatch_deadline_after_ms"`
-	RunDeadlineAfterMs          int64     `db:"run_deadline_after_ms" json:"run_deadline_after_ms"`
+	ID                          uuid.UUID  `db:"id" json:"id"`
+	UserID                      uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID                     uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Input                       []byte     `db:"input" json:"input"`
+	CostCents                   int32      `db:"cost_cents" json:"cost_cents"`
+	PlatformFeeCents            int32      `db:"platform_fee_cents" json:"platform_fee_cents"`
+	CreatorRevenueCents         int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	Source                      string     `db:"source" json:"source"`
+	IdempotencyKeyHash          []byte     `db:"idempotency_key_hash" json:"-"`
+	IdempotencyFingerprint      []byte     `db:"idempotency_fingerprint" json:"-"`
+	RequestMetadata             []byte     `db:"request_metadata" json:"request_metadata"`
+	ConnectionModeSnapshot      string     `db:"connection_mode_snapshot" json:"connection_mode_snapshot"`
+	EndpointIdempotencySnapshot *bool      `db:"endpoint_idempotency_snapshot" json:"endpoint_idempotency_snapshot"`
+	MaxOfferCount               int32      `db:"max_offer_count" json:"max_offer_count"`
+	MaxAttempts                 int32      `db:"max_attempts" json:"max_attempts"`
+	DispatchDeadlineAfterMs     int64      `db:"dispatch_deadline_after_ms" json:"dispatch_deadline_after_ms"`
+	RunDeadlineAfterMs          int64      `db:"run_deadline_after_ms" json:"run_deadline_after_ms"`
+	ReplayOfRunID               *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
 }
 
 // CreateRun 在事务内创建调用记录，初始 status='running'。
@@ -95,6 +103,7 @@ func (q *Queries) CreateRun(ctx context.Context, arg CreateRunParams) (Run, erro
 		arg.MaxAttempts,
 		arg.DispatchDeadlineAfterMs,
 		arg.RunDeadlineAfterMs,
+		arg.ReplayOfRunID,
 	)
 	var r Run
 	err := scanRun(row, &r)
@@ -123,6 +132,35 @@ func (q *Queries) GetRunIdempotencyRecord(ctx context.Context, arg GetRunIdempot
 	var record GetRunIdempotencyRecordRow
 	err := row.Scan(&record.ID, &record.IdempotencyFingerprint)
 	return record, err
+}
+
+const lockReplaySourceForCreate = `-- name: LockReplaySourceForCreate :one
+SELECT r.id,
+       (jsonb_typeof(r.input) = 'object')::bool AS input_available
+FROM runs r
+JOIN run_dead_letters dlq ON dlq.run_id = r.id
+WHERE r.id = $1
+  AND r.user_id = $2
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'failed'
+  AND r.dispatch_state = 'dead_letter'
+FOR UPDATE OF r`
+
+type LockReplaySourceForCreateParams struct {
+	ID     uuid.UUID `db:"id" json:"id"`
+	UserID uuid.UUID `db:"user_id" json:"user_id"`
+}
+
+type LockReplaySourceForCreateRow struct {
+	ID             uuid.UUID `db:"id" json:"id"`
+	InputAvailable bool      `db:"input_available" json:"input_available"`
+}
+
+func (q *Queries) LockReplaySourceForCreate(ctx context.Context, arg LockReplaySourceForCreateParams) (LockReplaySourceForCreateRow, error) {
+	row := q.db.QueryRow(ctx, lockReplaySourceForCreate, arg.ID, arg.UserID)
+	var result LockReplaySourceForCreateRow
+	err := row.Scan(&result.ID, &result.InputAvailable)
+	return result, err
 }
 
 const markRunSuccess = `-- name: MarkRunSuccess :exec
@@ -193,7 +231,11 @@ SET status = 'canceled',
 WHERE id = $1 AND user_id = $2 AND status = 'running'
 RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
           cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-          started_at, finished_at, source`
+          started_at, finished_at, source,
+          runtime_contract_id, dispatch_state, attempt_count, max_attempts,
+          next_attempt_at, latest_attempt_id, active_attempt_id, cancel_state,
+          cancel_requested_at, cancel_acknowledged_at, cancel_reason,
+          dead_lettered_at, replay_of_run_id`
 
 type CancelRunParams struct {
 	ID           uuid.UUID `db:"id" json:"id"`
@@ -212,7 +254,11 @@ func (q *Queries) CancelRun(ctx context.Context, arg CancelRunParams) (Run, erro
 const getRunByID = `-- name: GetRunByID :one
 SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
        cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-       started_at, finished_at, source
+       started_at, finished_at, source, runtime_contract_id, dispatch_state,
+       attempt_count, max_attempts, next_attempt_at, latest_attempt_id,
+       active_attempt_id, cancel_state, cancel_requested_at,
+       cancel_acknowledged_at, cancel_reason, dead_lettered_at,
+       replay_of_run_id
 FROM runs
 WHERE id = $1`
 
@@ -222,6 +268,23 @@ func (q *Queries) GetRunByID(ctx context.Context, id uuid.UUID) (Run, error) {
 	var r Run
 	err := scanRun(row, &r)
 	return r, err
+}
+
+const getRunReplayPayload = `-- name: GetRunReplayPayload :one
+SELECT input, request_metadata
+FROM runs
+WHERE id = $1`
+
+type GetRunReplayPayloadRow struct {
+	Input           []byte `db:"input" json:"input"`
+	RequestMetadata []byte `db:"request_metadata" json:"request_metadata"`
+}
+
+func (q *Queries) GetRunReplayPayload(ctx context.Context, id uuid.UUID) (GetRunReplayPayloadRow, error) {
+	row := q.db.QueryRow(ctx, getRunReplayPayload, id)
+	var payload GetRunReplayPayloadRow
+	err := row.Scan(&payload.Input, &payload.RequestMetadata)
+	return payload, err
 }
 
 const getRunRuntimeContractID = `-- name: GetRunRuntimeContractID :one

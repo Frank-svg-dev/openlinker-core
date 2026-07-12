@@ -581,17 +581,43 @@ func TestRuntimeServiceDependencySettersAndTaskCallbackTrigger(t *testing.T) {
 func TestRuntimeResponseAndNextActionHelpers(t *testing.T) {
 	runID := uuid.New()
 	agentID := uuid.New()
+	latestAttemptID := uuid.New()
+	activeAttemptID := uuid.New()
+	replayOfRunID := uuid.New()
 	duration := int32(123)
 	errCode := "AGENT_ERROR"
 	errMsg := "failed"
+	cancelState := "stopping"
+	cancelReason := "operator requested"
+	nextAttemptAt := time.Date(2026, 7, 12, 2, 0, 0, 0, time.UTC)
+	cancelRequestedAt := nextAttemptAt.Add(-time.Minute)
+	cancelAcknowledgedAt := nextAttemptAt.Add(-30 * time.Second)
+	deadLetteredAt := nextAttemptAt.Add(time.Minute)
 	outputJSON := []byte(`{"answer":42,"next_action":{"label":"Ship","hint":"Deploy it","href":"/deploy","method":"POST","resource_type":"task","resource_id":"t1","type":"deploy"}}`)
 
-	success := runToResponse(&db.Run{ID: runID, Status: "success", Output: outputJSON, CostCents: 99, DurationMs: &duration, Source: "mcp"})
+	success := runToResponse(&db.Run{
+		ID: runID, AgentID: agentID, Status: "success", Output: outputJSON,
+		CostCents: 99, DurationMs: &duration, Source: "mcp",
+		RuntimeContractID: RuntimeContractID, DispatchState: "retry_wait",
+		AttemptCount: 2, MaxAttempts: 3, NextAttemptAt: &nextAttemptAt,
+		LatestAttemptID: &latestAttemptID, ActiveAttemptID: &activeAttemptID,
+		CancelState: &cancelState, CancelRequestedAt: &cancelRequestedAt,
+		CancelAcknowledgedAt: &cancelAcknowledgedAt, CancelReason: &cancelReason,
+		DeadLetteredAt: &deadLetteredAt, ReplayOfRunID: &replayOfRunID,
+	})
 	require.Equal(t, "success", success.Status)
 	require.Equal(t, int32(99), success.CostCents)
 	require.Equal(t, float64(42), success.Output["answer"])
 	require.Equal(t, "deploy", success.NextAction.Type)
 	require.Equal(t, "Ship", success.NextAction.Label)
+	require.Equal(t, RuntimeContractID, success.RuntimeContractID)
+	require.Equal(t, "retry_wait", success.DispatchState)
+	require.Equal(t, int32(2), success.AttemptCount)
+	require.Equal(t, int32(3), success.MaxAttempts)
+	require.Equal(t, latestAttemptID.String(), success.LatestAttemptID)
+	require.Equal(t, activeAttemptID.String(), success.ActiveAttemptID)
+	require.Equal(t, "stopping", success.CancelState)
+	require.Equal(t, replayOfRunID.String(), success.ReplayOfRunID)
 
 	failed := runToResponse(&db.Run{ID: runID, Status: "timeout", CostCents: 99, ErrorCode: &errCode, ErrorMessage: &errMsg, DurationMs: &duration})
 	require.Equal(t, int32(0), failed.CostCents)
@@ -1243,6 +1269,7 @@ func TestRuntimeRoutes(t *testing.T) {
 	h := NewHandler(nil)
 	require.NotNil(t, NewHandler(nil, &config.Config{APIURL: "https://api.example.com"}).cfg)
 	h.RegisterProtected(e.Group("/api/v1"), func(next echo.HandlerFunc) echo.HandlerFunc { return next }, func(next echo.HandlerFunc) echo.HandlerFunc { return next })
+	h.RegisterAdmin(e.Group("/api/v1"), func(next echo.HandlerFunc) echo.HandlerFunc { return next }, func(next echo.HandlerFunc) echo.HandlerFunc { return next })
 	h.RegisterAgentRuntime(e.Group("/api/v1"))
 
 	routes := map[string]bool{}
@@ -1257,7 +1284,10 @@ func TestRuntimeRoutes(t *testing.T) {
 		http.MethodGet + " /api/v1/runs/:id/artifacts",
 		http.MethodGet + " /api/v1/runs/:id/messages",
 		http.MethodGet + " /api/v1/runs/:id/stream",
+		http.MethodPost + " /api/v1/runs/:id/cancel",
+		http.MethodPost + " /api/v1/runs/:id/replay",
 		http.MethodPost + " /api/v1/runs/:id/events",
+		http.MethodGet + " /api/v1/admin/runtime/dead-letters",
 		http.MethodPost + " /api/v1/agent-runtime/heartbeat",
 		http.MethodGet + " /api/v1/agent-runtime/runs/claim",
 		http.MethodPost + " /api/v1/agent-runtime/runs/:id/result",
@@ -1485,6 +1515,19 @@ func runtimeRunRowValues(runID, userID, agentID uuid.UUID, status string) []any 
 		started,
 		(*time.Time)(nil),
 		"api",
+		legacyRuntimeContractID,
+		"terminal",
+		int32(0),
+		int32(1),
+		(*time.Time)(nil),
+		(*uuid.UUID)(nil),
+		(*uuid.UUID)(nil),
+		(*string)(nil),
+		(*time.Time)(nil),
+		(*time.Time)(nil),
+		(*string)(nil),
+		(*time.Time)(nil),
+		(*uuid.UUID)(nil),
 	}
 }
 

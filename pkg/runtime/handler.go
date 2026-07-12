@@ -70,6 +70,8 @@ func (h *Handler) SetEndpointLimiter(EndpointLimiter) {}
 //	GET  /runs/:id/artifacts 运行产物      —— queryMw
 //	GET  /runs/:id/messages 运行消息回放    —— queryMw
 //	GET  /runs/:id/stream 调用事件 SSE    —— queryMw
+//	POST /runs/:id/cancel 取消运行         —— queryMw
+//	POST /runs/:id/replay 回放死信运行      —— runMw
 //	POST /runs/:id/events Agent 上报事件  —— X-OpenLinker-Token（不使用用户 JWT）
 //
 // GET /runs 列表由 dashboard 模块（subagent-6a）提供，本模块不挂。
@@ -84,7 +86,15 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.GET("/runs/:id/messages", h.GetRunMessages, queryMw)
 	api.GET("/runs/:id/stream", h.StreamRunEvents, queryMw)
 	api.POST("/runs/:id/cancel", h.CancelRun, queryMw)
+	api.POST("/runs/:id/replay", h.ReplayRun, runMw)
 	api.POST("/runs/:id/events", h.PostRunEvent)
+}
+
+// RegisterAdmin mounts read-only runtime operational inventory. Core API owns
+// the concrete JWT/admin middleware wiring so this package stays independent
+// from admin policy.
+func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareFunc) {
+	api.GET("/admin/runtime/dead-letters", h.ListRuntimeDeadLetters, jwtMw, adminMw)
 }
 
 // CancelRun cancels an owned, cancellable run. The concrete Service already
@@ -109,6 +119,73 @@ func (h *Handler) CancelRun(c echo.Context) error {
 		return httpx.ServiceUnavailable("Run 取消能力不可用")
 	}
 	resp, err := canceler.CancelRun(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// ReplayRun creates a new Run from one owned dead-letter Run. Agent policy and
+// availability are re-evaluated by the normal creation path.
+func (h *Handler) ReplayRun(c echo.Context) error {
+	if err := auth.RequireAnyPermission(c, "agents:run", "agent"); err != nil {
+		return err
+	}
+	uid, err := userIDFromCtx(c)
+	if err != nil {
+		return err
+	}
+	runID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	key := c.Request().Header.Get("Idempotency-Key")
+	if _, err := HashIdempotencyKey(key); err != nil {
+		return idempotencyHTTPError(err)
+	}
+	preview, err := h.svc.GetRun(c.Request().Context(), uid, runID)
+	if err != nil {
+		return err
+	}
+	if preview == nil {
+		return httpx.Internal("查询调用记录失败")
+	}
+	agentID, err := uuid.Parse(preview.AgentID)
+	if err != nil {
+		return httpx.Internal("调用记录缺少 Agent 标识")
+	}
+	if err := requireAPIKeyScope(c, "agents:run", &agentID); err != nil {
+		return err
+	}
+	replayer, ok := h.svc.(interface {
+		ReplayRun(context.Context, uuid.UUID, uuid.UUID, string, string) (*RunResponse, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Run 回放能力不可用")
+	}
+	resp, err := replayer.ReplayRun(c.Request().Context(), uid, runID, key, sourceFromCtx(c))
+	if err != nil {
+		return err
+	}
+	return h.sendRunCreationResponse(c, uid, resp)
+}
+
+func (h *Handler) ListRuntimeDeadLetters(c echo.Context) error {
+	limit, err := parseOptionalInt32(c.QueryParam("limit"))
+	if err != nil || limit < 0 {
+		return httpx.BadRequest("limit 不是合法非负整数")
+	}
+	offset, err := parseOptionalInt32(c.QueryParam("offset"))
+	if err != nil || offset < 0 {
+		return httpx.BadRequest("offset 不是合法非负整数")
+	}
+	lister, ok := h.svc.(interface {
+		ListRuntimeDeadLetters(context.Context, int32, int32) (*RuntimeDeadLetterListResponse, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Runtime 死信查询能力不可用")
+	}
+	resp, err := lister.ListRuntimeDeadLetters(c.Request().Context(), limit, offset)
 	if err != nil {
 		return err
 	}

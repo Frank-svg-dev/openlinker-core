@@ -19,12 +19,14 @@ INSERT INTO runs (
     cost_cents, platform_fee_cents, creator_revenue_cents, source,
     idempotency_key_hash, idempotency_fingerprint, request_metadata,
     connection_mode_snapshot, endpoint_idempotency_snapshot,
-    max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at
+    max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at,
+    replay_of_run_id
 ) VALUES (
     $1, $2, $3, $4, 'running', $5, $6, $7, $8,
     $9, $10, $11, $12, $13, $14, $15,
     clock_timestamp() + ($16::bigint * INTERVAL '1 millisecond'),
-    clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond')
+    clock_timestamp() + ($17::bigint * INTERVAL '1 millisecond'),
+    $18
 )
 ON CONFLICT (user_id, idempotency_key_hash)
     WHERE idempotency_key_hash IS NOT NULL
@@ -32,7 +34,12 @@ ON CONFLICT (user_id, idempotency_key_hash)
 RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
           runs.status, runs.error_code, runs.error_message, runs.cost_cents,
           runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
-          runs.started_at, runs.finished_at, runs.source;
+          runs.started_at, runs.finished_at, runs.source,
+          runs.runtime_contract_id, runs.dispatch_state, runs.attempt_count,
+          runs.max_attempts, runs.next_attempt_at, runs.latest_attempt_id,
+          runs.active_attempt_id, runs.cancel_state, runs.cancel_requested_at,
+          runs.cancel_acknowledged_at, runs.cancel_reason,
+          runs.dead_lettered_at, runs.replay_of_run_id;
 
 -- name: GetRunIdempotencyRecord :one
 SELECT id, idempotency_fingerprint
@@ -40,6 +47,21 @@ FROM runs
 WHERE user_id = $1
   AND idempotency_key_hash = $2
   AND runtime_contract_id = 'openlinker.runtime.v2';
+
+-- name: LockReplaySourceForCreate :one
+-- A replay is linked only while its owner-scoped source still has immutable
+-- dead-letter evidence. Holding the Run lock through the child INSERT makes
+-- the lineage check and creation one transaction.
+SELECT r.id,
+       (jsonb_typeof(r.input) = 'object')::bool AS input_available
+FROM runs r
+JOIN run_dead_letters dlq ON dlq.run_id = r.id
+WHERE r.id = $1
+  AND r.user_id = $2
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'failed'
+  AND r.dispatch_state = 'dead_letter'
+FOR UPDATE OF r;
 
 -- name: MarkRunSuccess :exec
 -- 调用成功：写 output, status=success, duration_ms, finished_at
@@ -72,18 +94,35 @@ WHERE runs.id = $1 AND runs.user_id = $2 AND runs.status = 'running'
 RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
           runs.status, runs.error_code, runs.error_message, runs.cost_cents,
           runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
-          runs.started_at, runs.finished_at, runs.source;
+          runs.started_at, runs.finished_at, runs.source,
+          runs.runtime_contract_id, runs.dispatch_state, runs.attempt_count,
+          runs.max_attempts, runs.next_attempt_at, runs.latest_attempt_id,
+          runs.active_attempt_id, runs.cancel_state, runs.cancel_requested_at,
+          runs.cancel_acknowledged_at, runs.cancel_reason,
+          runs.dead_lettered_at, runs.replay_of_run_id;
 
 -- name: GetRunByID :one
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
-       r.source
+       r.source, r.runtime_contract_id, r.dispatch_state, r.attempt_count,
+       r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
+       r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
+       r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
+       r.replay_of_run_id
 FROM runs r
 WHERE r.id = $1;
 
 -- name: GetRunRuntimeContractID :one
 SELECT runtime_contract_id
+FROM runs
+WHERE id = $1;
+
+-- name: GetRunReplayPayload :one
+-- Owner/state/DLQ authorization is performed before this narrow payload read.
+-- Keeping it separate prevents request metadata from leaking into ordinary Run
+-- read models while allowing replay to reuse the exact retained request.
+SELECT input, request_metadata
 FROM runs
 WHERE id = $1;
 
@@ -510,7 +549,11 @@ ORDER BY e.client_event_seq ASC;
 -- name: ListRunsByUser :many
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
        r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
-       r.started_at, r.finished_at, r.source
+       r.started_at, r.finished_at, r.source, r.runtime_contract_id,
+       r.dispatch_state, r.attempt_count, r.max_attempts, r.next_attempt_at,
+       r.latest_attempt_id, r.active_attempt_id, r.cancel_state,
+       r.cancel_requested_at, r.cancel_acknowledged_at, r.cancel_reason,
+       r.dead_lettered_at, r.replay_of_run_id
 FROM runs r
 WHERE r.user_id = $1
 ORDER BY r.started_at DESC
@@ -521,7 +564,11 @@ LIMIT $2 OFFSET $3;
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
-       r.source,
+       r.source, r.runtime_contract_id, r.dispatch_state, r.attempt_count,
+       r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
+       r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
+       r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
+       r.replay_of_run_id,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
@@ -533,7 +580,11 @@ LIMIT $2 OFFSET $3;
 -- A2A ListTasks: owner-scoped keyset page for one public Agent.
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status, r.error_code, r.error_message,
        r.cost_cents, r.platform_fee_cents, r.creator_revenue_cents, r.duration_ms,
-       r.started_at, r.finished_at, r.source
+       r.started_at, r.finished_at, r.source, r.runtime_contract_id,
+       r.dispatch_state, r.attempt_count, r.max_attempts, r.next_attempt_at,
+       r.latest_attempt_id, r.active_attempt_id, r.cancel_state,
+       r.cancel_requested_at, r.cancel_acknowledged_at, r.cancel_reason,
+       r.dead_lettered_at, r.replay_of_run_id
 FROM runs r
 LEFT JOIN a2a_context_mappings ctx ON ctx.run_id = r.id
 WHERE r.user_id = $1
@@ -572,7 +623,11 @@ WHERE r.user_id = $1
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
-       r.source, r.claimed_by_runtime_token_id, r.claimed_at,
+       r.source, r.runtime_contract_id, r.dispatch_state, r.attempt_count,
+       r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
+       r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
+       r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
+       r.replay_of_run_id, r.claimed_by_runtime_token_id, r.claimed_at,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
@@ -608,6 +663,19 @@ SELECT r.id,
        r.started_at,
        r.finished_at,
        r.source,
+       r.runtime_contract_id,
+       r.dispatch_state,
+       r.attempt_count,
+       r.max_attempts,
+       r.next_attempt_at,
+       r.latest_attempt_id,
+       r.active_attempt_id,
+       r.cancel_state,
+       r.cancel_requested_at,
+       r.cancel_acknowledged_at,
+       r.cancel_reason,
+       r.dead_lettered_at,
+       r.replay_of_run_id,
        a.slug AS agent_slug,
        a.name AS agent_name,
        CASE

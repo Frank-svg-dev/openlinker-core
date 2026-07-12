@@ -18,6 +18,19 @@ SELECT r.id,
        r.started_at,
        r.finished_at,
        r.source,
+       r.runtime_contract_id,
+       r.dispatch_state,
+       r.attempt_count,
+       r.max_attempts,
+       r.next_attempt_at,
+       r.latest_attempt_id,
+       r.active_attempt_id,
+       r.cancel_state,
+       r.cancel_requested_at,
+       r.cancel_acknowledged_at,
+       r.cancel_reason,
+       r.dead_lettered_at,
+       r.replay_of_run_id,
        a.slug AS agent_slug,
        a.name AS agent_name,
        CASE
@@ -112,33 +125,46 @@ type ListCallRecordsForUserParams struct {
 }
 
 type ListCallRecordsForUserRow struct {
-	ID                  uuid.UUID  `db:"id" json:"id"`
-	UserID              uuid.UUID  `db:"user_id" json:"user_id"`
-	AgentID             uuid.UUID  `db:"agent_id" json:"agent_id"`
-	Status              string     `db:"status" json:"status"`
-	CostCents           int32      `db:"cost_cents" json:"cost_cents"`
-	CreatorRevenueCents int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
-	DurationMs          *int32     `db:"duration_ms" json:"duration_ms"`
-	StartedAt           time.Time  `db:"started_at" json:"started_at"`
-	FinishedAt          *time.Time `db:"finished_at" json:"finished_at"`
-	Source              string     `db:"source" json:"source"`
-	AgentSlug           string     `db:"agent_slug" json:"agent_slug"`
-	AgentName           string     `db:"agent_name" json:"agent_name"`
-	Direction           string     `db:"direction" json:"direction"`
-	ParentRunID         string     `db:"parent_run_id" json:"parent_run_id"`
-	CallerAgentID       string     `db:"caller_agent_id" json:"caller_agent_id"`
-	CallerAgentSlug     string     `db:"caller_agent_slug" json:"caller_agent_slug"`
-	CallerAgentName     string     `db:"caller_agent_name" json:"caller_agent_name"`
-	ProtocolContextID   string     `db:"protocol_context_id" json:"protocol_context_id"`
-	ProtocolTaskID      string     `db:"protocol_task_id" json:"protocol_task_id"`
-	RootContextID       string     `db:"root_context_id" json:"root_context_id"`
-	ParentContextID     string     `db:"parent_context_id" json:"parent_context_id"`
-	ParentTaskID        string     `db:"parent_task_id" json:"parent_task_id"`
-	TraceID             string     `db:"trace_id" json:"trace_id"`
-	ReferenceTaskIDs    []string   `db:"reference_task_ids" json:"reference_task_ids"`
-	ContextSource       string     `db:"context_source" json:"context_source"`
-	CallID              string     `db:"call_id" json:"call_id"`
-	ChildCount          int32      `db:"child_count" json:"child_count"`
+	ID                   uuid.UUID  `db:"id" json:"id"`
+	UserID               uuid.UUID  `db:"user_id" json:"user_id"`
+	AgentID              uuid.UUID  `db:"agent_id" json:"agent_id"`
+	Status               string     `db:"status" json:"status"`
+	CostCents            int32      `db:"cost_cents" json:"cost_cents"`
+	CreatorRevenueCents  int32      `db:"creator_revenue_cents" json:"creator_revenue_cents"`
+	DurationMs           *int32     `db:"duration_ms" json:"duration_ms"`
+	StartedAt            time.Time  `db:"started_at" json:"started_at"`
+	FinishedAt           *time.Time `db:"finished_at" json:"finished_at"`
+	Source               string     `db:"source" json:"source"`
+	RuntimeContractID    string     `db:"runtime_contract_id" json:"runtime_contract_id"`
+	DispatchState        string     `db:"dispatch_state" json:"dispatch_state"`
+	AttemptCount         int32      `db:"attempt_count" json:"attempt_count"`
+	MaxAttempts          int32      `db:"max_attempts" json:"max_attempts"`
+	NextAttemptAt        *time.Time `db:"next_attempt_at" json:"next_attempt_at"`
+	LatestAttemptID      *uuid.UUID `db:"latest_attempt_id" json:"latest_attempt_id"`
+	ActiveAttemptID      *uuid.UUID `db:"active_attempt_id" json:"active_attempt_id"`
+	CancelState          *string    `db:"cancel_state" json:"cancel_state"`
+	CancelRequestedAt    *time.Time `db:"cancel_requested_at" json:"cancel_requested_at"`
+	CancelAcknowledgedAt *time.Time `db:"cancel_acknowledged_at" json:"cancel_acknowledged_at"`
+	CancelReason         *string    `db:"cancel_reason" json:"cancel_reason"`
+	DeadLetteredAt       *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
+	ReplayOfRunID        *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
+	AgentSlug            string     `db:"agent_slug" json:"agent_slug"`
+	AgentName            string     `db:"agent_name" json:"agent_name"`
+	Direction            string     `db:"direction" json:"direction"`
+	ParentRunID          string     `db:"parent_run_id" json:"parent_run_id"`
+	CallerAgentID        string     `db:"caller_agent_id" json:"caller_agent_id"`
+	CallerAgentSlug      string     `db:"caller_agent_slug" json:"caller_agent_slug"`
+	CallerAgentName      string     `db:"caller_agent_name" json:"caller_agent_name"`
+	ProtocolContextID    string     `db:"protocol_context_id" json:"protocol_context_id"`
+	ProtocolTaskID       string     `db:"protocol_task_id" json:"protocol_task_id"`
+	RootContextID        string     `db:"root_context_id" json:"root_context_id"`
+	ParentContextID      string     `db:"parent_context_id" json:"parent_context_id"`
+	ParentTaskID         string     `db:"parent_task_id" json:"parent_task_id"`
+	TraceID              string     `db:"trace_id" json:"trace_id"`
+	ReferenceTaskIDs     []string   `db:"reference_task_ids" json:"reference_task_ids"`
+	ContextSource        string     `db:"context_source" json:"context_source"`
+	CallID               string     `db:"call_id" json:"call_id"`
+	ChildCount           int32      `db:"child_count" json:"child_count"`
 }
 
 func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecordsForUserParams) ([]ListCallRecordsForUserRow, error) {
@@ -161,6 +187,19 @@ func (q *Queries) ListCallRecordsForUser(ctx context.Context, arg ListCallRecord
 			&item.StartedAt,
 			&item.FinishedAt,
 			&item.Source,
+			&item.RuntimeContractID,
+			&item.DispatchState,
+			&item.AttemptCount,
+			&item.MaxAttempts,
+			&item.NextAttemptAt,
+			&item.LatestAttemptID,
+			&item.ActiveAttemptID,
+			&item.CancelState,
+			&item.CancelRequestedAt,
+			&item.CancelAcknowledgedAt,
+			&item.CancelReason,
+			&item.DeadLetteredAt,
+			&item.ReplayOfRunID,
 			&item.AgentSlug,
 			&item.AgentName,
 			&item.Direction,
