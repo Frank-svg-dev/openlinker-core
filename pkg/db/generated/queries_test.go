@@ -4613,6 +4613,72 @@ func agentSkillScoreRow(agentID, batchID uuid.UUID, updatedAt time.Time, average
 	}
 }
 
+func TestPublicMarketCallableQueriesUseDurableRuntimeV2Truth(t *testing.T) {
+	dbtx := &fakeDBTX{queryRows: &fakeRows{}}
+	queries := New(dbtx)
+	_, err := queries.ListPublicAgents(context.Background(), ListPublicAgentsParams{
+		Tags: []string{}, Keyword: "", Limit: 12, Offset: 0,
+		CallableOnly: true, SkillIDs: []string{},
+	})
+	if err != nil {
+		t.Fatalf("ListPublicAgents: %v", err)
+	}
+	listSQL := dbtx.querySQL
+
+	dbtx.row = fakeRow{values: []any{int32(0)}}
+	_, err = queries.CountPublicAgents(context.Background(), CountPublicAgentsParams{
+		Tags: []string{}, Keyword: "", CallableOnly: true, SkillIDs: []string{},
+	})
+	if err != nil {
+		t.Fatalf("CountPublicAgents: %v", err)
+	}
+	countSQL := dbtx.queryRowSQL
+
+	for name, query := range map[string]string{
+		"ListPublicAgents":  listSQL,
+		"CountPublicAgents": countSQL,
+	} {
+		for _, guard := range []string{
+			"WITH active_runtime_v2_agents AS",
+			"t.agent_id = s.agent_id",
+			"contract.is_current",
+			"s.status IN ('active', 'draining')",
+			"s.attached_core_instance_id IS NOT NULL",
+			"s.disconnected_at IS NULL",
+			"s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"s.protocol_version = 2",
+			"s.runtime_contract_id = 'openlinker.runtime.v2'",
+			"s.runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f'",
+			"'persistent_spool'",
+			"n.status IN ('active', 'draining')",
+			"n.revoked_at IS NULL",
+			"n.protocol_version = s.protocol_version",
+			"n.runtime_contract_digest = s.runtime_contract_digest",
+			"n.device_certificate_serial = s.device_certificate_serial",
+			"n.node_version = s.node_version",
+			"n.features @> s.features",
+			"s.features @> n.features",
+			"n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"t.status = 'active_runtime'",
+			"t.revoked_at IS NULL",
+			"t.scopes @> ARRAY['agent:pull']::text[]",
+			"t.expires_at > clock_timestamp()",
+			"attachment.core_instance_id = s.attached_core_instance_id",
+			"attachment.detached_at IS NULL",
+			"a.connection_mode = 'agent_node'",
+			"runtime_truth.agent_id IS NOT NULL",
+			"a.connection_mode <> 'agent_node'",
+		} {
+			if !strings.Contains(query, guard) {
+				t.Fatalf("%s missing Runtime v2 callable guard %q:\n%s", name, guard, query)
+			}
+		}
+		if strings.Contains(query, "last_runtime_token_used_at < NOW() - INTERVAL '5 minutes'") {
+			t.Fatalf("%s still treats recent token use as Runtime presence:\n%s", name, query)
+		}
+	}
+}
+
 type fakeDBTX struct {
 	execSQL      string
 	execArgs     []any

@@ -429,6 +429,14 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	if unreachableAvailability.Status != "unreachable" || unreachableAvailability.Label != "不可达" || unreachableAvailability.LastSuccessfulRunAt != nil {
 		t.Fatalf("unexpected unreachable availability: %#v", unreachableAvailability)
 	}
+	activeRuntime := availabilityForRuntimeSession(unreachableAvailability, true)
+	if activeRuntime.Status != "healthy" || activeRuntime.Label != "可用" || activeRuntime.ConsecutiveFailures != 0 {
+		t.Fatalf("active Runtime v2 Session did not override stale availability: %#v", activeRuntime)
+	}
+	inactiveRuntime := availabilityForRuntimeSession(availabilityResponse("healthy", &runAt, nil, &runAt, 0), false)
+	if inactiveRuntime.Status != "unreachable" || inactiveRuntime.Label != "不可达" {
+		t.Fatalf("inactive Runtime v2 Session remained callable: %#v", inactiveRuntime)
+	}
 	if !isQueuedRuntimeConnectionMode(ConnectionModeAgentNode) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
 		t.Fatalf("queued runtime connection mode detection failed")
 	}

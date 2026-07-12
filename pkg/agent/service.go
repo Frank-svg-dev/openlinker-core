@@ -1101,13 +1101,7 @@ func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUI
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.runtimeAwareAvailability")
 		return availability
 	}
-	if hasRuntime {
-		return availability
-	}
-	availability.Status = "unreachable"
-	availability.Label = "不可达"
-	availability.Hint = "Agent Node 当前没有可用的 Runtime v2 Session，暂时无法接收运行。Node 默认使用 WebSocket，必要时会自动切到 Pull v2。"
-	return availability
+	return availabilityForRuntimeSession(availability, hasRuntime)
 }
 
 func (s *Service) toAgentResponseWithReadiness(ctx context.Context, a *db.Agent) AgentResponse {

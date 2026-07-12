@@ -574,7 +574,15 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.runtimeAwareAvailability")
 		return availability
 	}
-	if hasRuntime {
+	return availabilityForRuntimeSession(availability, hasRuntime)
+}
+
+func availabilityForRuntimeSession(availability Availability, active bool) Availability {
+	if active {
+		availability.Status = "healthy"
+		availability.Label = "可用"
+		availability.Hint = "Agent Node 的 Runtime v2 Session 当前在线，可以接收运行。Node 默认使用 WebSocket，必要时会自动切到 Pull v2。"
+		availability.ConsecutiveFailures = 0
 		return availability
 	}
 	availability.Status = "unreachable"

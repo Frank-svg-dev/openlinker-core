@@ -15,6 +15,58 @@ import (
 )
 
 const listPublicAgents = `-- name: ListPublicAgents :many
+WITH active_runtime_v2_agents AS (
+    SELECT DISTINCT s.agent_id
+    FROM runtime_sessions s
+    JOIN runtime_nodes n
+      ON n.node_id = s.node_id
+    JOIN agent_tokens t
+      ON t.id = s.credential_id
+     AND t.agent_id = s.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = s.runtime_contract_id
+     AND contract.runtime_contract_digest = s.runtime_contract_digest
+     AND contract.is_current
+    WHERE s.status IN ('active', 'draining')
+      AND s.attached_core_instance_id IS NOT NULL
+      AND s.disconnected_at IS NULL
+      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND s.protocol_version = 2
+      AND s.runtime_contract_id = 'openlinker.runtime.v2'
+      AND s.runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f'
+      AND s.features @> ARRAY[
+          'lease_fence',
+          'assignment_confirm',
+          'renew',
+          'resume',
+          'event_ack',
+          'result_ack',
+          'cancel',
+          'persistent_spool'
+      ]::text[]
+      AND n.status IN ('active', 'draining')
+      AND n.revoked_at IS NULL
+      AND n.protocol_version = s.protocol_version
+      AND n.runtime_contract_id = s.runtime_contract_id
+      AND n.runtime_contract_digest = s.runtime_contract_digest
+      AND n.device_certificate_serial = s.device_certificate_serial
+      AND n.node_version = s.node_version
+      AND n.features @> s.features
+      AND s.features @> n.features
+      AND n.last_seen_at IS NOT NULL
+      AND n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND t.status = 'active_runtime'
+      AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
+      AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = s.runtime_session_id
+            AND attachment.core_instance_id = s.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
+)
 SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.endpoint_auth_header, a.price_per_call_cents, a.tags,
        a.lifecycle_status, a.visibility, a.certification_status,
@@ -36,6 +88,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
+LEFT JOIN active_runtime_v2_agents runtime_truth ON runtime_truth.agent_id = a.id
 LEFT JOIN LATERAL (
     SELECT MAX(last_used_at) AS last_runtime_token_used_at
     FROM agent_tokens
@@ -105,39 +158,42 @@ WHERE a.visibility = 'public'
   AND (
     NOT $5::bool
     OR (
-      (
+      a.connection_mode = 'agent_node'
+      AND runtime_truth.agent_id IS NOT NULL
+    )
+    OR (
+      a.connection_mode <> 'agent_node'
+      AND (
         COALESCE(av.availability_status, 'unknown') = 'healthy'
         OR (
           av.last_successful_run_at IS NOT NULL
           AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
         )
-      )
-      AND NOT (
-        a.connection_mode = 'agent_node'
-        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     )
   )
 ORDER BY CASE
     WHEN (
       (
-        COALESCE(av.availability_status, 'unknown') = 'healthy'
-        OR (
-          av.last_successful_run_at IS NOT NULL
-          AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
-        )
-      )
-      AND NOT (
         a.connection_mode = 'agent_node'
-        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+        AND runtime_truth.agent_id IS NOT NULL
+      )
+      OR (
+        a.connection_mode <> 'agent_node'
+        AND (
+          COALESCE(av.availability_status, 'unknown') = 'healthy'
+          OR (
+            av.last_successful_run_at IS NOT NULL
+            AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+          )
+        )
       )
     ) THEN 0
     ELSE 1
 END ASC,
 CASE
-    WHEN a.connection_mode = 'agent_node'
-      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
-      THEN 3
+    WHEN a.connection_mode = 'agent_node' THEN
+      CASE WHEN runtime_truth.agent_id IS NOT NULL THEN 0 ELSE 3 END
     ELSE CASE COALESCE(av.availability_status, 'unknown')
     WHEN 'healthy' THEN 0
     WHEN 'unknown' THEN 1
@@ -238,17 +294,62 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 }
 
 const countPublicAgents = `-- name: CountPublicAgents :one
+WITH active_runtime_v2_agents AS (
+    SELECT DISTINCT s.agent_id
+    FROM runtime_sessions s
+    JOIN runtime_nodes n
+      ON n.node_id = s.node_id
+    JOIN agent_tokens t
+      ON t.id = s.credential_id
+     AND t.agent_id = s.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = s.runtime_contract_id
+     AND contract.runtime_contract_digest = s.runtime_contract_digest
+     AND contract.is_current
+    WHERE s.status IN ('active', 'draining')
+      AND s.attached_core_instance_id IS NOT NULL
+      AND s.disconnected_at IS NULL
+      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND s.protocol_version = 2
+      AND s.runtime_contract_id = 'openlinker.runtime.v2'
+      AND s.runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f'
+      AND s.features @> ARRAY[
+          'lease_fence',
+          'assignment_confirm',
+          'renew',
+          'resume',
+          'event_ack',
+          'result_ack',
+          'cancel',
+          'persistent_spool'
+      ]::text[]
+      AND n.status IN ('active', 'draining')
+      AND n.revoked_at IS NULL
+      AND n.protocol_version = s.protocol_version
+      AND n.runtime_contract_id = s.runtime_contract_id
+      AND n.runtime_contract_digest = s.runtime_contract_digest
+      AND n.device_certificate_serial = s.device_certificate_serial
+      AND n.node_version = s.node_version
+      AND n.features @> s.features
+      AND s.features @> n.features
+      AND n.last_seen_at IS NOT NULL
+      AND n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND t.status = 'active_runtime'
+      AND t.revoked_at IS NULL
+      AND t.scopes @> ARRAY['agent:pull']::text[]
+      AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = s.runtime_session_id
+            AND attachment.core_instance_id = s.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
+)
 SELECT COUNT(*)::int AS total
 FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
-LEFT JOIN LATERAL (
-    SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_tokens
-    WHERE agent_id = a.id
-      AND revoked_at IS NULL
-      AND status = 'active_runtime'
-      AND 'agent:pull' = ANY(scopes)
-) rt ON TRUE
+LEFT JOIN active_runtime_v2_agents runtime_truth ON runtime_truth.agent_id = a.id
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND NOT EXISTS (
@@ -286,16 +387,17 @@ WHERE a.visibility = 'public'
   AND (
     NOT $3::bool
     OR (
-      (
+      a.connection_mode = 'agent_node'
+      AND runtime_truth.agent_id IS NOT NULL
+    )
+    OR (
+      a.connection_mode <> 'agent_node'
+      AND (
         COALESCE(av.availability_status, 'unknown') = 'healthy'
         OR (
           av.last_successful_run_at IS NOT NULL
           AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
         )
-      )
-      AND NOT (
-        a.connection_mode = 'agent_node'
-        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     )
   )`

@@ -284,16 +284,57 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	assert.Equal(t, "unreachable", detail.Availability.Status, "token use is not Runtime v2 presence")
 	assert.False(t, detail.Readiness.Callable)
 
+	_, err = pool.Exec(ctx, `
+UPDATE agent_availability_snapshots
+SET availability_status = 'unreachable', consecutive_failures = 3
+WHERE agent_id = $1`, agentID)
+	require.NoError(t, err)
 	insertMarketRuntimeV2Session(t, pool, agentID)
 	detail, err = svc.GetBySlug(ctx, "runtime-offline")
 	require.NoError(t, err)
-	assert.Equal(t, "healthy", detail.Availability.Status)
+	assert.Equal(t, "healthy", detail.Availability.Status, "active Runtime v2 Session is the Agent Node availability truth")
 	assert.True(t, detail.Readiness.Callable)
+
+	callable, err := svc.ListMarket(ctx, nil, "runtime-offline", 1, 12, true)
+	require.NoError(t, err)
+	require.Len(t, callable.Items, 1)
+	assert.Equal(t, int32(1), callable.Total)
+	assert.Equal(t, "healthy", callable.Items[0].Availability.Status)
+	assert.True(t, callable.Items[0].Readiness.Callable)
 
 	resp, err = svc.ListMarket(ctx, nil, "", 1, 12)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp.Items), 2)
 	assert.Equal(t, "runtime-offline", resp.Items[0].Slug)
+
+	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, closeErr := tx.Exec(ctx, `
+UPDATE runtime_session_attachments
+SET detached_at = clock_timestamp(), disconnect_reason = 'market callable regression'
+WHERE runtime_session_id IN (
+    SELECT runtime_session_id FROM runtime_sessions WHERE agent_id = $1
+)
+  AND detached_at IS NULL`, agentID); closeErr != nil {
+			return closeErr
+		}
+		_, closeErr := tx.Exec(ctx, `
+UPDATE runtime_sessions
+SET status = 'offline', attached_core_instance_id = NULL,
+    disconnected_at = clock_timestamp(), updated_at = clock_timestamp()
+WHERE agent_id = $1
+  AND status IN ('active', 'draining')`, agentID)
+		return closeErr
+	})
+	require.NoError(t, err)
+	callable, err = svc.ListMarket(ctx, nil, "runtime-offline", 1, 12, true)
+	require.NoError(t, err)
+	assert.Empty(t, callable.Items)
+	assert.Equal(t, int32(0), callable.Total)
+	resp, err = svc.ListMarket(ctx, nil, "runtime-offline", 1, 12)
+	require.NoError(t, err)
+	require.Len(t, resp.Items, 1)
+	assert.Equal(t, "unreachable", resp.Items[0].Availability.Status)
+	assert.False(t, resp.Items[0].Readiness.Callable)
 }
 
 func insertMarketRuntimeV2Session(t *testing.T, pool interface {
