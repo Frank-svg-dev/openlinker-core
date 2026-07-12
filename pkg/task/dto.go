@@ -47,21 +47,31 @@ type MCPToolRef struct {
 	Description string `json:"description"`
 }
 
+// TaskTemplateTranslation contains the user-facing fields that vary by locale.
+// The top-level template fields remain the catalog's default copy so existing
+// consumers can continue to read them without selecting a translation.
+type TaskTemplateTranslation struct {
+	Title        string `json:"title"`
+	Summary      string `json:"summary"`
+	ExampleQuery string `json:"example_query"`
+}
+
 // TaskTemplateResponse is the public catalog item that lowers the first-run
 // burden without exposing or publishing a user's private task input.
 type TaskTemplateResponse struct {
-	ID                    string       `json:"id"`
-	Slug                  string       `json:"slug"`
-	Title                 string       `json:"title"`
-	Category              string       `json:"category"`
-	Summary               string       `json:"summary"`
-	RequiredSkillIDs      []string     `json:"required_skill_ids"`
-	RequiredSkillRefs     []SkillRef   `json:"required_skill_refs"`
-	RequiredMCPTools      []string     `json:"required_mcp_tools"`
-	RequiredMCPToolRefs   []MCPToolRef `json:"required_mcp_tool_refs"`
-	ExampleQuery          string       `json:"example_query"`
-	ExpectedArtifactTypes []string     `json:"expected_artifact_types"`
-	DefaultVisibility     string       `json:"default_visibility"`
+	ID                    string                             `json:"id"`
+	Slug                  string                             `json:"slug"`
+	Title                 string                             `json:"title"`
+	Category              string                             `json:"category"`
+	Summary               string                             `json:"summary"`
+	Translations          map[string]TaskTemplateTranslation `json:"translations"`
+	RequiredSkillIDs      []string                           `json:"required_skill_ids"`
+	RequiredSkillRefs     []SkillRef                         `json:"required_skill_refs"`
+	RequiredMCPTools      []string                           `json:"required_mcp_tools"`
+	RequiredMCPToolRefs   []MCPToolRef                       `json:"required_mcp_tool_refs"`
+	ExampleQuery          string                             `json:"example_query"`
+	ExpectedArtifactTypes []string                           `json:"expected_artifact_types"`
+	DefaultVisibility     string                             `json:"default_visibility"`
 }
 
 // Recommendation 单条推荐：Agent + 匹配分 + 解释。

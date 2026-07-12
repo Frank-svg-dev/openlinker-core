@@ -3,9 +3,11 @@ package task
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
@@ -135,6 +137,9 @@ func TestPrivateTaskIntentAndTemplateHelpers(t *testing.T) {
 	require.Equal(t, "support-review", resp.ID)
 	require.Equal(t, taskVisibilityPrivate, resp.DefaultVisibility)
 	require.NotSame(t, &tmpl.RequiredSkillIDs[0], &resp.RequiredSkillIDs[0])
+	require.Equal(t, "Support ticket review", resp.Translations["en"].Title)
+	resp.Translations["en"] = TaskTemplateTranslation{Title: "changed"}
+	require.Equal(t, "Support ticket review", tmpl.Translations["en"].Title)
 	require.Equal(t, mergeSkillIDs(tmpl.RequiredSkillIDs, []string{"extra"}, maxTaskSkillRefs), mergeTemplateSkillIDs(tmpl, []string{"extra"}))
 	require.Equal(t, []string{"extra"}, mergeTemplateSkillIDs(nil, []string{"extra"}))
 	require.Equal(t, []string{"run_agent"}, mergeTemplateMCPTools(&taskTemplate{RequiredMCPTools: []string{"run_agent"}}, nil))
@@ -155,6 +160,16 @@ func TestPrivateTaskIntentAndTemplateHelpers(t *testing.T) {
 	items, err := svc.ListTaskTemplates(context.Background())
 	require.NoError(t, err)
 	require.Len(t, items, len(taskTemplateCatalog))
+	han := regexp.MustCompile(`\p{Han}`)
+	for _, item := range items {
+		require.True(t, han.MatchString(item.Title+item.Summary+item.ExampleQuery), item.ID)
+		en, ok := item.Translations["en"]
+		require.True(t, ok, item.ID)
+		require.NotEmpty(t, en.Title, item.ID)
+		require.NotEmpty(t, en.Summary, item.ID)
+		require.NotEmpty(t, en.ExampleQuery, item.ID)
+		require.False(t, han.MatchString(en.Title+en.Summary+en.ExampleQuery), item.ID)
+	}
 }
 
 func TestTaskDTOHelpers(t *testing.T) {
@@ -379,7 +394,15 @@ func TestTaskHandlerRoutesAndTemplates(t *testing.T) {
 	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/task-templates", nil), rec)
 	require.NoError(t, h.ListTaskTemplates(c))
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Contains(t, rec.Body.String(), "support-review")
+	var catalog struct {
+		Items []TaskTemplateResponse `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &catalog))
+	require.Len(t, catalog.Items, 5)
+	require.Equal(t, "客服工单复盘", catalog.Items[0].Title)
+	require.Equal(t, "Support ticket review", catalog.Items[0].Translations["en"].Title)
+	require.NotEmpty(t, catalog.Items[0].Translations["en"].Summary)
+	require.NotEmpty(t, catalog.Items[0].Translations["en"].ExampleQuery)
 }
 
 func taskJSONRequest(method, target, body string) *http.Request {
