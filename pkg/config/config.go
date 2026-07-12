@@ -10,8 +10,10 @@ import (
 // 通过 envconfig 从环境变量加载，required 字段缺失时启动失败。
 type Config struct {
 	// 服务
-	Env  string `envconfig:"ENV" default:"development"`
-	Port int    `envconfig:"PORT" default:"8080"`
+	Env            string `envconfig:"ENV" default:"development"`
+	Port           int    `envconfig:"PORT" default:"8080"`
+	ReleaseVersion string `envconfig:"OPENLINKER_RELEASE_ID" default:"local"`
+	ReleaseCommit  string `envconfig:"OPENLINKER_GIT_SHA" default:"unknown"`
 
 	// 日志
 	LogLevel string `envconfig:"LOG_LEVEL" default:"info"`
@@ -83,6 +85,10 @@ type Config struct {
 	RuntimeMTLSCertFile     string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
 	RuntimeMTLSKeyFile      string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
 	RuntimeMTLSClientCAFile string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
+	// RuntimeHAMode selects the Redis-backed cross-instance signal dependency.
+	// PostgreSQL remains the fact source and its workers continue if Redis is
+	// unavailable; production HA readiness fails closed until Redis recovers.
+	RuntimeHAMode bool `envconfig:"RUNTIME_HA_MODE" default:"false"`
 	// Separate from JWT_SECRET so runtime capability key rotation cannot
 	// invalidate user sessions or reuse one key across protocols.
 	RuntimeInvocationSigningKeyID          string `envconfig:"RUNTIME_INVOCATION_SIGNING_KEY_ID" default:"current"`

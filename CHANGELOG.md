@@ -9,6 +9,10 @@ runtime protocol, and migration contract are declared stable.
 
 ### Added
 
+- Added durable Runtime v2 Core membership, release/schema/contract readiness
+  evidence, and GET/HEAD `/readyz` probes for single-instance and HA operation.
+- Added persistent `normal`, `draining`, and `hard_maintenance` gates that
+  serialize with new Run, Session, and claim transactions.
 - Added automatic first-admin bootstrap on Core startup when no admin user
   exists, plus an idempotent `./api bootstrap-admin` command for manual repair.
 - Made Core the authoritative issuer, verifier, and lifecycle owner for
@@ -18,6 +22,9 @@ runtime protocol, and migration contract are declared stable.
 
 ### Changed
 
+- Production images now expose their release ID and Git commit to Core. HA
+  readiness requires a healthy Redis signal bus, while PostgreSQL reconciliation
+  continues during Redis outages.
 - Added migration 062 to adopt legacy User Token records in place while
   preserving identifiers, hashes, prefixes, scopes, timestamps, usage, and
   revocation state. Legacy bcrypt-backed tokens remain verifiable during the

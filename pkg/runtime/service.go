@@ -917,6 +917,9 @@ func (s *Service) createRunningRun(
 		AccessMode: pgx.ReadWrite,
 	}, func(tx pgx.Tx) error {
 		q := s.queries.WithTx(tx)
+		if gateErr := RequireRuntimeClusterOperation(ctx, tx, RuntimeClusterNewRun); gateErr != nil {
+			return gateErr
+		}
 		if opts.replayOfRunID != nil {
 			lockedSource, lockErr := q.LockReplaySourceForCreate(ctx, db.LockReplaySourceForCreateParams{
 				ID:     *opts.replayOfRunID,

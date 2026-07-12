@@ -215,10 +215,22 @@ func setupMCPServiceTestDB(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, pool.Ping(ctx))
 	_, err = pool.Exec(ctx, truncateMCPServiceTables)
 	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+UPDATE runtime_cluster_control
+SET mode = 'normal', expected_replicas = 1, reopened_at = clock_timestamp(),
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		cleanCtx, cleanCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanCancel()
 		_, _ = pool.Exec(cleanCtx, truncateMCPServiceTables)
+		_, _ = pool.Exec(cleanCtx, `
+UPDATE runtime_cluster_control
+SET mode = 'hard_maintenance', expected_replicas = 1,
+    hard_maintenance_at = clock_timestamp(), reopened_at = NULL,
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
 		pool.Close()
 	})
 	return pool

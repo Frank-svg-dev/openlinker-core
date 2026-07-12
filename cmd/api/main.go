@@ -22,8 +22,10 @@ import (
 	migratecmd "github.com/golang-migrate/migrate/v4"
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 	emw "github.com/labstack/echo/v4/middleware"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/time/rate"
 
@@ -36,7 +38,6 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/ratelimit"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/redisx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -84,14 +85,16 @@ func main() {
 		log.Fatal().Err(err).Msg("bootstrap admin failed")
 	}
 
-	var runtimeLimiter runtime.EndpointLimiter
 	var rateLimiterStore emw.RateLimiterStore
-	if cfg.IsProduction() {
-		redisClient, err := redisx.Connect(rootCtx, cfg.RedisURL)
+	var redisClient *redis.Client
+	if cfg.RuntimeHAMode {
+		redisClient, err = newRedisClient(cfg.RedisURL)
 		if err != nil {
-			log.Fatal().Err(err).Msg("connect redis failed")
+			log.Fatal().Err(err).Msg("configure redis failed")
 		}
 		defer func() { _ = redisClient.Close() }()
+	}
+	if cfg.IsProduction() && redisClient != nil {
 		rateLimiterStore = ratelimit.NewRedisStore(
 			redisClient,
 			"openlinker:core:http",
@@ -100,16 +103,48 @@ func main() {
 			httpRateLimitPeriod(cfg),
 			time.Second,
 		)
-		runtimeLimiter = runtime.NewRedisEndpointLimiter(redisClient, "openlinker:core:runtime", time.Second)
-		log.Info().Msg("redis-backed rate limiters configured")
+		log.Info().Msg("redis-backed HTTP rate limiter configured")
+	} else if cfg.IsProduction() {
+		log.Info().Msg("single-instance in-memory HTTP rate limiter configured")
 	}
 
+	coreInstanceID := uuid.New()
+	var runtimeSignalBus runtime.RuntimeSignalBus = runtime.NewLocalSignalBus(coreInstanceID)
+	if cfg.RuntimeHAMode {
+		runtimeSignalBus, err = runtime.NewRedisSignalBus(redisClient, runtime.RedisSignalBusConfig{
+			InstanceID: coreInstanceID,
+		})
+		if err != nil {
+			log.Fatal().Err(err).Msg("configure runtime signal bus failed")
+		}
+	}
+	defer func() { _ = runtimeSignalBus.Close() }()
+	cluster, err := runtime.NewRuntimeClusterCoordinator(
+		pool,
+		runtimeSignalBus,
+		runtime.RuntimeClusterIdentity{
+			InstanceID:            coreInstanceID,
+			ReleaseVersion:        cfg.ReleaseVersion,
+			ReleaseCommit:         cfg.ReleaseCommit,
+			SchemaVersion:         runtime.RuntimeSchemaVersion,
+			SchemaChecksum:        runtime.RuntimeSchemaChecksum,
+			RuntimeContractID:     runtime.RuntimeContractID,
+			RuntimeContractDigest: runtime.RuntimeContractDigest,
+		},
+		cfg.RuntimeHAMode,
+	)
+	if err != nil {
+		log.Fatal().Err(err).Msg("configure runtime cluster failed")
+	}
+	cluster.Start(rootCtx)
+
 	e := newEcho(cfg, rateLimiterStore)
-	registerHealthRoutes(e, cfg, pool)
+	registerHealthRoutes(e, cfg, pool, cluster)
 	opts := coreapi.Options{
-		AdminMiddleware: auth.AdminMiddleware(dbgen.New(pool)),
-		LLMClient:       buildLLMClient(cfg),
-		RuntimeLimiter:  runtimeLimiter,
+		AdminMiddleware:  auth.AdminMiddleware(dbgen.New(pool)),
+		LLMClient:        buildLLMClient(cfg),
+		CoreInstanceID:   coreInstanceID,
+		RuntimeSignalBus: runtimeSignalBus,
 	}
 	log.Info().Msg("runtime billing is not part of core; run cost metadata is not settled")
 	if opts.LLMClient == nil {
@@ -162,6 +197,9 @@ func main() {
 			log.Error().Err(err).Msg("a2a grpc shutdown failed")
 		}
 	}
+	if err := cluster.Close(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("runtime cluster shutdown failed")
+	}
 	log.Info().Msg("bye")
 }
 
@@ -193,6 +231,10 @@ func requestLogger() echo.MiddlewareFunc {
 
 type dbPinger interface {
 	Ping(context.Context) error
+}
+
+type clusterReadinessChecker interface {
+	Readiness(context.Context) runtime.RuntimeClusterReadiness
 }
 
 func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
@@ -230,7 +272,7 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	return e
 }
 
-func registerHealthRoutes(e *echo.Echo, cfg *config.Config, pool dbPinger) {
+func registerHealthRoutes(e *echo.Echo, cfg *config.Config, pool dbPinger, readiness clusterReadinessChecker) {
 	e.GET("/healthz", func(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]any{"status": "ok", "env": cfg.Env})
 	})
@@ -253,6 +295,41 @@ func registerHealthRoutes(e *echo.Echo, cfg *config.Config, pool dbPinger) {
 		}
 		return c.NoContent(http.StatusOK)
 	})
+	e.GET("/readyz", func(c echo.Context) error {
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 3*time.Second)
+		defer cancel()
+		if readiness == nil {
+			return c.JSON(http.StatusServiceUnavailable, runtime.RuntimeClusterReadiness{
+				Status:  "not_ready",
+				Reasons: []string{"cluster_unavailable"},
+			})
+		}
+		result := readiness.Readiness(ctx)
+		return c.JSON(result.HTTPStatus(), result)
+	})
+	e.HEAD("/readyz", func(c echo.Context) error {
+		ctx, cancel := context.WithTimeout(c.Request().Context(), 3*time.Second)
+		defer cancel()
+		if readiness == nil {
+			return c.NoContent(http.StatusServiceUnavailable)
+		}
+		return c.NoContent(readiness.Readiness(ctx).HTTPStatus())
+	})
+}
+
+func newRedisClient(rawURL string) (*redis.Client, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return nil, errors.New("redis url is empty")
+	}
+	options, err := redis.ParseURL(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse redis url: %w", err)
+	}
+	// Deliberately do not Ping here. In HA, Redis availability is a readiness
+	// dependency, not a process-start dependency; PostgreSQL reconciliation
+	// must keep running and the client must recover without a restart.
+	return redis.NewClient(options), nil
 }
 
 func newHTTPServer(port int) *http.Server {
@@ -289,6 +366,15 @@ func validateProductionConfig(cfg *config.Config) error {
 	if strings.TrimSpace(cfg.FrontendURL) == "" {
 		return fmt.Errorf("FRONTEND_URL is required in production")
 	}
+	if release := strings.TrimSpace(cfg.ReleaseVersion); release == "" || release == "local" {
+		return fmt.Errorf("OPENLINKER_RELEASE_ID must identify the deployed release in production")
+	}
+	if commit := strings.TrimSpace(cfg.ReleaseCommit); commit == "" || commit == "unknown" {
+		return fmt.Errorf("OPENLINKER_GIT_SHA must identify the deployed commit in production")
+	}
+	if cfg.RuntimeHAMode && strings.TrimSpace(cfg.RedisURL) == "" {
+		return fmt.Errorf("REDIS_URL is required for production runtime HA")
+	}
 	return nil
 }
 
@@ -308,7 +394,7 @@ func rateLimiterConfigWithConfig(cfg *config.Config, stores ...emw.RateLimiterSt
 	return emw.RateLimiterConfig{
 		Skipper: func(c echo.Context) bool {
 			path := c.Request().URL.Path
-			return path == "/healthz" || path == "/healthz/db"
+			return path == "/healthz" || path == "/healthz/db" || path == "/readyz"
 		},
 		Store: store,
 		DenyHandler: func(c echo.Context, _ string, _ error) error {

@@ -117,7 +117,13 @@ Health check:
 
 ```bash
 curl http://localhost:8080/healthz
+curl --fail http://localhost:8080/readyz
 ```
+
+`/healthz` is process liveness. `/readyz` also verifies the persisted cluster
+mode, expected live replicas, release/schema/runtime-contract agreement, and
+the Redis signal dependency in HA mode. A Redis outage makes an HA instance
+not ready without stopping PostgreSQL reconciliation.
 
 ## Initial Admin Bootstrap
 
@@ -154,6 +160,9 @@ Required in normal deployments:
 Common optional values:
 
 - `REDIS_URL`
+- `RUNTIME_HA_MODE` — set `true` when `expected_replicas` is greater than one
+- `OPENLINKER_RELEASE_ID` / `OPENLINKER_GIT_SHA` — injected by the image build;
+  production rejects placeholder values
 - `API_URL`
 - `OAUTH_CALLBACK_BASE_URL`
 - `OAUTH_ALLOWED_FRONTEND_ORIGINS`
@@ -208,6 +217,12 @@ make runtime-loadtest  # run runtime_ws/runtime_pull load checks
 ```
 
 ## Runtime Modes
+
+Runtime cluster membership is refreshed with PostgreSQL time every five
+seconds. Multi-replica deployments require `RUNTIME_HA_MODE=true`; all live
+replicas must advertise the same release, schema checksum, and Runtime v2
+contract before `/readyz` succeeds. The migration deliberately starts in
+`hard_maintenance`, so it is never silently treated as a serving state.
 
 Use the simplest reachable mode for each Agent:
 

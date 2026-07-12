@@ -21,7 +21,7 @@ func TestRuntimeLeaseClaimUsesGlobalLockAndCapacityOrder(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, assigned)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "existing_offer", "lock_candidate",
+		"cluster_gate", "lock_session", "lock_node", "lock_credential", "existing_offer", "lock_candidate",
 		"claim_session_slot", "claim_node_slot", "create_offer", "mirror_offer",
 	}, fixture.tx.calls)
 	require.NotEqual(t, uuid.Nil, assigned.AttemptIdentity.AttemptID)
@@ -79,7 +79,7 @@ func TestRuntimeLeaseExpiredOfferIsReleasedBeforeNextCandidate(t *testing.T) {
 	require.Equal(t, 1, fixture.tx.resetCalls)
 	require.Equal(t, 1, fixture.tx.signalCalls)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "existing_offer",
+		"cluster_gate", "lock_session", "lock_node", "lock_credential", "existing_offer",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
 		"reset_run", "create_signal", "lock_candidate", "claim_session_slot", "claim_node_slot",
 		"create_offer", "mirror_offer",
@@ -97,9 +97,23 @@ func TestRuntimeLeaseClaimCapacityFailureRollsBackSessionReservation(t *testing.
 	require.Zero(t, fixture.tx.nodeInflight)
 	require.False(t, fixture.repository.committed)
 	require.Equal(t, []string{
-		"lock_session", "lock_node", "lock_credential", "existing_offer", "lock_candidate",
+		"cluster_gate", "lock_session", "lock_node", "lock_credential", "existing_offer", "lock_candidate",
 		"claim_session_slot", "claim_node_slot",
 	}, fixture.tx.calls)
+}
+
+func TestRuntimeLeaseHardMaintenanceRejectsClaimBeforePrincipalLocks(t *testing.T) {
+	fixture := newRuntimeLeaseFixture(t)
+	gateErr := errors.New("hard maintenance")
+	fixture.tx.clusterGateErr = gateErr
+
+	assigned, err := fixture.service.ClaimOffer(context.Background(), fixture.principal)
+	require.Nil(t, assigned)
+	require.ErrorIs(t, err, gateErr)
+	require.Equal(t, RuntimeClusterClaim, fixture.tx.clusterGateOperation)
+	require.Equal(t, []string{"cluster_gate"}, fixture.tx.calls)
+	require.Zero(t, fixture.tx.sessionInflight)
+	require.Zero(t, fixture.tx.nodeInflight)
 }
 
 func TestRuntimeLeaseOfferMirrorFailureRollsBackBothCapacityReservations(t *testing.T) {
@@ -451,9 +465,11 @@ func (r *runtimeLeaseRepositoryFake) WithTransaction(_ context.Context, fn func(
 
 type runtimeLeaseTransactionFake struct {
 	runtimeLeaseTransaction
-	principal   RuntimeSessionPrincipal
-	databaseNow time.Time
-	calls       []string
+	principal            RuntimeSessionPrincipal
+	databaseNow          time.Time
+	calls                []string
+	clusterGateErr       error
+	clusterGateOperation RuntimeClusterOperation
 
 	existing     *db.GetExistingUnacceptedRunOfferForSessionRow
 	existingErr  error
@@ -485,6 +501,12 @@ type runtimeLeaseTransactionFake struct {
 }
 
 func (f *runtimeLeaseTransactionFake) call(name string) { f.calls = append(f.calls, name) }
+
+func (f *runtimeLeaseTransactionFake) RequireRuntimeClusterOperation(_ context.Context, operation RuntimeClusterOperation) error {
+	f.call("cluster_gate")
+	f.clusterGateOperation = operation
+	return f.clusterGateErr
+}
 
 func (f *runtimeLeaseTransactionFake) LockRuntimeSessionForPrincipalValidation(_ context.Context, _ db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error) {
 	f.call("lock_session")

@@ -1049,10 +1049,22 @@ func setupWorkflowTestDB(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	require.NoError(t, pool.Ping(ctx))
 	truncateWorkflowTables(t, pool)
+	_, err = pool.Exec(ctx, `
+UPDATE runtime_cluster_control
+SET mode = 'normal', expected_replicas = 1, reopened_at = clock_timestamp(),
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		_, _ = pool.Exec(c, `TRUNCATE workflows, runs, agents, users RESTART IDENTITY CASCADE`)
+		_, _ = pool.Exec(c, `
+UPDATE runtime_cluster_control
+SET mode = 'hard_maintenance', expected_replicas = 1,
+    hard_maintenance_at = clock_timestamp(), reopened_at = NULL,
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
 		pool.Close()
 	})
 	return pool

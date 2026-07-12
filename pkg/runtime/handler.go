@@ -56,11 +56,6 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	return h
 }
 
-// SetEndpointLimiter is retained until coreapi drops the pre-v2 wiring. Runtime
-// v2 is authenticated by mTLS and scoped capabilities, so no endpoint limiter
-// participates in its transport.
-func (h *Handler) SetEndpointLimiter(EndpointLimiter) {}
-
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
 //
 //	POST /run            同步调用 Agent   —— runMw（JWT + 访问令牌混合）

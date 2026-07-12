@@ -31,6 +31,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("OAUTH_CALLBACK_BASE_URL", "https://openlinker.test")
 	t.Setenv("OAUTH_ALLOWED_FRONTEND_ORIGINS", "https://*.openlinker.test")
 	t.Setenv("LLM_COMPLETE_URL", "https://cloud.internal/llm")
+	t.Setenv("OPENLINKER_RELEASE_ID", "20260712-test")
+	t.Setenv("OPENLINKER_GIT_SHA", "0123456789abcdef")
+	t.Setenv("RUNTIME_HA_MODE", "true")
 
 	cfg, err := Load()
 	if err != nil {
@@ -41,6 +44,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.Port != 9090 {
 		t.Fatalf("Port = %d", cfg.Port)
+	}
+	if cfg.ReleaseVersion != "20260712-test" || cfg.ReleaseCommit != "0123456789abcdef" || !cfg.RuntimeHAMode {
+		t.Fatalf("unexpected release/HA config: %#v", cfg)
 	}
 	if cfg.RedisURL != "redis://localhost:6379/0" {
 		t.Fatalf("unexpected default RedisURL: %q", cfg.RedisURL)
@@ -83,6 +89,22 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 		cfg.RuntimeEndpointRunTimeoutSeconds != 0 ||
 		cfg.RuntimeEndpointRunWorkerBatchSize != 50 {
 		t.Fatalf("unexpected runtime endpoint worker defaults: %#v", cfg)
+	}
+}
+
+func TestLoadAppliesSafeDevelopmentReleaseDefaults(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
+	t.Setenv("JWT_SECRET", "test-secret")
+	unsetEnv(t, "OPENLINKER_RELEASE_ID")
+	unsetEnv(t, "OPENLINKER_GIT_SHA")
+	unsetEnv(t, "RUNTIME_HA_MODE")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+	if cfg.ReleaseVersion != "local" || cfg.ReleaseCommit != "unknown" || cfg.RuntimeHAMode {
+		t.Fatalf("release defaults = %q/%q HA=%v", cfg.ReleaseVersion, cfg.ReleaseCommit, cfg.RuntimeHAMode)
 	}
 }
 

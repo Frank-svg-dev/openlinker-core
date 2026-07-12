@@ -111,7 +111,12 @@ make run
 
 ```bash
 curl http://localhost:8080/healthz
+curl --fail http://localhost:8080/readyz
 ```
+
+`/healthz` 只判断进程是否存活。`/readyz` 还会核对数据库中的集群模式、预期副本、
+release、schema、Runtime 契约，以及 HA 模式下的 Redis signal 依赖。Redis 故障会让
+HA 实例退出就绪状态，但不会停止 PostgreSQL reconcile。
 
 ## 初始管理员 Bootstrap
 
@@ -148,6 +153,8 @@ make bootstrap-admin
 常见可选项：
 
 - `REDIS_URL`
+- `RUNTIME_HA_MODE` — `expected_replicas` 大于 1 时必须设为 `true`
+- `OPENLINKER_RELEASE_ID` / `OPENLINKER_GIT_SHA` — 镜像构建时注入；生产环境拒绝占位值
 - `API_URL`
 - `OAUTH_CALLBACK_BASE_URL`、`OAUTH_ALLOWED_FRONTEND_ORIGINS`
 - `OAUTH_SESSION_SECRET`
@@ -197,6 +204,11 @@ make runtime-loadtest  # 执行 runtime_ws/runtime_pull 压测检查
 ```
 
 ## Runtime 模式
+
+Core 每五秒使用 PostgreSQL 时间刷新集群成员记录。多副本部署必须设置
+`RUNTIME_HA_MODE=true`；所有 live Core 的 release、schema checksum 和 Runtime v2
+契约完全一致后，`/readyz` 才会成功。migration 默认进入 `hard_maintenance`，Core
+不会把尚未完成切换的数据库误判为可服务状态。
 
 对每个 Agent 使用最简单可达的模式：
 

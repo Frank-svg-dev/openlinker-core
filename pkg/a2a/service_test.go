@@ -38,8 +38,20 @@ func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) 
 	require.NoError(t, pool.Ping(context.Background()))
 	_, err = pool.Exec(context.Background(), truncateA2ATables)
 	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), `
+UPDATE runtime_cluster_control
+SET mode = 'normal', expected_replicas = 1, reopened_at = clock_timestamp(),
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
+	require.NoError(t, err)
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), truncateA2ATables)
+		_, _ = pool.Exec(context.Background(), `
+UPDATE runtime_cluster_control
+SET mode = 'hard_maintenance', expected_replicas = 1,
+    hard_maintenance_at = clock_timestamp(), reopened_at = NULL,
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
 		pool.Close()
 	})
 	runtimeSvc := runtime.NewService(pool, &config.Config{

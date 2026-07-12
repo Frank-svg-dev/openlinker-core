@@ -166,6 +166,12 @@ func (s *RuntimeLeaseService) ClaimOffer(
 
 	var assigned *RunAssignedPayload
 	err := s.repository.WithTransaction(ctx, func(tx runtimeLeaseTransaction) error {
+		// hard_maintenance is a persistent dispatch fence. Draining still
+		// allows queued work to converge, while renew/Event/Result/cancel do
+		// not pass through this new-claim gate.
+		if gateErr := tx.RequireRuntimeClusterOperation(ctx, RuntimeClusterClaim); gateErr != nil {
+			return gateErr
+		}
 		locked, err := s.lockPrincipal(ctx, tx, principal)
 		if err != nil {
 			return err
@@ -1038,6 +1044,7 @@ type runtimeLeaseRepository interface {
 }
 
 type runtimeLeaseTransaction interface {
+	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockRuntimeSessionForPrincipalValidation(context.Context, db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error)
 	LockRuntimeSessionForOfferRelease(context.Context, db.LockRuntimeSessionForOfferReleaseParams) (db.LockRuntimeSessionForOfferReleaseRow, error)
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
@@ -1076,12 +1083,17 @@ func (r *postgresRuntimeLeaseRepository) WithTransaction(
 	return pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite,
 	}, func(tx pgx.Tx) error {
-		return fn(&postgresRuntimeLeaseTransaction{queries: db.New(tx)})
+		return fn(&postgresRuntimeLeaseTransaction{tx: tx, queries: db.New(tx)})
 	})
 }
 
 type postgresRuntimeLeaseTransaction struct {
+	tx      pgx.Tx
 	queries *db.Queries
+}
+
+func (t *postgresRuntimeLeaseTransaction) RequireRuntimeClusterOperation(ctx context.Context, operation RuntimeClusterOperation) error {
+	return RequireRuntimeClusterOperation(ctx, t.tx, operation)
 }
 
 func (t *postgresRuntimeLeaseTransaction) LockRuntimeSessionForPrincipalValidation(ctx context.Context, params db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error) {

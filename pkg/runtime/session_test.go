@@ -131,7 +131,7 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	}
 	wantOrder := []string{
 		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
-		"lock_attachments", "get_session_for_update", "get_node", "list_active", "create_session", "create_attachment",
+		"lock_attachments", "get_session_for_update", "cluster_gate", "get_node", "list_active", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
 		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
@@ -148,6 +148,36 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	if state.Replayed || state.Resumed || state.Attachment == nil ||
 		state.DatabaseTime != tx.attachment.AttachedAt {
 		t.Fatalf("state = %#v", state)
+	}
+	if tx.clusterGateOperation != RuntimeClusterNewSession {
+		t.Fatalf("cluster gate operation = %q", tx.clusterGateOperation)
+	}
+}
+
+func TestRuntimeSessionServiceHardMaintenanceRejectsOnlyNewSession(t *testing.T) {
+	t.Parallel()
+
+	gateErr := errors.New("hard maintenance")
+	fixture := newSessionFixture()
+	newTx := newSessionTransactionFake(fixture)
+	newTx.getErr = pgx.ErrNoRows
+	newTx.clusterGateErr = gateErr
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: newTx}, fixture.coreID)
+	if _, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request); !errors.Is(err, gateErr) {
+		t.Fatalf("new session error = %v", err)
+	}
+	if newTx.createCalls != 0 {
+		t.Fatalf("new session writes = %d", newTx.createCalls)
+	}
+
+	existingTx := newSessionTransactionFake(fixture)
+	existingTx.clusterGateErr = gateErr
+	service = newRuntimeSessionService(&sessionRepositoryFake{tx: existingTx}, fixture.coreID)
+	if _, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request); err != nil {
+		t.Fatalf("existing session replay error = %v", err)
+	}
+	if existingTx.clusterGateOperation != "" {
+		t.Fatalf("existing session unexpectedly gated as %q", existingTx.clusterGateOperation)
 	}
 }
 
@@ -414,6 +444,8 @@ func (r *sessionRepositoryFake) ResolveRuntimeWorkerSessionPrincipal(_ context.C
 
 type sessionTransactionFake struct {
 	operations             []string
+	clusterGateErr         error
+	clusterGateOperation   RuntimeClusterOperation
 	fixture                sessionFixture
 	session                db.RuntimeSession
 	getErr                 error
@@ -478,6 +510,12 @@ func newSessionTransactionFake(fixture sessionFixture) *sessionTransactionFake {
 }
 
 func (f *sessionTransactionFake) op(name string) { f.operations = append(f.operations, name) }
+
+func (f *sessionTransactionFake) RequireRuntimeClusterOperation(_ context.Context, operation RuntimeClusterOperation) error {
+	f.op("cluster_gate")
+	f.clusterGateOperation = operation
+	return f.clusterGateErr
+}
 
 func (f *sessionTransactionFake) LockSessionIdentity(context.Context, uuid.UUID) error {
 	f.op("lock_session_identity")

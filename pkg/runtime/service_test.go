@@ -87,13 +87,34 @@ func setupTestDB(t *testing.T) *pgxpool.Pool {
 	defer truncateCancel()
 	_, err = pool.Exec(truncateCtx, truncateAll)
 	require.NoError(t, err)
+	setRuntimeClusterMode(t, pool, "normal")
 	t.Cleanup(func() {
 		c, cancel := context.WithTimeout(context.Background(), testDBOpTimeout)
 		defer cancel()
 		_, _ = pool.Exec(c, truncateAll)
+		_, _ = pool.Exec(c, `
+UPDATE runtime_cluster_control
+SET mode = 'hard_maintenance', expected_replicas = 1,
+    hard_maintenance_at = clock_timestamp(), reopened_at = NULL,
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`)
 		pool.Close()
 	})
 	return pool
+}
+
+func setRuntimeClusterMode(t *testing.T, pool *pgxpool.Pool, mode string) {
+	t.Helper()
+	_, err := pool.Exec(context.Background(), `
+UPDATE runtime_cluster_control
+SET mode = $1, expected_replicas = 1,
+    drain_started_at = CASE WHEN $1 = 'draining' THEN clock_timestamp() ELSE NULL END,
+    drain_deadline_at = NULL,
+    hard_maintenance_at = CASE WHEN $1 = 'hard_maintenance' THEN clock_timestamp() ELSE hard_maintenance_at END,
+    reopened_at = CASE WHEN $1 = 'normal' THEN clock_timestamp() ELSE NULL END,
+    version = version + 1, updated_at = clock_timestamp()
+WHERE singleton_id = 1`, mode)
+	require.NoError(t, err)
 }
 
 // newTestConfig 构造 runtime 测试用的 *config.Config。

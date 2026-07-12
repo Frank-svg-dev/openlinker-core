@@ -473,6 +473,12 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 		case !errors.Is(getErr, pgx.ErrNoRows):
 			return getErr
 		}
+		// An idempotent attach/resume of an existing Session remains available
+		// so accepted work can finish. Only a new Session insert is fenced by
+		// hard maintenance, in this same transaction.
+		if gateErr := tx.RequireRuntimeClusterOperation(ctx, RuntimeClusterNewSession); gateErr != nil {
+			return gateErr
+		}
 
 		node, nodeErr := tx.GetRuntimeNode(ctx, principal.Device.NodeID)
 		if nodeErr != nil {
@@ -1066,6 +1072,7 @@ type runtimeWorkerSessionResolveParams struct {
 }
 
 type runtimeSessionTransaction interface {
+	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockSessionIdentity(context.Context, uuid.UUID) error
 	GetRuntimeSessionForUpdate(context.Context, uuid.UUID) (db.RuntimeSession, error)
 	LockRuntimeSessionsForPrincipalRevocation(context.Context, db.LockRuntimeSessionsForPrincipalRevocationParams) ([]db.LockRuntimeSessionsForPrincipalRevocationRow, error)
@@ -1206,6 +1213,10 @@ func (r *postgresRuntimeSessionRepository) ResolveRuntimeWorkerSessionPrincipal(
 type postgresRuntimeSessionTransaction struct {
 	tx      pgx.Tx
 	queries *db.Queries
+}
+
+func (t *postgresRuntimeSessionTransaction) RequireRuntimeClusterOperation(ctx context.Context, operation RuntimeClusterOperation) error {
+	return RequireRuntimeClusterOperation(ctx, t.tx, operation)
 }
 
 func (t *postgresRuntimeSessionTransaction) LockSessionIdentity(ctx context.Context, sessionID uuid.UUID) error {

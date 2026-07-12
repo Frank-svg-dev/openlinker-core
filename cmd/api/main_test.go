@@ -13,10 +13,12 @@ import (
 	"time"
 
 	migratecmd "github.com/golang-migrate/migrate/v4"
+	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 func TestAllowedCORSOrigins(t *testing.T) {
@@ -61,6 +63,8 @@ func TestValidateProductionConfig(t *testing.T) {
 	if err := validateProductionConfig(&config.Config{
 		Env:                "production",
 		FrontendURL:        "https://app.example",
+		ReleaseVersion:     "20260712-test",
+		ReleaseCommit:      "0123456789abcdef",
 		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
 	}); err != nil {
 		t.Fatalf("deprecated verify URL must not affect local token auth: %v", err)
@@ -68,10 +72,18 @@ func TestValidateProductionConfig(t *testing.T) {
 	if err := validateProductionConfig(&config.Config{
 		Env:                "production",
 		FrontendURL:        "https://app.example",
+		ReleaseVersion:     "20260712-test",
+		ReleaseCommit:      "0123456789abcdef",
 		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
 		InternalToken:      "secret",
 	}); err != nil {
 		t.Fatalf("valid production config error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "production", FrontendURL: "https://app.example",
+		ReleaseVersion: "local", ReleaseCommit: "0123456789abcdef",
+	}); err == nil || !strings.Contains(err.Error(), "OPENLINKER_RELEASE_ID") {
+		t.Fatalf("placeholder release error = %v", err)
 	}
 }
 
@@ -82,6 +94,10 @@ func TestRateLimiterConfigSkipsHealthAndDeniesWithStandardError(t *testing.T) {
 	health := e.NewContext(httptest.NewRequest(http.MethodGet, "/healthz", nil), httptest.NewRecorder())
 	if !cfg.Skipper(health) {
 		t.Fatal("healthz should skip rate limiting")
+	}
+	ready := e.NewContext(httptest.NewRequest(http.MethodGet, "/readyz", nil), httptest.NewRecorder())
+	if !cfg.Skipper(ready) {
+		t.Fatal("readyz should skip rate limiting")
 	}
 
 	api := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil), httptest.NewRecorder())
@@ -193,7 +209,10 @@ func TestNewEchoAndHealthRoutes(t *testing.T) {
 	}
 
 	pinger := &fakePinger{}
-	registerHealthRoutes(e, cfg, pinger)
+	readiness := &fakeClusterReadiness{result: runtime.RuntimeClusterReadiness{
+		Ready: true, Status: "ready", InstanceID: uuid.New(),
+	}}
+	registerHealthRoutes(e, cfg, pinger, readiness)
 
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
@@ -227,6 +246,17 @@ func TestNewEchoAndHealthRoutes(t *testing.T) {
 	e.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/healthz/db", nil))
 	if rec.Code != http.StatusOK || rec.Body.Len() != 0 {
 		t.Fatalf("HEAD /healthz/db status/body = %d/%q", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusOK || readiness.calls != 1 || !readiness.sawDeadline {
+		t.Fatalf("GET /readyz status/calls/deadline = %d/%d/%v: %s", rec.Code, readiness.calls, readiness.sawDeadline, rec.Body.String())
+	}
+	rec = httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodHead, "/readyz", nil))
+	if rec.Code != http.StatusOK || rec.Body.Len() != 0 || readiness.calls != 2 {
+		t.Fatalf("HEAD /readyz status/body/calls = %d/%q/%d", rec.Code, rec.Body.String(), readiness.calls)
 	}
 }
 
@@ -274,7 +304,7 @@ func TestNewEchoAllowsRunIdempotencyCORSHeaders(t *testing.T) {
 
 func TestHealthDBFailureUsesStandardError(t *testing.T) {
 	e := newEcho(&config.Config{Env: "production"})
-	registerHealthRoutes(e, &config.Config{Env: "production"}, &fakePinger{err: errors.New("db down")})
+	registerHealthRoutes(e, &config.Config{Env: "production"}, &fakePinger{err: errors.New("db down")}, nil)
 
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz/db", nil))
@@ -283,6 +313,36 @@ func TestHealthDBFailureUsesStandardError(t *testing.T) {
 	}
 	if got := rec.Body.String(); !containsAll(got, "SERVICE_UNAVAILABLE", "database unavailable") {
 		t.Fatalf("GET /healthz/db body = %s", got)
+	}
+}
+
+func TestReadinessFailureReturnsServiceUnavailableForGetAndHead(t *testing.T) {
+	e := newEcho(&config.Config{Env: "development"})
+	checker := &fakeClusterReadiness{result: runtime.RuntimeClusterReadiness{
+		Status: "not_ready", Reasons: []string{"replicas_unavailable"},
+	}}
+	registerHealthRoutes(e, &config.Config{Env: "development"}, &fakePinger{}, checker)
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, httptest.NewRequest(method, "/readyz", nil))
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s /readyz = %d: %s", method, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestNewRedisClientDoesNotRequireReachableServer(t *testing.T) {
+	client, err := newRedisClient("redis://127.0.0.1:1/0")
+	if err != nil {
+		t.Fatalf("newRedisClient: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	if got := client.Options().Addr; got != "127.0.0.1:1" {
+		t.Fatalf("redis addr = %q", got)
+	}
+	if _, err = newRedisClient("not a redis url"); err == nil {
+		t.Fatal("invalid redis URL should fail")
 	}
 }
 
@@ -474,6 +534,18 @@ type fakePinger struct {
 	err         error
 	calls       int
 	sawDeadline bool
+}
+
+type fakeClusterReadiness struct {
+	result      runtime.RuntimeClusterReadiness
+	calls       int
+	sawDeadline bool
+}
+
+func (f *fakeClusterReadiness) Readiness(ctx context.Context) runtime.RuntimeClusterReadiness {
+	f.calls++
+	_, f.sawDeadline = ctx.Deadline()
+	return f.result
 }
 
 type fakeMigrator struct {

@@ -37,10 +37,11 @@ import (
 )
 
 type Options struct {
-	LLMClient       corellm.Client
-	AdminMiddleware echo.MiddlewareFunc
-	UserProvisioner auth.UserProvisioner
-	RuntimeLimiter  runtime.EndpointLimiter
+	LLMClient        corellm.Client
+	AdminMiddleware  echo.MiddlewareFunc
+	UserProvisioner  auth.UserProvisioner
+	CoreInstanceID   uuid.UUID
+	RuntimeSignalBus runtime.RuntimeSignalBus
 }
 
 type Services struct {
@@ -127,8 +128,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
-	runtimeHandler.SetEndpointLimiter(opts.RuntimeLimiter)
-	configureRuntimeV2(rootCtx, runtimeHandler, runtimeSvc, pool, cfg)
+	configureRuntimeV2(rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID, opts.RuntimeSignalBus)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	agentSvc.SetDryRunner(runtimeSvc)
@@ -234,11 +234,15 @@ func configureRuntimeV2(
 	runtimeService *runtime.Service,
 	pool *pgxpool.Pool,
 	cfg *config.Config,
+	coreInstanceID uuid.UUID,
+	signalBus runtime.RuntimeSignalBus,
 ) {
 	if handler == nil || runtimeService == nil || pool == nil || cfg == nil {
 		return
 	}
-	coreInstanceID := uuid.New()
+	if coreInstanceID == uuid.Nil {
+		coreInstanceID = uuid.New()
+	}
 	sessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
 	cancellations := runtime.NewRuntimeCancellationCoordinator(pool)
@@ -275,6 +279,13 @@ func configureRuntimeV2(
 		cancellations,
 		runtime.RuntimeV2MaintenanceWorkerConfig{},
 	)
+	if signalBus != nil {
+		go runtime.StartRuntimeSignalOutboxWorker(
+			rootCtx,
+			runtime.NewRuntimeSignalOutboxWorker(db.New(pool), signalBus),
+			runtime.RuntimeSignalOutboxWorkerConfig{},
+		)
+	}
 }
 
 // ConfigureGoth initializes OAuth providers and the cookie session store.
