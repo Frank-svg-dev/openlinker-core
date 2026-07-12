@@ -185,7 +185,6 @@ User Token 的签发和验证已经是 Core 本地能力，不需要外部验证
 
 | 变量 | 用途 | 自托管 |
 |------|------|------|
-| `USER_TOKEN_VERIFY_URL` | 已废弃的兼容变量；Core 不再调用，也不会远程 fallback | 留空 |
 | `OPENLINKER_INTERNAL_TOKEN` | 保护 `POST /internal/user-tokens/introspect`，也可供 LLM 代理等受信私有服务鉴权 | 未启用内部服务集成时留空 |
 
 ## 常用命令
@@ -209,6 +208,18 @@ Core 每五秒使用 PostgreSQL 时间刷新集群成员记录。多副本部署
 `RUNTIME_HA_MODE=true`；所有 live Core 的 release、schema checksum 和 Runtime v2
 契约完全一致后，`/readyz` 才会成功。migration 默认进入 `hard_maintenance`，Core
 不会把尚未完成切换的数据库误判为可服务状态。
+
+破坏性 Runtime migration 使用镜像内置的 `runtime-cutover`。`status` 与
+`preflight` 只输出脱敏 JSON 证据；`drain`、`hard-maintenance`、`reopen` 都必须显式
+传入 cluster control 的 CAS version，`reopen` 还必须匹配当前 cutover ID。只有数据库
+契约、精确 live 副本数、release、schema checksum 与 Redis HA 全部一致时才能 reopen。
+管理端通过 `GET /api/v1/admin/runtime/maintenance` 只读同一份状态，不提供模式写操作。
+
+```bash
+./runtime-cutover preflight --require-exclusive --require-no-members
+./runtime-cutover status
+./runtime-cutover reopen --expected-version=<version> --cutover-id=<uuid>
+```
 
 对每个 Agent 使用最简单可达的模式：
 

@@ -13,6 +13,9 @@ runtime protocol, and migration contract are declared stable.
   evidence, and GET/HEAD `/readyz` probes for single-instance and HA operation.
 - Added persistent `normal`, `draining`, and `hard_maintenance` gates that
   serialize with new Run, Session, and claim transactions.
+- Added the `runtime-cutover` CLI for pre-migration evidence, CAS-protected
+  drain/maintenance/reopen transitions, exact replica and contract gates, and
+  a read-only admin maintenance endpoint.
 - Added automatic first-admin bootstrap on Core startup when no admin user
   exists, plus an idempotent `./api bootstrap-admin` command for manual repair.
 - Made Core the authoritative issuer, verifier, and lifecycle owner for

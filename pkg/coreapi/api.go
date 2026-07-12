@@ -21,6 +21,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/cutover"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/delivery"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/discovery"
@@ -132,6 +133,19 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	runtimeHandler.RegisterAgentRuntime(api)
 	if opts.AdminMiddleware != nil {
 		runtimeHandler.RegisterAdmin(api, jwtMiddleware, opts.AdminMiddleware)
+		signalMode := cutover.SignalModeLocal
+		if cfg.RuntimeHAMode {
+			signalMode = cutover.SignalModeRedis
+		}
+		cutover.NewHandler(cutover.NewService(pool, cutover.ServiceConfig{
+			Identity: cutover.Identity{
+				ReleaseID: cfg.ReleaseVersion, GitSHA: cfg.ReleaseCommit,
+				SchemaVersion: runtime.RuntimeSchemaVersion, SchemaChecksum: runtime.RuntimeSchemaChecksum,
+				MigrationName:     runtime.RuntimeSchemaMigrationName,
+				RuntimeContractID: runtime.RuntimeContractID, RuntimeContractDigest: runtime.RuntimeContractDigest,
+			},
+			SignalMode: signalMode, SignalHealth: opts.RuntimeSignalBus,
+		})).Register(api, jwtMiddleware, opts.AdminMiddleware)
 	}
 	agentSvc.SetDryRunner(runtimeSvc)
 	if cfg.RuntimeEndpointRunWorkerEnabled {

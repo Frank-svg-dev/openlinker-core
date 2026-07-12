@@ -198,7 +198,6 @@ can introspect the same token through Core.
 
 | Variable | Purpose | Self-host |
 |----------|---------|----------|
-| `USER_TOKEN_VERIFY_URL` | Deprecated compatibility variable; Core no longer calls it or falls back remotely | Leave empty |
 | `OPENLINKER_INTERNAL_TOKEN` | Protects `POST /internal/user-tokens/introspect`; it may also authenticate trusted private services such as an LLM proxy | Leave empty unless exposing an internal service integration |
 
 ## Common Commands
@@ -223,6 +222,20 @@ seconds. Multi-replica deployments require `RUNTIME_HA_MODE=true`; all live
 replicas must advertise the same release, schema checksum, and Runtime v2
 contract before `/readyz` succeeds. The migration deliberately starts in
 `hard_maintenance`, so it is never silently treated as a serving state.
+
+Breaking Runtime migrations use the image-bundled `runtime-cutover` command.
+`status` and `preflight` expose redacted JSON evidence; `drain`,
+`hard-maintenance`, and `reopen` require an explicit cluster-control CAS
+version, and `reopen` also requires the active cutover ID. Reopen only succeeds
+when the database contract, exact live replica count, release identity, schema
+checksum, and Redis HA dependency agree. The admin API exposes the same status
+read-only at `GET /api/v1/admin/runtime/maintenance`; it never changes mode.
+
+```bash
+./runtime-cutover preflight --require-exclusive --require-no-members
+./runtime-cutover status
+./runtime-cutover reopen --expected-version=<version> --cutover-id=<uuid>
+```
 
 Use the simplest reachable mode for each Agent:
 

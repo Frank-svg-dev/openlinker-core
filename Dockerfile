@@ -11,7 +11,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o api ./cmd/api
+RUN CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o api ./cmd/api && \
+    CGO_ENABLED=0 GOOS="${TARGETOS:-linux}" GOARCH="${TARGETARCH:-$(go env GOARCH)}" go build -ldflags="-w -s" -o runtime-cutover ./cmd/runtime-cutover
 
 FROM alpine:3.19
 ARG OPENLINKER_GIT_SHA=unknown
@@ -25,6 +26,7 @@ LABEL org.opencontainers.image.revision="${OPENLINKER_GIT_SHA}" \
 RUN apk add --no-cache ca-certificates tzdata wget
 WORKDIR /app
 COPY --from=builder /app/api .
+COPY --from=builder /app/runtime-cutover .
 COPY --from=builder /app/migrations ./migrations
 
 EXPOSE 8080
