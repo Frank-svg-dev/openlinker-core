@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 # core-api 独立镜像(开源版,不含 wallet/payment/provider-specific LLM client 等)。
 # build context = openlinker-core/
 
