@@ -146,11 +146,6 @@ type Run struct {
 	TerminalEventID             *uuid.UUID `db:"terminal_event_id" json:"terminal_event_id"`
 	DeadLetteredAt              *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
 	ReplayOfRunID               *uuid.UUID `db:"replay_of_run_id" json:"replay_of_run_id"`
-
-	// Deprecated: migration 063 removes these columns. They remain temporarily
-	// so the legacy claim query layer can be replaced in its dedicated task.
-	ClaimedByRuntimeTokenID *uuid.UUID `db:"claimed_by_runtime_token_id" json:"claimed_by_runtime_token_id"`
-	ClaimedAt               *time.Time `db:"claimed_at" json:"claimed_at"`
 }
 
 // RunEvent 对应 run_events 表。

@@ -22,7 +22,7 @@ import (
 
 // truncateAll 测试间数据隔离：从依赖最多的表先删，CASCADE 兜底。
 // 这里只列 core 自带的表，避免运行 core 测试时强制依赖 cloud schema。
-const truncateAll = "TRUNCATE runs, agents, users RESTART IDENTITY CASCADE"
+const truncateAll = "TRUNCATE runtime_signal_outbox, runtime_session_attachments, runtime_sessions, runtime_nodes, runs, agents, users RESTART IDENTITY CASCADE"
 
 const testDBOpTimeout = 30 * time.Second
 const agentTestAdvisoryLockID int64 = 270017

@@ -232,19 +232,6 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 	}
 }
 
-func TestRuntimePullCountQueryScansScalar(t *testing.T) {
-	agentID := uuid.New()
-	dbtx := &fakeDBTX{row: fakeRow{values: []any{int32(4)}}}
-	count, err := New(dbtx).CountClaimableRuntimePullRuns(context.Background(), agentID)
-	if err != nil || count != 4 {
-		t.Fatalf("CountClaimableRuntimePullRuns = %d, %v", count, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "CountClaimableRuntimePullRuns")
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID}) {
-		t.Fatalf("CountClaimableRuntimePullRuns args = %#v", dbtx.queryRowArgs)
-	}
-}
-
 func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 	creatorID := uuid.New()
 	agentID := uuid.New()
@@ -1714,34 +1701,6 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	}
 	q := New(dbtx)
 
-	token, err := q.CreateAgentRuntimeToken(context.Background(), CreateAgentRuntimeTokenParams{
-		AgentID:         agentID,
-		CreatedByUserID: userID,
-		Name:            "runtime",
-		Prefix:          "ol_agent_abcd",
-		TokenHash:       "hash",
-		Scopes:          []string{"agent:pull"},
-	})
-	if err != nil {
-		t.Fatalf("CreateAgentRuntimeToken error = %v", err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "CreateAgentRuntimeToken")
-	if token.ID != tokenID || token.LastUsedAt == nil || token.Scopes[0] != "agent:pull" {
-		t.Fatalf("CreateAgentRuntimeToken scan = %#v", token)
-	}
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, userID, "runtime", "ol_agent_abcd", "hash", []string{"agent:pull"}}) {
-		t.Fatalf("CreateAgentRuntimeToken args = %#v", dbtx.queryRowArgs)
-	}
-
-	listed, err := q.ListAgentRuntimeTokensForOwner(context.Background(), ListAgentRuntimeTokensForOwnerParams{AgentID: agentID, UserID: userID})
-	if err != nil {
-		t.Fatalf("ListAgentRuntimeTokensForOwner error = %v", err)
-	}
-	requireSQLName(t, dbtx.querySQL, "ListAgentRuntimeTokensForOwner")
-	if len(listed) != 1 || listed[0].ID != tokenID {
-		t.Fatalf("ListAgentRuntimeTokensForOwner scan = %#v", listed)
-	}
-
 	activeTokenValues := append([]any{}, tokenValues...)
 	activeTokenValues = append(activeTokenValues, "runtime_pull")
 	activeTokenRows := &fakeRows{rows: [][]any{activeTokenValues}}
@@ -1765,13 +1724,6 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	if !reflect.DeepEqual(dbtx.execArgs, []any{tokenID}) {
 		t.Fatalf("TouchAgentRuntimeToken args = %#v", dbtx.execArgs)
 	}
-
-	dbtx.row = fakeRow{values: []any{int32(3)}}
-	count, err := q.CountActiveAgentRuntimeTokens(context.Background(), agentID)
-	if err != nil || count != 3 {
-		t.Fatalf("CountActiveAgentRuntimeTokens = %d, %v", count, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "CountActiveAgentRuntimeTokens")
 
 	dbtx.row = fakeRow{values: []any{true}}
 	recent, err := q.HasRecentRuntimePullToken(context.Background(), agentID)
@@ -2003,10 +1955,6 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("CountParentRunsWithDelegationsByUser args = %#v", dbtx.queryRowArgs)
 	}
 
-	if rows, err := q.RevokeAgentRuntimeTokenForOwner(context.Background(), RevokeAgentRuntimeTokenForOwnerParams{ID: tokenID, UserID: userID}); err != nil || rows != 5 {
-		t.Fatalf("RevokeAgentRuntimeTokenForOwner = %d, %v", rows, err)
-	}
-	requireSQLName(t, dbtx.execSQL, "RevokeAgentRuntimeTokenForOwner")
 }
 
 func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
@@ -2020,10 +1968,6 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "ListAgentRuntimeTokensForOwner", run: func() error {
-			_, err := q.ListAgentRuntimeTokensForOwner(ctx, ListAgentRuntimeTokensForOwnerParams{AgentID: id, UserID: id})
-			return err
-		}},
 		{name: "ListActiveAgentRuntimeTokensByPrefix", run: func() error {
 			_, err := q.ListActiveAgentRuntimeTokensByPrefix(ctx, "ol_agent_abcd")
 			return err
@@ -2312,10 +2256,6 @@ func TestGeneratedExecQueriesPropagateExecErrors(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{name: "RevokeAgentRuntimeTokenForOwner", run: func() error {
-			_, err := q.RevokeAgentRuntimeTokenForOwner(ctx, RevokeAgentRuntimeTokenForOwnerParams{ID: id, UserID: id})
-			return err
-		}},
 		{name: "ConfirmAgentApproval", run: func() error {
 			_, err := q.ConfirmAgentApproval(ctx, ConfirmAgentApprovalParams{ID: id, CreatorID: id, DecisionNote: &message})
 			return err
@@ -3708,13 +3648,11 @@ func TestDashboardRunQueriesScanRowsAndScalars(t *testing.T) {
 	creatorID := uuid.New()
 	agentID := uuid.New()
 	runID := uuid.New()
-	tokenID := uuid.New()
 	now := time.Date(2026, 6, 20, 23, 0, 0, 0, time.UTC)
 	duration := int32(80)
 	finishedAt := now.Add(time.Minute)
-	claimedAt := now.Add(10 * time.Second)
 	runValues := runRow(runID, userID, agentID, []byte(`{"prompt":"hi"}`), []byte(`{"ok":true}`), "success", nil, nil, 100, 25, 75, &duration, now, &finishedAt, "dashboard")
-	creatorRunValues := append(append([]any{}, runValues...), &tokenID, &claimedAt, "agent-one", "Agent One")
+	creatorRunValues := append(append([]any{}, runValues...), "agent-one", "Agent One")
 	dbtx := &fakeDBTX{row: fakeRow{values: []any{int32(9)}}}
 	q := New(dbtx)
 
@@ -3769,7 +3707,7 @@ func TestDashboardRunQueriesScanRowsAndScalars(t *testing.T) {
 		t.Fatalf("ListRunsByCreatorAgentWithAgent error = %v", err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ListRunsByCreatorAgentWithAgent")
-	if !creatorRows.closed || len(creatorRuns) != 1 || creatorRuns[0].ClaimedByRuntimeTokenID == nil || creatorRuns[0].AgentName != "Agent One" {
+	if !creatorRows.closed || len(creatorRuns) != 1 || creatorRuns[0].AgentName != "Agent One" {
 		t.Fatalf("ListRunsByCreatorAgentWithAgent scan = %#v closed=%v", creatorRuns, creatorRows.closed)
 	}
 

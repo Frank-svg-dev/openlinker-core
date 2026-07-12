@@ -22,9 +22,6 @@ type Handler struct {
 }
 
 type service interface {
-	CreateRuntimeToken(ctx context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error)
-	ListRuntimeTokens(ctx context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error)
-	RevokeRuntimeToken(ctx context.Context, userID, tokenID uuid.UUID) error
 	GetRuntimeWorkbench(ctx context.Context, userID, agentID uuid.UUID) (*RuntimeWorkbenchResponse, error)
 	GetCallPolicy(ctx context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error)
 	UpdateCallPolicy(ctx context.Context, userID, agentID uuid.UUID, req *UpdateCallPolicyRequest) (*CallPolicyResponse, error)
@@ -55,7 +52,9 @@ func (h *Handler) SetAgentCardProvider(provider AgentCardProvider) {
 	h.cardProvider = provider
 }
 
-// Register mounts creator controls, runtime-token invocation and user-visible trace lookup.
+// Register mounts creator controls and user-visible A2A trace lookup. Runtime
+// credentials are issued and rotated by the Agent registration API, not by a
+// second A2A-owned token surface.
 func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.MiddlewareFunc) {
 	creator := api.Group("/creator/agents/:id", jwtMiddleware)
 	creator.GET("/runtime-workbench", h.GetRuntimeWorkbench)
@@ -99,60 +98,6 @@ func (h *Handler) resolveA2ATargetAgent(next echo.HandlerFunc) echo.HandlerFunc 
 		}
 		return next(c)
 	}
-}
-
-func (h *Handler) CreateRuntimeToken(c echo.Context) error {
-	userID, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	agentID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	var req CreateRuntimeTokenRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.CreateRuntimeToken(c.Request().Context(), userID, agentID, &req)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusCreated, resp)
-}
-
-func (h *Handler) ListRuntimeTokens(c echo.Context) error {
-	userID, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	agentID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	items, err := h.svc.ListRuntimeTokens(c.Request().Context(), userID, agentID)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, map[string]any{"items": items})
-}
-
-func (h *Handler) RevokeRuntimeToken(c echo.Context) error {
-	userID, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	tokenID, err := uuid.Parse(c.Param("tokenID"))
-	if err != nil {
-		return httpx.BadRequest("tokenID 不是合法 uuid")
-	}
-	if err := h.svc.RevokeRuntimeToken(c.Request().Context(), userID, tokenID); err != nil {
-		return err
-	}
-	return c.NoContent(http.StatusNoContent)
 }
 
 func (h *Handler) GetRuntimeWorkbench(c echo.Context) error {

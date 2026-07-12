@@ -1,23 +1,5 @@
 package a2a
 
-// CreateRuntimeTokenRequest creates a credential bound to one calling Agent.
-type CreateRuntimeTokenRequest struct {
-	Name string `json:"name" validate:"required,min=1,max=80"`
-}
-
-// RuntimeTokenResponse returns token metadata. PlaintextToken is only populated once on creation.
-type RuntimeTokenResponse struct {
-	ID             string   `json:"id"`
-	AgentID        string   `json:"agent_id"`
-	Name           string   `json:"name"`
-	Prefix         string   `json:"prefix"`
-	Scopes         []string `json:"scopes"`
-	PlaintextToken string   `json:"plaintext_token,omitempty"`
-	LastUsedAt     *string  `json:"last_used_at,omitempty"`
-	RevokedAt      *string  `json:"revoked_at,omitempty"`
-	CreatedAt      string   `json:"created_at"`
-}
-
 // UpdateCallPolicyRequest configures which Agents may call the target through OpenLinker.
 type UpdateCallPolicyRequest struct {
 	CallableBy string `json:"callable_by" validate:"required,oneof=public same_creator private"`
@@ -32,7 +14,6 @@ type CallPolicyResponse struct {
 type RuntimeWorkbenchResponse struct {
 	Agent       RuntimeWorkbenchAgent        `json:"agent"`
 	Runtime     RuntimeWorkbenchRuntime      `json:"runtime"`
-	Tokens      []RuntimeTokenResponse       `json:"tokens"`
 	RecentRuns  []RuntimeWorkbenchRun        `json:"recent_runs"`
 	Diagnostics []RuntimeWorkbenchDiagnostic `json:"diagnostics"`
 }
@@ -50,33 +31,52 @@ type RuntimeWorkbenchAgent struct {
 }
 
 type RuntimeWorkbenchRuntime struct {
-	ActiveTokenCount                 int32   `json:"active_token_count"`
-	PendingRunCount                  int32   `json:"pending_run_count"`
-	ClaimNow                         bool    `json:"claim_now"`
-	LastRuntimeActivityAt            *string `json:"last_runtime_activity_at,omitempty"`
-	LastClaimedAt                    *string `json:"last_claimed_at,omitempty"`
-	LastResultAt                     *string `json:"last_result_at,omitempty"`
-	RecommendedHeartbeatAfterSeconds int32   `json:"recommended_heartbeat_after_seconds"`
-	MaxClaimWaitSeconds              int32   `json:"max_claim_wait_seconds"`
+	RuntimeContractID     string  `json:"runtime_contract_id"`
+	RuntimeContractDigest string  `json:"runtime_contract_digest"`
+	TransportPolicy       string  `json:"transport_policy"`
+	PrimaryTransport      string  `json:"primary_transport"`
+	FallbackTransport     string  `json:"fallback_transport"`
+	ConnectionStatus      string  `json:"connection_status"`
+	ActiveNodeCount       int32   `json:"active_node_count"`
+	ActiveSessionCount    int32   `json:"active_session_count"`
+	ReadySessionCount     int32   `json:"ready_session_count"`
+	DrainingSessionCount  int32   `json:"draining_session_count"`
+	TotalCapacity         int32   `json:"total_capacity"`
+	TotalInflight         int32   `json:"total_inflight"`
+	PendingRunCount       int32   `json:"pending_run_count"`
+	RetryWaitRunCount     int32   `json:"retry_wait_run_count"`
+	OfferedRunCount       int32   `json:"offered_run_count"`
+	ExecutingRunCount     int32   `json:"executing_run_count"`
+	LastSessionActivityAt *string `json:"last_session_activity_at,omitempty"`
+	LastAssignmentAt      *string `json:"last_assignment_at,omitempty"`
+	LastResultAt          *string `json:"last_result_at,omitempty"`
 }
 
 type RuntimeWorkbenchRun struct {
-	RunID        string  `json:"run_id"`
-	Status       string  `json:"status"`
-	Source       string  `json:"source"`
-	StartedAt    string  `json:"started_at"`
-	ClaimedAt    *string `json:"claimed_at,omitempty"`
-	FinishedAt   *string `json:"finished_at,omitempty"`
-	ErrorCode    *string `json:"error_code,omitempty"`
-	ErrorMessage *string `json:"error_message,omitempty"`
-	DetailURL    string  `json:"detail_url"`
+	RunID                string  `json:"run_id"`
+	Status               string  `json:"status"`
+	DispatchState        string  `json:"dispatch_state"`
+	AttemptCount         int32   `json:"attempt_count"`
+	MaxAttempts          int32   `json:"max_attempts"`
+	NextAttemptAt        *string `json:"next_attempt_at,omitempty"`
+	Source               string  `json:"source"`
+	StartedAt            string  `json:"started_at"`
+	FinishedAt           *string `json:"finished_at,omitempty"`
+	LatestAttemptID      *string `json:"latest_attempt_id,omitempty"`
+	LatestAttemptState   *string `json:"latest_attempt_state,omitempty"`
+	LastAssignmentAt     *string `json:"last_assignment_at,omitempty"`
+	LatestAttemptEndedAt *string `json:"latest_attempt_ended_at,omitempty"`
+	ErrorCode            *string `json:"error_code,omitempty"`
+	ErrorMessage         *string `json:"error_message,omitempty"`
+	DetailURL            string  `json:"detail_url"`
 }
 
 type RuntimeWorkbenchDiagnostic struct {
-	Code       string `json:"code"`
-	Severity   string `json:"severity"`
-	Message    string `json:"message"`
-	NextAction string `json:"next_action"`
+	Code            string `json:"code"`
+	Severity        string `json:"severity"`
+	Summary         string `json:"summary"`
+	TechnicalDetail string `json:"technical_detail"`
+	NextAction      string `json:"next_action"`
 }
 
 // SkillRef is the small capability badge shown in A2A call-chain views.

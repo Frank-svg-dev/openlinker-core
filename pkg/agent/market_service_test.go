@@ -41,11 +41,13 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // assertHTTPStatus 用 errors.As 断言 *httpx.HTTPError 的 status。
@@ -76,7 +78,7 @@ func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *test
 		Runtime: agent.AgentCardRuntimeExt{
 			Adapter:        "openlinker_a2a_proxy",
 			ConnectionMode: "runtime_pull",
-			OnlineSignal:   "runtime_pull_heartbeat_claim_result",
+			OnlineSignal:   "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool",
 			TaskLifecycle:  "openlinker_run_task_lifecycle",
 		},
 	}
@@ -93,7 +95,7 @@ func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *test
 	runtimeContract := decoded["runtime"].(map[string]any)
 	assert.Equal(t, "openlinker_a2a_proxy", runtimeContract["adapter"])
 	assert.Equal(t, "runtime_pull", runtimeContract["connection_mode"])
-	assert.Equal(t, "runtime_pull_heartbeat_claim_result", runtimeContract["online_signal"])
+	assert.Equal(t, "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool", runtimeContract["online_signal"])
 	assert.Equal(t, "openlinker_run_task_lifecycle", runtimeContract["task_lifecycle"])
 }
 
@@ -258,7 +260,7 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	require.NoError(t, err)
 	require.Len(t, resp.Items, 1)
 	assert.Equal(t, "unreachable", resp.Items[0].Availability.Status)
-	assert.Contains(t, resp.Items[0].Availability.Hint, "运行时心跳")
+	assert.Contains(t, resp.Items[0].Availability.Hint, "Runtime v2 Session")
 	assert.False(t, resp.Items[0].Readiness.Callable)
 
 	createApprovedAgent(t, pool, creatorID, "runtime-direct-fallback")
@@ -279,6 +281,12 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 
 	detail, err := svc.GetBySlug(ctx, "runtime-offline")
 	require.NoError(t, err)
+	assert.Equal(t, "unreachable", detail.Availability.Status, "token use is not Runtime v2 presence")
+	assert.False(t, detail.Readiness.Callable)
+
+	insertMarketRuntimeV2Session(t, pool, agentID)
+	detail, err = svc.GetBySlug(ctx, "runtime-offline")
+	require.NoError(t, err)
 	assert.Equal(t, "healthy", detail.Availability.Status)
 	assert.True(t, detail.Readiness.Callable)
 
@@ -286,6 +294,56 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(resp.Items), 2)
 	assert.Equal(t, "runtime-offline", resp.Items[0].Slug)
+}
+
+func insertMarketRuntimeV2Session(t *testing.T, pool interface {
+	Begin(context.Context) (pgx.Tx, error)
+}, agentID uuid.UUID) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var credentialID uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx, `
+SELECT id FROM agent_tokens
+WHERE agent_id = $1 AND status = 'active_runtime'
+ORDER BY created_at DESC LIMIT 1`, agentID).Scan(&credentialID))
+	nodeID := uuid.New()
+	sessionID := uuid.New()
+	coreID := uuid.New()
+	serial := strings.ReplaceAll(nodeID.String(), "-", "")
+	_, err = tx.Exec(ctx, `
+INSERT INTO runtime_nodes (
+    node_id, display_name, device_certificate_serial,
+    device_public_key_thumbprint, node_version, protocol_version,
+    runtime_contract_id, runtime_contract_digest, features,
+    capacity, inflight, status, last_seen_at
+) VALUES ($1, 'Market Runtime Node', $2, $3, 'market-v2', 2,
+          $4, $5, $6, 1, 0, 'active', clock_timestamp())`,
+		nodeID, serial, strings.Repeat("c", 64), runtime.RuntimeContractID,
+		runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures())
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+INSERT INTO runtime_sessions (
+    runtime_session_id, node_id, agent_id, credential_id, worker_id,
+    session_epoch, device_certificate_serial, node_version,
+    protocol_version, runtime_contract_id, runtime_contract_digest,
+    features, capacity, inflight, status, attached_core_instance_id,
+    heartbeat_at
+) VALUES ($1, $2, $3, $4, 'market-worker', 1, $5, 'market-v2',
+          2, $6, $7, $8, 1, 0, 'active', $9, clock_timestamp())`,
+		sessionID, nodeID, agentID, credentialID, serial,
+		runtime.RuntimeContractID, runtime.RuntimeContractDigest,
+		runtime.RuntimeRequiredFeatures(), coreID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+INSERT INTO runtime_session_attachments (
+    runtime_session_id, core_instance_id, attachment_kind
+) VALUES ($1, $2, 'connected')`, sessionID, coreID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 }
 
 func TestListMarket_FilterByTags(t *testing.T) {

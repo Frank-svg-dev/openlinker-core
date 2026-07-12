@@ -80,8 +80,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	userTokenSvc := usertoken.NewService(pool)
 	usertoken.NewHandler(userTokenSvc).Register(api, jwtMiddleware)
 	usertoken.NewIntrospectionHandler(userTokenSvc, cfg.InternalToken).Register(e)
-	// ol_user_* is always verified locally. USER_TOKEN_VERIFY_URL is retained in
-	// config for one compatibility release but is not a fallback path.
+	// ol_user_* is always issued, verified, and revoked by this Core.
 	hybridMw := auth.HybridAuthMiddlewareWithUserStatus(cfg.JWTSecret, userTokenSvc, userStatusQueries)
 	var adminSvc *coreadmin.Service
 	if opts.AdminMiddleware != nil {
@@ -131,6 +130,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	configureRuntimeV2(rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID, opts.RuntimeSignalBus)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
+	if opts.AdminMiddleware != nil {
+		runtimeHandler.RegisterAdmin(api, jwtMiddleware, opts.AdminMiddleware)
+	}
 	agentSvc.SetDryRunner(runtimeSvc)
 	if cfg.RuntimeEndpointRunWorkerEnabled {
 		go runtime.StartEndpointRunWorker(rootCtx, runtimeSvc, runtime.EndpointRunWorkerConfig{

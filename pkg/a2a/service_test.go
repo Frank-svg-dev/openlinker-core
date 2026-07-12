@@ -13,19 +13,19 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/a2a"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/webhook"
 )
 
-const truncateA2ATables = "TRUNCATE task_callback_deliveries, task_callback_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
+const truncateA2ATables = "TRUNCATE runtime_signal_outbox, runtime_session_attachments, runtime_sessions, runtime_nodes, task_callback_deliveries, task_callback_subscriptions, run_artifact_chunks, run_artifacts, run_messages, run_delegations, agent_tokens, agent_call_policies, run_events, runs, agents, users RESTART IDENTITY CASCADE"
 
 func setupService(t *testing.T) (*pgxpool.Pool, *a2a.Service, *runtime.Service) {
 	t.Helper()
@@ -160,92 +160,73 @@ func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 	require.NoError(t, err)
 }
 
-func TestCreateRuntimeTokenForQueuedAgent(t *testing.T) {
-	pool, svc, _ := setupService(t)
-	ownerID := insertCreator(t, pool)
-	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
-	makeRuntimePullAgent(t, pool, agentID)
-
-	token, err := svc.CreateRuntimeToken(context.Background(), ownerID, agentID, &a2a.CreateRuntimeTokenRequest{Name: "runtime-worker"})
-	require.NoError(t, err)
-	require.NotEmpty(t, token.PlaintextToken)
-	assert.Contains(t, token.Scopes, "agent:call")
-	assert.Contains(t, token.Scopes, "agent:pull")
-	var tokenHash string
-	err = pool.QueryRow(context.Background(), `SELECT token_hash FROM agent_tokens WHERE id = $1`, uuid.MustParse(token.ID)).Scan(&tokenHash)
-	require.NoError(t, err)
-	require.True(t, strings.HasPrefix(tokenHash, credential.FastTokenHashPrefix))
-	require.True(t, credential.VerifyFastTokenHash(tokenHash, token.PlaintextToken))
-}
-
-func TestRuntimeWorkbenchShowsPendingRuntimePullDiagnostics(t *testing.T) {
+func TestRuntimeWorkbenchShowsV2SessionAndBacklog(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	ownerID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
 	makeRuntimePullAgent(t, pool, agentID)
 	runID := insertParentRun(t, pool, ownerID, agentID)
-
-	token, err := svc.CreateRuntimeToken(context.Background(), ownerID, agentID, &a2a.CreateRuntimeTokenRequest{Name: "runtime-worker"})
-	require.NoError(t, err)
-	require.NotEmpty(t, token.PlaintextToken)
+	insertRuntimeWorkbenchSession(t, pool, ownerID, agentID)
 
 	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, agentID.String(), workbench.Agent.ID)
 	assert.Equal(t, "runtime_pull", workbench.Agent.ConnectionMode)
-	assert.Equal(t, int32(1), workbench.Runtime.ActiveTokenCount)
+	assert.True(t, workbench.Agent.ReadinessCallable)
+	assert.Equal(t, "ws_primary_pull_v2_fallback", workbench.Runtime.TransportPolicy)
+	assert.Equal(t, "runtime_ws", workbench.Runtime.PrimaryTransport)
+	assert.Equal(t, "runtime_pull_v2", workbench.Runtime.FallbackTransport)
+	assert.Equal(t, "online", workbench.Runtime.ConnectionStatus)
+	assert.Equal(t, int32(1), workbench.Runtime.ActiveNodeCount)
+	assert.Equal(t, int32(1), workbench.Runtime.ActiveSessionCount)
+	assert.Equal(t, int32(1), workbench.Runtime.ReadySessionCount)
+	assert.Equal(t, int32(4), workbench.Runtime.TotalCapacity)
 	assert.Equal(t, int32(1), workbench.Runtime.PendingRunCount)
-	assert.True(t, workbench.Runtime.ClaimNow)
-	require.Len(t, workbench.Tokens, 1)
-	assert.Equal(t, []string{"agent:call", "agent:pull"}, workbench.Tokens[0].Scopes)
+	assert.Equal(t, runtime.RuntimeContractID, workbench.Runtime.RuntimeContractID)
+	assert.Equal(t, runtime.RuntimeContractDigest, workbench.Runtime.RuntimeContractDigest)
+	require.NotNil(t, workbench.Runtime.LastSessionActivityAt)
 	require.NotEmpty(t, workbench.RecentRuns)
 	assert.Equal(t, runID.String(), workbench.RecentRuns[0].RunID)
 	assert.Equal(t, "running", workbench.RecentRuns[0].Status)
+	assert.Equal(t, "pending", workbench.RecentRuns[0].DispatchState)
+	assert.Equal(t, int32(3), workbench.RecentRuns[0].MaxAttempts)
 
 	var codes []string
 	for _, item := range workbench.Diagnostics {
 		codes = append(codes, item.Code)
 	}
-	assert.Contains(t, codes, "no_recent_runtime_activity")
-	assert.Contains(t, codes, "pending_claimable_runs")
+	assert.Equal(t, []string{"runtime_ready"}, codes)
 }
 
-func TestRuntimeWorkbenchFlagsRuntimePullTokenScopeMissing(t *testing.T) {
+func TestRuntimeWorkbenchShowsOfflineBacklogWithoutClaimLanguage(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	ownerID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
 	makeRuntimePullAgent(t, pool, agentID)
-
-	_, err := pool.Exec(context.Background(),
-		`INSERT INTO agent_tokens (
-			agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
-		) VALUES ($1, $2, 'call-only', $3, 'hash', $4, 'active_runtime', NOW())`,
-		agentID,
-		ownerID,
-		"ol_agent_abcd",
-		[]string{"agent:call"},
-	)
-	require.NoError(t, err)
+	insertParentRun(t, pool, ownerID, agentID)
 
 	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
+	assert.Equal(t, "offline", workbench.Runtime.ConnectionStatus)
+	assert.False(t, workbench.Agent.ReadinessCallable)
 
 	var codes []string
 	for _, item := range workbench.Diagnostics {
 		codes = append(codes, item.Code)
 	}
-	assert.Contains(t, codes, "scope_missing")
+	assert.Contains(t, codes, "runtime_session_offline")
+	assert.Contains(t, codes, "runtime_backlog_without_capacity")
+	encoded, err := json.Marshal(workbench)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "claimed")
+	assert.NotContains(t, string(encoded), "heartbeat")
 }
 
-func TestRuntimeTokenRevokeAndCallPolicyReadback(t *testing.T) {
+func TestCallPolicyReadback(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	ownerID := insertCreator(t, pool)
 	otherUserID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
-
-	token, err := svc.CreateRuntimeToken(context.Background(), ownerID, agentID, &a2a.CreateRuntimeTokenRequest{Name: "worker"})
-	require.NoError(t, err)
-	require.NotEmpty(t, token.PlaintextToken)
 
 	policy, err := svc.GetCallPolicy(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
@@ -258,16 +239,66 @@ func TestRuntimeTokenRevokeAndCallPolicyReadback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "same_creator", policy.CallableBy)
 
-	err = svc.RevokeRuntimeToken(context.Background(), ownerID, uuid.MustParse(token.ID))
-	require.NoError(t, err)
-	tokens, err := svc.ListRuntimeTokens(context.Background(), ownerID, agentID)
-	require.NoError(t, err)
-	require.Empty(t, tokens)
-
-	err = svc.RevokeRuntimeToken(context.Background(), ownerID, uuid.MustParse(token.ID))
-	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
 	_, err = svc.GetCallPolicy(context.Background(), otherUserID, agentID)
 	requireA2AServiceHTTPStatus(t, err, http.StatusNotFound)
+}
+
+func insertRuntimeWorkbenchSession(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	ownerID, agentID uuid.UUID,
+) {
+	t.Helper()
+	nodeID := uuid.New()
+	credentialID := uuid.New()
+	sessionID := uuid.New()
+	coreID := uuid.New()
+	prefix := "ol_agent_" + credentialID.String()[:8]
+	serial := strings.ReplaceAll(nodeID.String(), "-", "")
+	thumbprint := strings.Repeat("a", 64)
+	err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(context.Background(), `
+INSERT INTO agent_tokens (
+    id, agent_id, creator_user_id, name, prefix, token_hash, scopes,
+    status, redeemed_at
+) VALUES ($1, $2, $3, 'workbench-v2', $4, 'test-hash',
+          ARRAY['agent:pull']::text[], 'active_runtime', clock_timestamp())`,
+			credentialID, agentID, ownerID, prefix); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(), `
+INSERT INTO runtime_nodes (
+    node_id, display_name, device_certificate_serial,
+    device_public_key_thumbprint, node_version, protocol_version,
+    runtime_contract_id, runtime_contract_digest, features,
+    capacity, inflight, status, last_seen_at
+) VALUES ($1, 'Workbench Node', $2, $3, 'workbench-v2', 2,
+          $4, $5, $6, 4, 0, 'active', clock_timestamp())`,
+			nodeID, serial, thumbprint, runtime.RuntimeContractID,
+			runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures()); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(context.Background(), `
+INSERT INTO runtime_sessions (
+    runtime_session_id, node_id, agent_id, credential_id, worker_id,
+    session_epoch, device_certificate_serial, node_version,
+    protocol_version, runtime_contract_id, runtime_contract_digest,
+    features, capacity, inflight, status, attached_core_instance_id,
+    heartbeat_at
+) VALUES ($1, $2, $3, $4, 'workbench-worker', 1, $5, 'workbench-v2',
+          2, $6, $7, $8, 2, 0, 'active', $9, clock_timestamp())`,
+			sessionID, nodeID, agentID, credentialID, serial,
+			runtime.RuntimeContractID, runtime.RuntimeContractDigest,
+			runtime.RuntimeRequiredFeatures(), coreID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(context.Background(), `
+INSERT INTO runtime_session_attachments (
+    runtime_session_id, core_instance_id, attachment_kind
+) VALUES ($1, $2, 'connected')`, sessionID, coreID)
+		return err
+	})
+	require.NoError(t, err)
 }
 
 func TestListParentRunsAggregatesRootContextAndChildrenTree(t *testing.T) {

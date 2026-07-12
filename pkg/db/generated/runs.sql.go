@@ -299,22 +299,6 @@ func (q *Queries) GetRunRuntimeContractID(ctx context.Context, id uuid.UUID) (st
 	return runtimeContractID, err
 }
 
-const countClaimableRuntimePullRuns = `-- name: CountClaimableRuntimePullRuns :one
-SELECT COUNT(*)::int AS total
-FROM runs r
-JOIN agents a ON a.id = r.agent_id
-WHERE r.agent_id = $1
-  AND r.status = 'running'
-  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
-  AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes')`
-
-func (q *Queries) CountClaimableRuntimePullRuns(ctx context.Context, agentID uuid.UUID) (int32, error) {
-	row := q.db.QueryRow(ctx, countClaimableRuntimePullRuns, agentID)
-	var total int32
-	err := row.Scan(&total)
-	return total, err
-}
-
 const listStaleEndpointRuns = `-- name: ListStaleEndpointRuns :many
 SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
        COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')::text AS connection_mode,

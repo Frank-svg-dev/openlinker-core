@@ -254,7 +254,7 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
        r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
        r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
-       r.replay_of_run_id, r.claimed_by_runtime_token_id, r.claimed_at,
+       r.replay_of_run_id,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id
@@ -262,7 +262,6 @@ WHERE a.creator_id = $1 AND r.agent_id = $2
 ORDER BY r.started_at DESC
 LIMIT $3 OFFSET $4`
 
-// ListRunsByCreatorAgentWithAgentParams 入参。
 type ListRunsByCreatorAgentWithAgentParams struct {
 	CreatorID uuid.UUID `db:"creator_id" json:"creator_id"`
 	AgentID   uuid.UUID `db:"agent_id" json:"agent_id"`
@@ -270,14 +269,12 @@ type ListRunsByCreatorAgentWithAgentParams struct {
 	Offset    int32     `db:"offset" json:"offset"`
 }
 
-// ListRunsByCreatorAgentWithAgentRow 返回行：嵌入 Run + agent 展示字段。
 type ListRunsByCreatorAgentWithAgentRow struct {
 	Run
 	AgentSlug string `db:"agent_slug" json:"agent_slug"`
 	AgentName string `db:"agent_name" json:"agent_name"`
 }
 
-// ListRunsByCreatorAgentWithAgent 创作者查看某个自己 Agent 的被调用历史。
 func (q *Queries) ListRunsByCreatorAgentWithAgent(ctx context.Context, arg ListRunsByCreatorAgentWithAgentParams) ([]ListRunsByCreatorAgentWithAgentRow, error) {
 	rows, err := q.db.Query(ctx, listRunsByCreatorAgentWithAgent, arg.CreatorID, arg.AgentID, arg.Limit, arg.Offset)
 	if err != nil {
@@ -287,12 +284,7 @@ func (q *Queries) ListRunsByCreatorAgentWithAgent(ctx context.Context, arg ListR
 	var items []ListRunsByCreatorAgentWithAgentRow
 	for rows.Next() {
 		var r ListRunsByCreatorAgentWithAgentRow
-		dest := append(runScanDestinations(&r.Run),
-			&r.ClaimedByRuntimeTokenID,
-			&r.ClaimedAt,
-			&r.AgentSlug,
-			&r.AgentName,
-		)
+		dest := append(runScanDestinations(&r.Run), &r.AgentSlug, &r.AgentName)
 		if err := rows.Scan(dest...); err != nil {
 			return nil, err
 		}

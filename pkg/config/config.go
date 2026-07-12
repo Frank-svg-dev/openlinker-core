@@ -45,9 +45,6 @@ type Config struct {
 	APIURL                      string `envconfig:"API_URL" default:"http://localhost:8080"`
 	OAuthCallbackBaseURL        string `envconfig:"OAUTH_CALLBACK_BASE_URL"`
 	OAuthAllowedFrontendOrigins string `envconfig:"OAUTH_ALLOWED_FRONTEND_ORIGINS"`
-	// UserTokenVerifyURL 已废弃，仅保留一个兼容发布周期。Core 不再使用
-	// 远程 miss/fallback；ol_user_* 始终由本地 user_tokens 验证。
-	UserTokenVerifyURL string `envconfig:"USER_TOKEN_VERIFY_URL"`
 	// InternalToken 保护 /internal/user-tokens/introspect，并可复用于 Core
 	// 与受信任私有服务（如 LLM 代理）的内部鉴权。不使用内部接口可留空。
 	InternalToken string `envconfig:"OPENLINKER_INTERNAL_TOKEN"`

@@ -179,6 +179,45 @@ type RuntimeDeadLetterListItem struct {
 	ReplayedAsRunIDs []string   `json:"replayed_as_run_ids"`
 }
 
+// RuntimeNodeListResponse is the admin-only Runtime v2 Node inventory. The
+// database timestamp and current contract make freshness/compatibility
+// decisions reproducible without trusting the API host clock.
+type RuntimeNodeListResponse struct {
+	Items                 []RuntimeNodeListItem `json:"items"`
+	Total                 int32                 `json:"total"`
+	Limit                 int32                 `json:"limit"`
+	Offset                int32                 `json:"offset"`
+	CurrentContractID     string                `json:"current_contract_id"`
+	CurrentContractDigest string                `json:"current_contract_digest"`
+	DatabaseTime          time.Time             `json:"database_time"`
+}
+
+type RuntimeNodeListItem struct {
+	NodeID                string     `json:"node_id"`
+	DisplayName           string     `json:"display_name"`
+	NodeVersion           string     `json:"node_version"`
+	ProtocolVersion       int32      `json:"protocol_version"`
+	RuntimeContractID     string     `json:"runtime_contract_id"`
+	RuntimeContractDigest string     `json:"runtime_contract_digest"`
+	ContractMatch         bool       `json:"contract_match"`
+	Features              []string   `json:"features"`
+	Capacity              int32      `json:"capacity"`
+	Inflight              int32      `json:"inflight"`
+	Status                string     `json:"status"`
+	LastSeenAt            *time.Time `json:"last_seen_at,omitempty"`
+	DrainingAt            *time.Time `json:"draining_at,omitempty"`
+	RevokedAt             *time.Time `json:"revoked_at,omitempty"`
+	RevokeReason          *string    `json:"revoke_reason,omitempty"`
+	CreatedAt             time.Time  `json:"created_at"`
+	UpdatedAt             time.Time  `json:"updated_at"`
+	ActiveSessionCount    int32      `json:"active_session_count"`
+	ActiveAgentCount      int32      `json:"active_agent_count"`
+}
+
+type RevokeRuntimeNodeRequest struct {
+	Reason string `json:"reason" validate:"required,min=1,max=500"`
+}
+
 // RunTaskCallbackResponse describes a caller-owned task callback created while
 // starting or delegating a run. Secret is only populated on creation.
 type RunTaskCallbackResponse struct {

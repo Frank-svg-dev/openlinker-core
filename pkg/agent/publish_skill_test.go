@@ -47,7 +47,7 @@ func TestServePublishAgentSkillUsesConfiguredBaseURLs(t *testing.T) {
 	assertNotContains(t, body, skillDocWebBase)
 }
 
-func TestServePublishAgentSkillIncludesCanonicalRuntimePullOnboarding(t *testing.T) {
+func TestServePublishAgentSkillIncludesCanonicalRuntimeV2Onboarding(t *testing.T) {
 	t.Setenv("API_URL", "https://api.stage.example/")
 	t.Setenv("FRONTEND_URL", "https://stage.example/")
 
@@ -63,16 +63,18 @@ func TestServePublishAgentSkillIncludesCanonicalRuntimePullOnboarding(t *testing
 	assertContains(t, body, "GET https://api.stage.example/api/v1/skills")
 	assertContains(t, body, "Map your own internal skills or tools to at most 5 existing OpenLinker skill_ids")
 	assertContains(t, body, "Do not invent new skill_ids")
-	assertContains(t, body, "If no run is returned, do not exit")
-	assertContains(t, body, "Hard runtime contract")
-	assertContains(t, body, "Treat it as a hard server limit")
-	assertContains(t, body, `"result_endpoint": "/api/v1/agent-runtime/runs/RUN_ID/result"`)
-	assertContains(t, body, `"result_required": true`)
-	assertContains(t, body, "Every claimed run must end with POST /agent-runtime/runs/{run_id}/result")
-	assertContains(t, body, "always POST /agent-runtime/runs/{run_id}/result")
-	assertContains(t, body, "Re-claiming a stale run does not extend result_timeout_seconds")
+	assertContains(t, body, "OPENLINKER_AGENT_NODE_TRANSPORT=auto")
+	assertContains(t, body, "https://api.stage.example/api/v1/agent-runtime/v2/ws")
+	assertContains(t, body, "Runtime v2 Session")
+	assertContains(t, body, "run.assignment_confirmed")
+	assertContains(t, body, "matching ACK")
+	assertContains(t, body, "WebSocket first, Pull v2 fallback")
+	assertContains(t, body, "mTLS")
 	assertContains(t, body, "Keep the worker process alive under a supervisor")
 	assertContains(t, body, "OPENLINKER_API_BASE")
+	assertNotContains(t, body, "/api/v1/agent-runtime/heartbeat")
+	assertNotContains(t, body, "/api/v1/agent-runtime/runs/claim")
+	assertNotContains(t, body, "/api/v1/agent-runtime/runs/RUN_ID/result")
 }
 
 func TestPublicAgentSkillDocsUseCurrentCredentialNamesWithoutRoadmapCopy(t *testing.T) {

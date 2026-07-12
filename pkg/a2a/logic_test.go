@@ -888,87 +888,51 @@ func TestA2ARunEventMessageFallbacks(t *testing.T) {
 	}
 }
 
-func TestA2ARuntimeWorkbenchTokenAndPushHelpers(t *testing.T) {
+func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
 	if svc := NewService(nil, nil); svc == nil || svc.queries == nil {
 		t.Fatalf("NewService did not initialize queries: %#v", svc)
-	}
-	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "direct_http"}); !reflect.DeepEqual(got, []string{"agent:call"}) {
-		t.Fatalf("direct token scopes = %#v", got)
-	}
-	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "runtime_pull"}); !reflect.DeepEqual(got, []string{"agent:call", "agent:pull"}) {
-		t.Fatalf("runtime pull token scopes = %#v", got)
-	}
-	if got := runtimeTokenScopesForAgent(db.Agent{ConnectionMode: "runtime_ws"}); !reflect.DeepEqual(got, []string{"agent:call", "agent:pull"}) {
-		t.Fatalf("runtime ws token scopes = %#v", got)
 	}
 	if !isQueuedRuntimeConnectionMode("runtime_pull") || !isQueuedRuntimeConnectionMode("runtime_ws") || isQueuedRuntimeConnectionMode("direct_http") {
 		t.Fatalf("isQueuedRuntimeConnectionMode failed")
 	}
 
-	lastUsed := "2026-06-20T01:02:03Z"
-	revokedAt := "2026-06-20T02:02:03Z"
-	tokens := []RuntimeTokenResponse{
-		{Scopes: []string{"agent:call"}, LastUsedAt: &lastUsed},
-		{Scopes: []string{"agent:call", "agent:pull"}, RevokedAt: &revokedAt},
+	connection, availability, callable := runtimeWorkbenchState(
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime_ws"},
+		runtimeWorkbenchSnapshot{activeSessionCount: 1, readySessionCount: 1},
+	)
+	if connection != "online" || availability != "healthy" || !callable {
+		t.Fatalf("ready workbench state = %q, %q, %t", connection, availability, callable)
 	}
-	if activeRuntimeTokenCount(tokens) != 1 || hasActiveRuntimePullToken(tokens) {
-		t.Fatalf("active token helpers failed")
-	}
-	tokens = append(tokens, RuntimeTokenResponse{Scopes: []string{"agent:call", "agent:pull"}, LastUsedAt: &lastUsed})
-	if activeRuntimeTokenCount(tokens) != 2 || !hasActiveRuntimePullToken(tokens) {
-		t.Fatalf("active runtime pull token helpers failed")
-	}
-
-	if got := runtimeWorkbenchAvailability(db.Agent{LifecycleStatus: "disabled"}, tokens, nil); got != "disabled" {
-		t.Fatalf("disabled availability = %q", got)
-	}
-	if got := runtimeWorkbenchAvailability(db.Agent{LifecycleStatus: "active"}, nil, []RuntimeWorkbenchRun{{Status: "success"}}); got != "healthy" {
-		t.Fatalf("healthy availability = %q", got)
-	}
-	if got := runtimeWorkbenchAvailability(db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime_pull"}, tokens, nil); got != "active" {
-		t.Fatalf("active availability = %q", got)
-	}
-	if got := runtimeWorkbenchAvailability(db.Agent{LifecycleStatus: "active"}, nil, nil); got != "unknown" {
-		t.Fatalf("unknown availability = %q", got)
+	connection, availability, callable = runtimeWorkbenchState(
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime_pull"},
+		runtimeWorkbenchSnapshot{activeSessionCount: 1, drainingSessionCount: 1},
+	)
+	if connection != "draining" || availability != "degraded" || callable {
+		t.Fatalf("draining workbench state = %q, %q, %t", connection, availability, callable)
 	}
 
-	diagnostics := runtimeWorkbenchDiagnostics(db.Agent{ConnectionMode: "direct_http"}, nil, 0, nil, nil)
-	if len(diagnostics) != 1 || diagnostics[0].Code != "not_runtime_pull" {
+	diagnostics := runtimeWorkbenchDiagnosticsV2(db.Agent{ConnectionMode: "direct_http"}, runtimeWorkbenchSnapshot{}, nil)
+	if len(diagnostics) != 1 || diagnostics[0].Code != "runtime_not_applicable" {
 		t.Fatalf("direct diagnostics = %#v", diagnostics)
 	}
-	pullNotClaimed := "RUNTIME_PULL_NOT_CLAIMED"
-	resultTimeout := "RUNTIME_PULL_RESULT_TIMEOUT"
-	diagnostics = runtimeWorkbenchDiagnostics(db.Agent{ConnectionMode: "runtime_pull"}, []RuntimeTokenResponse{{Scopes: []string{"agent:call"}}}, 2, []RuntimeWorkbenchRun{{ErrorCode: &pullNotClaimed}, {ErrorCode: &resultTimeout}}, nil)
+	dispatchTimeout := "RUNTIME_DISPATCH_TIMEOUT"
+	diagnostics = runtimeWorkbenchDiagnosticsV2(
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime_pull"},
+		runtimeWorkbenchSnapshot{pendingRunCount: 2},
+		[]RuntimeWorkbenchRun{{ErrorCode: &dispatchTimeout}},
+	)
 	codes := diagnosticCodes(diagnostics)
-	for _, want := range []string{"scope_missing", "no_recent_runtime_activity", "pending_claimable_runs", "pending_not_claimed", "result_timeout"} {
+	for _, want := range []string{"runtime_session_offline", "runtime_backlog_without_capacity", "recent_dispatch_timeout"} {
 		if !containsString(codes, want) {
 			t.Fatalf("missing diagnostic %q in %#v", want, diagnostics)
 		}
 	}
-	diagnostics = runtimeWorkbenchDiagnostics(db.Agent{ConnectionMode: "runtime_pull"}, []RuntimeTokenResponse{{Scopes: []string{"agent:call", "agent:pull"}, LastUsedAt: &lastUsed}}, 0, nil, &lastUsed)
+	diagnostics = runtimeWorkbenchDiagnosticsV2(
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime_ws"},
+		runtimeWorkbenchSnapshot{activeSessionCount: 1, readySessionCount: 1}, nil,
+	)
 	if len(diagnostics) != 1 || diagnostics[0].Code != "runtime_ready" {
 		t.Fatalf("ready diagnostics = %#v", diagnostics)
-	}
-
-	if !hasScope([]string{"agent:call"}, "agent:call") || hasScope([]string{"agent:call"}, "agent:pull") {
-		t.Fatalf("hasScope failed")
-	}
-
-	now := time.Date(2026, 6, 20, 1, 2, 3, 0, time.UTC)
-	last := now.Add(time.Minute)
-	revoked := now.Add(2 * time.Minute)
-	tokenResp := tokenResponse(db.AgentRuntimeToken{
-		ID:         uuid.New(),
-		AgentID:    uuid.New(),
-		Name:       "worker",
-		Prefix:     "ol_user_test",
-		Scopes:     []string{"agent:call"},
-		LastUsedAt: &last,
-		RevokedAt:  &revoked,
-		CreatedAt:  now,
-	})
-	if tokenResp.LastUsedAt == nil || tokenResp.RevokedAt == nil || tokenResp.CreatedAt != "2026-06-20T01:02:03Z" {
-		t.Fatalf("tokenResponse = %#v", tokenResp)
 	}
 
 	if refs := skillRefs(nil, nil); refs == nil || len(refs) != 0 {
@@ -1148,12 +1112,6 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		req    *a2aHandlerRequest
 		want   int
 	}{
-		{name: "create token missing user", method: h.CreateRuntimeToken, req: &a2aHandlerRequest{method: http.MethodPost, target: "/"}, want: http.StatusUnauthorized},
-		{name: "create token invalid id", method: h.CreateRuntimeToken, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
-		{name: "create token invalid json", method: h.CreateRuntimeToken, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: "{", params: map[string]string{"id": agentID}}, want: http.StatusBadRequest},
-		{name: "create token validation", method: h.CreateRuntimeToken, req: &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID, body: `{}`, params: map[string]string{"id": agentID}}, want: http.StatusUnprocessableEntity},
-		{name: "list tokens invalid id", method: h.ListRuntimeTokens, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
-		{name: "revoke token invalid id", method: h.RevokeRuntimeToken, req: &a2aHandlerRequest{method: http.MethodDelete, target: "/", userID: userID, params: map[string]string{"tokenID": "bad"}}, want: http.StatusBadRequest},
 		{name: "workbench invalid id", method: h.GetRuntimeWorkbench, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "get policy invalid id", method: h.GetCallPolicy, req: &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID, params: map[string]string{"id": "bad"}}, want: http.StatusBadRequest},
 		{name: "update policy invalid json", method: h.UpdateCallPolicy, req: &a2aHandlerRequest{method: http.MethodPut, target: "/", userID: userID, body: "{", params: map[string]string{"id": agentID}}, want: http.StatusBadRequest},
@@ -1228,56 +1186,7 @@ func TestA2AHTTPHandlersValidateBeforeServiceDispatch(t *testing.T) {
 func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
-	tokenID := uuid.New()
 	parentRunID := uuid.New()
-
-	t.Run("create runtime token", func(t *testing.T) {
-		svc := newControlA2AService()
-		c := newA2ATestContext(&a2aHandlerRequest{
-			method: http.MethodPost,
-			target: "/creator/agents/" + agentID.String() + "/runtime-tokens",
-			userID: userID.String(),
-			body:   `{"name":"worker"}`,
-			params: map[string]string{"id": agentID.String()},
-		})
-
-		require.NoError(t, NewHandler(svc).CreateRuntimeToken(c))
-		assert.Equal(t, http.StatusCreated, c.(*a2ATestContext).rec.Code)
-		assert.Equal(t, "create-runtime-token", svc.calls[len(svc.calls)-1])
-		assert.Equal(t, userID, svc.userID)
-		assert.Equal(t, agentID, svc.agentID)
-		assert.Equal(t, "worker", svc.createReq.Name)
-		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "ol_agent_test")
-	})
-
-	t.Run("list runtime tokens", func(t *testing.T) {
-		svc := newControlA2AService()
-		c := newA2ATestContext(&a2aHandlerRequest{
-			method: http.MethodGet,
-			target: "/creator/agents/" + agentID.String() + "/runtime-tokens",
-			userID: userID.String(),
-			params: map[string]string{"id": agentID.String()},
-		})
-
-		require.NoError(t, NewHandler(svc).ListRuntimeTokens(c))
-		assert.Equal(t, http.StatusOK, c.(*a2ATestContext).rec.Code)
-		assert.Equal(t, "list-runtime-tokens", svc.calls[len(svc.calls)-1])
-		assert.Contains(t, c.(*a2ATestContext).rec.Body.String(), "worker")
-	})
-
-	t.Run("revoke runtime token", func(t *testing.T) {
-		svc := newControlA2AService()
-		c := newA2ATestContext(&a2aHandlerRequest{
-			method: http.MethodDelete,
-			target: "/creator/runtime-tokens/" + tokenID.String(),
-			userID: userID.String(),
-			params: map[string]string{"tokenID": tokenID.String()},
-		})
-
-		require.NoError(t, NewHandler(svc).RevokeRuntimeToken(c))
-		assert.Equal(t, http.StatusNoContent, c.(*a2ATestContext).rec.Code)
-		assert.Equal(t, tokenID, svc.tokenID)
-	})
 
 	t.Run("runtime workbench", func(t *testing.T) {
 		svc := newControlA2AService()
@@ -1352,7 +1261,6 @@ func TestA2AControlHTTPHandlersDispatchService(t *testing.T) {
 func TestA2AControlHTTPHandlersPropagateServiceErrors(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
-	tokenID := uuid.New()
 	parentRunID := uuid.New()
 	serviceDown := httpx.ServiceUnavailable("service down")
 
@@ -1362,24 +1270,6 @@ func TestA2AControlHTTPHandlersPropagateServiceErrors(t *testing.T) {
 		call func(*Handler, echo.Context) error
 		req  *a2aHandlerRequest
 	}{
-		{
-			name: "create runtime token",
-			key:  "create-runtime-token",
-			call: (*Handler).CreateRuntimeToken,
-			req:  &a2aHandlerRequest{method: http.MethodPost, target: "/", userID: userID.String(), body: `{"name":"worker"}`, params: map[string]string{"id": agentID.String()}},
-		},
-		{
-			name: "list runtime tokens",
-			key:  "list-runtime-tokens",
-			call: (*Handler).ListRuntimeTokens,
-			req:  &a2aHandlerRequest{method: http.MethodGet, target: "/", userID: userID.String(), params: map[string]string{"id": agentID.String()}},
-		},
-		{
-			name: "revoke runtime token",
-			key:  "revoke-runtime-token",
-			call: (*Handler).RevokeRuntimeToken,
-			req:  &a2aHandlerRequest{method: http.MethodDelete, target: "/", userID: userID.String(), params: map[string]string{"tokenID": tokenID.String()}},
-		},
 		{
 			name: "runtime workbench",
 			key:  "runtime-workbench",
@@ -2492,12 +2382,10 @@ type controlA2AService struct {
 	errs map[string]error
 
 	agentID         uuid.UUID
-	tokenID         uuid.UUID
 	parentRunID     uuid.UUID
 	page            int32
 	size            int32
 	search          string
-	createReq       CreateRuntimeTokenRequest
 	updatePolicyReq UpdateCallPolicyRequest
 }
 
@@ -2521,45 +2409,6 @@ func (f *controlA2AService) recordControl(name string, userID uuid.UUID) error {
 	return f.maybeErr(name)
 }
 
-func (f *controlA2AService) CreateRuntimeToken(_ context.Context, userID, agentID uuid.UUID, req *CreateRuntimeTokenRequest) (*RuntimeTokenResponse, error) {
-	f.agentID = agentID
-	if req != nil {
-		f.createReq = *req
-	}
-	if err := f.recordControl("create-runtime-token", userID); err != nil {
-		return nil, err
-	}
-	return &RuntimeTokenResponse{
-		ID:             uuid.NewString(),
-		AgentID:        agentID.String(),
-		Name:           f.createReq.Name,
-		Prefix:         "ol_agent_abcd",
-		PlaintextToken: "ol_agent_test",
-		Scopes:         []string{"agents:run"},
-		CreatedAt:      "2026-06-21T00:00:00Z",
-	}, nil
-}
-
-func (f *controlA2AService) ListRuntimeTokens(_ context.Context, userID, agentID uuid.UUID) ([]RuntimeTokenResponse, error) {
-	f.agentID = agentID
-	if err := f.recordControl("list-runtime-tokens", userID); err != nil {
-		return nil, err
-	}
-	return []RuntimeTokenResponse{{
-		ID:        uuid.NewString(),
-		AgentID:   agentID.String(),
-		Name:      "worker",
-		Prefix:    "ol_agent_abcd",
-		Scopes:    []string{"agents:run"},
-		CreatedAt: "2026-06-21T00:00:00Z",
-	}}, nil
-}
-
-func (f *controlA2AService) RevokeRuntimeToken(_ context.Context, userID, tokenID uuid.UUID) error {
-	f.tokenID = tokenID
-	return f.recordControl("revoke-runtime-token", userID)
-}
-
 func (f *controlA2AService) GetRuntimeWorkbench(_ context.Context, userID, agentID uuid.UUID) (*RuntimeWorkbenchResponse, error) {
 	f.agentID = agentID
 	if err := f.recordControl("runtime-workbench", userID); err != nil {
@@ -2572,16 +2421,22 @@ func (f *controlA2AService) GetRuntimeWorkbench(_ context.Context, userID, agent
 			Name:           "Runtime Agent",
 			ConnectionMode: "runtime_pull",
 		},
-		Runtime: RuntimeWorkbenchRuntime{ActiveTokenCount: 1, PendingRunCount: 2, ClaimNow: true},
-		Tokens:  []RuntimeTokenResponse{{ID: uuid.NewString(), AgentID: agentID.String(), Name: "worker", Prefix: "ol_agent_abcd", CreatedAt: "2026-06-21T00:00:00Z"}},
+		Runtime: RuntimeWorkbenchRuntime{
+			TransportPolicy:   "ws_primary_pull_v2_fallback",
+			PrimaryTransport:  "runtime_ws",
+			FallbackTransport: "runtime_pull_v2",
+			ConnectionStatus:  "online",
+			PendingRunCount:   2,
+		},
 		RecentRuns: []RuntimeWorkbenchRun{{
-			RunID:     uuid.NewString(),
-			Status:    "running",
-			Source:    "a2a",
-			StartedAt: "2026-06-21T00:00:00Z",
-			DetailURL: "/runs/detail",
+			RunID:         uuid.NewString(),
+			Status:        "running",
+			DispatchState: "pending",
+			Source:        "a2a",
+			StartedAt:     "2026-06-21T00:00:00Z",
+			DetailURL:     "/runs/detail",
 		}},
-		Diagnostics: []RuntimeWorkbenchDiagnostic{{Code: "runtime_ready", Severity: "info", Message: "ready", NextAction: "none"}},
+		Diagnostics: []RuntimeWorkbenchDiagnostic{{Code: "runtime_ready", Severity: "info", Summary: "ready", TechnicalDetail: "v2", NextAction: "none"}},
 	}, nil
 }
 

@@ -307,6 +307,90 @@ func TestRuntimeReplayAndDeadLetterHandlers(t *testing.T) {
 	require.Equal(t, "RUNTIME_RETRY_EXHAUSTED", listed.Items[0].ReasonCode)
 }
 
+func TestRuntimeNodeAdminHandlers(t *testing.T) {
+	nodeID := uuid.New()
+	now := time.Date(2026, 7, 12, 2, 3, 4, 0, time.UTC)
+	item := &RuntimeNodeListItem{
+		NodeID:                nodeID.String(),
+		DisplayName:           "Node A",
+		NodeVersion:           "v2",
+		ProtocolVersion:       2,
+		RuntimeContractID:     RuntimeContractID,
+		RuntimeContractDigest: RuntimeContractDigest,
+		ContractMatch:         true,
+		Features:              RuntimeRequiredFeatures(),
+		Capacity:              4,
+		Status:                "active",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	mock := &mockRuntimeService{
+		runtimeNodeResp: item,
+		runtimeNodeListResp: &RuntimeNodeListResponse{
+			Items:                 []RuntimeNodeListItem{*item},
+			Total:                 1,
+			Limit:                 20,
+			Offset:                5,
+			CurrentContractID:     RuntimeContractID,
+			CurrentContractDigest: RuntimeContractDigest,
+			DatabaseTime:          now,
+		},
+	}
+	h := NewHandler(mock)
+
+	listCtx, listRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodGet,
+		target: "/api/v1/admin/runtime/nodes?limit=20&offset=5",
+	})
+	require.NoError(t, h.ListRuntimeNodes(listCtx))
+	require.Equal(t, http.StatusOK, listRecorder.Code)
+	require.Equal(t, int32(20), mock.runtimeNodeLimit)
+	require.Equal(t, int32(5), mock.runtimeNodeOffset)
+	var listed RuntimeNodeListResponse
+	decodeRuntimeDispatchJSON(t, listRecorder, &listed)
+	require.Len(t, listed.Items, 1)
+	require.True(t, listed.Items[0].ContractMatch)
+
+	drainCtx, drainRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodPost,
+		target: "/api/v1/admin/runtime/nodes/" + nodeID.String() + "/drain",
+		params: map[string]string{"id": nodeID.String()},
+	})
+	require.NoError(t, h.DrainRuntimeNode(drainCtx))
+	require.Equal(t, http.StatusOK, drainRecorder.Code)
+	require.Equal(t, nodeID, mock.runtimeNodeID)
+
+	revokeCtx, revokeRecorder := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodPost,
+		target: "/api/v1/admin/runtime/nodes/" + nodeID.String() + "/revoke",
+		params: map[string]string{"id": nodeID.String()},
+		body:   `{"reason":"  certificate rotated  "}`,
+	})
+	require.NoError(t, h.RevokeRuntimeNode(revokeCtx))
+	require.Equal(t, http.StatusOK, revokeRecorder.Code)
+	require.Equal(t, nodeID, mock.runtimeNodeID)
+	require.Equal(t, "certificate rotated", mock.runtimeNodeRevokeReason)
+
+	badListCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodGet,
+		target: "/api/v1/admin/runtime/nodes?limit=-1",
+	})
+	requireRuntimeHTTPStatus(t, h.ListRuntimeNodes(badListCtx), http.StatusBadRequest)
+	badIDCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodPost,
+		target: "/api/v1/admin/runtime/nodes/bad/drain",
+		params: map[string]string{"id": "bad"},
+	})
+	requireRuntimeHTTPStatus(t, h.DrainRuntimeNode(badIDCtx), http.StatusBadRequest)
+	emptyReasonCtx, _ := newRuntimeDispatchContext(&runtimeDispatchRequest{
+		method: http.MethodPost,
+		target: "/api/v1/admin/runtime/nodes/" + nodeID.String() + "/revoke",
+		params: map[string]string{"id": nodeID.String()},
+		body:   `{"reason":" "}`,
+	})
+	requireRuntimeHTTPStatus(t, h.RevokeRuntimeNode(emptyReasonCtx), http.StatusUnprocessableEntity)
+}
+
 func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 	userID := uuid.New()
 	agentID := uuid.New()
@@ -706,6 +790,13 @@ type mockRuntimeService struct {
 	deadLetterOffset int32
 	deadLetterResp   *RuntimeDeadLetterListResponse
 
+	runtimeNodeLimit        int32
+	runtimeNodeOffset       int32
+	runtimeNodeListResp     *RuntimeNodeListResponse
+	runtimeNodeID           uuid.UUID
+	runtimeNodeRevokeReason string
+	runtimeNodeResp         *RuntimeNodeListItem
+
 	eventsUserID  uuid.UUID
 	eventsRunID   uuid.UUID
 	eventsAfter   int32
@@ -770,6 +861,33 @@ func (m *mockRuntimeService) ListRuntimeDeadLetters(
 	m.deadLetterLimit = limit
 	m.deadLetterOffset = offset
 	return m.deadLetterResp, m.err
+}
+
+func (m *mockRuntimeService) ListRuntimeNodes(
+	_ context.Context,
+	limit, offset int32,
+) (*RuntimeNodeListResponse, error) {
+	m.runtimeNodeLimit = limit
+	m.runtimeNodeOffset = offset
+	return m.runtimeNodeListResp, m.err
+}
+
+func (m *mockRuntimeService) DrainRuntimeNode(
+	_ context.Context,
+	nodeID uuid.UUID,
+) (*RuntimeNodeListItem, error) {
+	m.runtimeNodeID = nodeID
+	return m.runtimeNodeResp, m.err
+}
+
+func (m *mockRuntimeService) RevokeRuntimeNode(
+	_ context.Context,
+	nodeID uuid.UUID,
+	reason string,
+) (*RuntimeNodeListItem, error) {
+	m.runtimeNodeID = nodeID
+	m.runtimeNodeRevokeReason = reason
+	return m.runtimeNodeResp, m.err
 }
 
 func (m *mockRuntimeService) ListRunEvents(_ context.Context, userID, runID uuid.UUID, afterSequence, limit int32) ([]RunEventResponse, error) {

@@ -61,21 +61,19 @@ func TestValidateProductionConfig(t *testing.T) {
 		t.Fatalf("missing frontend error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
-		Env:                "production",
-		FrontendURL:        "https://app.example",
-		ReleaseVersion:     "20260712-test",
-		ReleaseCommit:      "0123456789abcdef",
-		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
+		Env:            "production",
+		FrontendURL:    "https://app.example",
+		ReleaseVersion: "20260712-test",
+		ReleaseCommit:  "0123456789abcdef",
 	}); err != nil {
-		t.Fatalf("deprecated verify URL must not affect local token auth: %v", err)
+		t.Fatalf("valid production config without internal integrations: %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
-		Env:                "production",
-		FrontendURL:        "https://app.example",
-		ReleaseVersion:     "20260712-test",
-		ReleaseCommit:      "0123456789abcdef",
-		UserTokenVerifyURL: "https://cloud.example/internal/user-tokens/verify",
-		InternalToken:      "secret",
+		Env:            "production",
+		FrontendURL:    "https://app.example",
+		ReleaseVersion: "20260712-test",
+		ReleaseCommit:  "0123456789abcdef",
+		InternalToken:  "secret",
 	}); err != nil {
 		t.Fatalf("valid production config error = %v", err)
 	}

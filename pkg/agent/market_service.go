@@ -106,7 +106,18 @@ func (s *MarketService) ListMarketWithSkills(ctx context.Context, tags []string,
 
 	items := make([]MarketListItem, 0, len(rows))
 	for _, r := range rows {
-		availability := marketListRowAvailability(r)
+		availability := s.runtimeAwareAvailability(
+			ctx,
+			r.ID,
+			r.ConnectionMode,
+			availabilityResponse(
+				r.AvailabilityStatus,
+				r.AvailabilityLastSuccessfulRunAt,
+				r.AvailabilityLastFailedRunAt,
+				r.AvailabilityLastCheckedAt,
+				r.AvailabilityConsecutiveFailures,
+			),
+		)
 		latestBenchmarkID := stringPtrFromUUID(r.LatestBenchmarkID)
 		items = append(items, MarketListItem{
 			ID:                r.ID.String(),
@@ -464,10 +475,8 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 func agentCardRuntimeExt(connectionMode string) AgentCardRuntimeExt {
 	onlineSignal := "direct_endpoint_probe_and_run_result"
 	switch connectionMode {
-	case ConnectionModeRuntimePull:
-		onlineSignal = "runtime_pull_heartbeat_claim_result"
-	case ConnectionModeRuntimeWS:
-		onlineSignal = "runtime_ws_socket_heartbeat_assignment_result"
+	case ConnectionModeRuntimePull, ConnectionModeRuntimeWS:
+		onlineSignal = "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"
 	case "mcp_server":
 		onlineSignal = "mcp_tool_call_and_run_result"
 	}
@@ -560,7 +569,7 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
-	hasRuntime, err := s.queries.HasRecentRuntimePullToken(ctx, agentID)
+	hasRuntime, err := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agentID)
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.runtimeAwareAvailability")
 		return availability
@@ -570,31 +579,7 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	}
 	availability.Status = "unreachable"
 	availability.Label = "不可达"
-	availability.Hint = "Runtime Agent 最近没有运行时心跳、WebSocket 连接或领取轮询，暂不建议试用。"
-	return availability
-}
-
-func marketListRowAvailability(r db.ListPublicAgentsRow) Availability {
-	availability := availabilityResponse(
-		r.AvailabilityStatus,
-		r.AvailabilityLastSuccessfulRunAt,
-		r.AvailabilityLastFailedRunAt,
-		r.AvailabilityLastCheckedAt,
-		r.AvailabilityConsecutiveFailures,
-	)
-	return runtimeAwareAvailabilityFromLastRuntimeToken(r.ConnectionMode, availability, r.LastRuntimeTokenUsedAt, time.Now())
-}
-
-func runtimeAwareAvailabilityFromLastRuntimeToken(connectionMode string, availability Availability, lastUsedAt *time.Time, now time.Time) Availability {
-	if !isQueuedRuntimeConnectionMode(connectionMode) {
-		return availability
-	}
-	if lastUsedAt != nil && !lastUsedAt.Before(now.Add(-5*time.Minute)) {
-		return availability
-	}
-	availability.Status = "unreachable"
-	availability.Label = "不可达"
-	availability.Hint = "Runtime Agent 最近没有运行时心跳、WebSocket 连接或领取轮询，暂不建议试用。"
+	availability.Hint = "Agent Node 当前没有可用的 Runtime v2 Session，暂时无法接收运行。Node 默认使用 WebSocket，必要时会自动切到 Pull v2。"
 	return availability
 }
 

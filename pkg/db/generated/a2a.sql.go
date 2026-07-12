@@ -10,86 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-const createAgentRuntimeToken = `-- name: CreateAgentRuntimeToken :one
-INSERT INTO agent_tokens (
-    agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
-) VALUES (
-    $1, $2, $3, $4, $5, $6, 'active_runtime', NOW()
-)
-RETURNING id, agent_id, creator_user_id, name, prefix, token_hash, scopes,
-          last_used_at, revoked_at, created_at`
-
-type CreateAgentRuntimeTokenParams struct {
-	AgentID         uuid.UUID `db:"agent_id" json:"agent_id"`
-	CreatedByUserID uuid.UUID `db:"created_by_user_id" json:"created_by_user_id"`
-	Name            string    `db:"name" json:"name"`
-	Prefix          string    `db:"prefix" json:"prefix"`
-	TokenHash       string    `db:"token_hash" json:"-"`
-	Scopes          []string  `db:"scopes" json:"scopes"`
-}
-
-func (q *Queries) CreateAgentRuntimeToken(ctx context.Context, arg CreateAgentRuntimeTokenParams) (AgentRuntimeToken, error) {
-	row := q.db.QueryRow(ctx, createAgentRuntimeToken,
-		arg.AgentID, arg.CreatedByUserID, arg.Name, arg.Prefix, arg.TokenHash, arg.Scopes)
-	var token AgentRuntimeToken
-	err := row.Scan(
-		&token.ID, &token.AgentID, &token.CreatedByUserID, &token.Name, &token.Prefix,
-		&token.TokenHash, &token.Scopes, &token.LastUsedAt, &token.RevokedAt, &token.CreatedAt,
-	)
-	return token, err
-}
-
-const countActiveAgentRuntimeTokens = `-- name: CountActiveAgentRuntimeTokens :one
-SELECT COUNT(*)::int AS total
-FROM agent_tokens
-WHERE agent_id = $1
-  AND status = 'active_runtime'
-  AND revoked_at IS NULL
-  AND (expires_at IS NULL OR expires_at > clock_timestamp())`
-
-func (q *Queries) CountActiveAgentRuntimeTokens(ctx context.Context, agentID uuid.UUID) (int32, error) {
-	var total int32
-	err := q.db.QueryRow(ctx, countActiveAgentRuntimeTokens, agentID).Scan(&total)
-	return total, err
-}
-
-const listAgentRuntimeTokensForOwner = `-- name: ListAgentRuntimeTokensForOwner :many
-SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.scopes,
-       t.last_used_at, t.revoked_at, t.created_at
-FROM agent_tokens t
-JOIN agents a ON a.id = t.agent_id
-WHERE t.agent_id = $1
-  AND a.creator_id = $2
-  AND t.status = 'active_runtime'
-  AND t.revoked_at IS NULL
-  AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
-ORDER BY t.created_at DESC`
-
-type ListAgentRuntimeTokensForOwnerParams struct {
-	AgentID uuid.UUID `db:"agent_id" json:"agent_id"`
-	UserID  uuid.UUID `db:"user_id" json:"user_id"`
-}
-
-func (q *Queries) ListAgentRuntimeTokensForOwner(ctx context.Context, arg ListAgentRuntimeTokensForOwnerParams) ([]AgentRuntimeToken, error) {
-	rows, err := q.db.Query(ctx, listAgentRuntimeTokensForOwner, arg.AgentID, arg.UserID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []AgentRuntimeToken
-	for rows.Next() {
-		var token AgentRuntimeToken
-		if err := rows.Scan(
-			&token.ID, &token.AgentID, &token.CreatedByUserID, &token.Name, &token.Prefix,
-			&token.TokenHash, &token.Scopes, &token.LastUsedAt, &token.RevokedAt, &token.CreatedAt,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, token)
-	}
-	return items, rows.Err()
-}
-
 const listActiveAgentRuntimeTokensByPrefix = `-- name: ListActiveAgentRuntimeTokensByPrefix :many
 SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.scopes,
        t.last_used_at, t.revoked_at, t.created_at, a.connection_mode
@@ -150,30 +70,6 @@ func (q *Queries) HasRecentRuntimePullToken(ctx context.Context, agentID uuid.UU
 	var ok bool
 	err := q.db.QueryRow(ctx, hasRecentRuntimePullToken, agentID).Scan(&ok)
 	return ok, err
-}
-
-const revokeAgentRuntimeTokenForOwner = `-- name: RevokeAgentRuntimeTokenForOwner :execrows
-UPDATE agent_tokens t
-SET revoked_at = NOW(),
-    status = 'revoked',
-    revocation_kind = 'manual'
-FROM agents a
-WHERE t.id = $1
-  AND t.agent_id = a.id
-  AND a.creator_id = $2
-  AND t.revoked_at IS NULL`
-
-type RevokeAgentRuntimeTokenForOwnerParams struct {
-	ID     uuid.UUID `db:"id" json:"id"`
-	UserID uuid.UUID `db:"user_id" json:"user_id"`
-}
-
-func (q *Queries) RevokeAgentRuntimeTokenForOwner(ctx context.Context, arg RevokeAgentRuntimeTokenForOwnerParams) (int64, error) {
-	tag, err := q.db.Exec(ctx, revokeAgentRuntimeTokenForOwner, arg.ID, arg.UserID)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
 }
 
 const getAgentCallPolicy = `-- name: GetAgentCallPolicy :one

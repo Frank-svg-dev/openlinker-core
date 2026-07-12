@@ -441,8 +441,8 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 		wantSignal string
 	}{
 		{mode: ConnectionModeDirectHTTP, wantSignal: "direct_endpoint_probe_and_run_result"},
-		{mode: ConnectionModeRuntimePull, wantSignal: "runtime_pull_heartbeat_claim_result"},
-		{mode: ConnectionModeRuntimeWS, wantSignal: "runtime_ws_socket_heartbeat_assignment_result"},
+		{mode: ConnectionModeRuntimePull, wantSignal: "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"},
+		{mode: ConnectionModeRuntimeWS, wantSignal: "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"},
 		{mode: ConnectionModeMCPServer, wantSignal: "mcp_tool_call_and_run_result"},
 	} {
 		if got := agentCardRuntimeExt(tc.mode); got.Adapter != "openlinker_a2a_proxy" || got.ConnectionMode != tc.mode || got.OnlineSignal != tc.wantSignal {

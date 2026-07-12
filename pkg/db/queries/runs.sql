@@ -126,16 +126,6 @@ SELECT input, request_metadata
 FROM runs
 WHERE id = $1;
 
--- name: CountClaimableRuntimePullRuns :one
--- 工作台只读诊断：统计队列型 Agent 尚未进入执行阶段的 run。
-SELECT COUNT(*)::int AS total
-FROM runs r
-JOIN agents a ON a.id = r.agent_id
-WHERE r.agent_id = $1
-  AND r.status = 'running'
-  AND a.connection_mode IN ('runtime_pull', 'runtime_ws')
-  AND (r.claimed_at IS NULL OR r.claimed_at < NOW() - INTERVAL '5 minutes');
-
 -- name: ListStaleEndpointRuns :many
 -- direct_http / mcp_server 由 core API 进程主动调用 endpoint。若进程在创建
 -- running run 后崩溃、重启或 DB 暂时不可写，普通执行协程可能来不及把 run
@@ -619,7 +609,8 @@ WHERE r.user_id = $1
   );
 
 -- name: ListRunsByCreatorAgentWithAgent :many
--- 创作者查看某个自己 Agent 的被调用历史。
+-- Creator-owned Run history. Runtime v2 progress comes from dispatch/Attempt
+-- fields; migration 063 removed the pre-v2 claimed columns.
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
        r.creator_revenue_cents, r.duration_ms, r.started_at, r.finished_at,
@@ -627,7 +618,7 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.max_attempts, r.next_attempt_at, r.latest_attempt_id,
        r.active_attempt_id, r.cancel_state, r.cancel_requested_at,
        r.cancel_acknowledged_at, r.cancel_reason, r.dead_lettered_at,
-       r.replay_of_run_id, r.claimed_by_runtime_token_id, r.claimed_at,
+       r.replay_of_run_id,
        a.slug AS agent_slug, a.name AS agent_name
 FROM runs r
 JOIN agents a ON a.id = r.agent_id

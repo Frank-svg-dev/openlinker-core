@@ -1,35 +1,6 @@
 -- a2a.sql
 -- Platform-mediated Agent-to-Agent tokens, policy and run delegation queries.
 
--- name: CreateAgentRuntimeToken :one
-INSERT INTO agent_tokens (
-    agent_id, creator_user_id, name, prefix, token_hash, scopes, status, redeemed_at
-) VALUES (
-    $1, $2, $3, $4, $5, $6, 'active_runtime', NOW()
-)
-RETURNING id, agent_id, creator_user_id, name, prefix, token_hash, scopes,
-          last_used_at, revoked_at, created_at;
-
--- name: CountActiveAgentRuntimeTokens :one
-SELECT COUNT(*)::int AS total
-FROM agent_tokens
-WHERE agent_id = $1
-  AND status = 'active_runtime'
-  AND revoked_at IS NULL
-  AND (expires_at IS NULL OR expires_at > clock_timestamp());
-
--- name: ListAgentRuntimeTokensForOwner :many
-SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.scopes,
-       t.last_used_at, t.revoked_at, t.created_at
-FROM agent_tokens t
-JOIN agents a ON a.id = t.agent_id
-WHERE t.agent_id = $1
-  AND a.creator_id = $2
-  AND t.status = 'active_runtime'
-  AND t.revoked_at IS NULL
-  AND (t.expires_at IS NULL OR t.expires_at > clock_timestamp())
-ORDER BY t.created_at DESC;
-
 -- name: ListActiveAgentRuntimeTokensByPrefix :many
 SELECT t.id, t.agent_id, t.creator_user_id, t.name, t.prefix, t.token_hash, t.scopes,
        t.last_used_at, t.revoked_at, t.created_at, a.connection_mode
@@ -59,17 +30,6 @@ SELECT EXISTS(
       AND 'agent:pull' = ANY(scopes)
       AND last_used_at >= NOW() - INTERVAL '5 minutes'
 )::bool AS has_recent_runtime_pull_token;
-
--- name: RevokeAgentRuntimeTokenForOwner :execrows
-UPDATE agent_tokens t
-SET revoked_at = NOW(),
-    status = 'revoked',
-    revocation_kind = 'manual'
-FROM agents a
-WHERE t.id = $1
-  AND t.agent_id = a.id
-  AND a.creator_id = $2
-  AND t.revoked_at IS NULL;
 
 -- name: GetAgentCallPolicy :one
 SELECT COALESCE(

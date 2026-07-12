@@ -1010,7 +1010,9 @@ func toAgentResponse(a *db.Agent) AgentResponse {
 
 func (s *Service) agentListRowToResponse(ctx context.Context, row *db.ListAgentsByCreatorPageRow) AgentResponse {
 	resp := toAgentResponse(&row.Agent)
-	availability := runtimeAwareAvailabilityFromLastRuntimeToken(
+	availability := s.runtimeAwareAvailability(
+		ctx,
+		row.ID,
 		row.ConnectionMode,
 		availabilityResponse(
 			row.AvailabilityStatus,
@@ -1019,8 +1021,6 @@ func (s *Service) agentListRowToResponse(ctx context.Context, row *db.ListAgents
 			row.AvailabilityLastCheckedAt,
 			row.AvailabilityConsecutiveFailures,
 		),
-		row.LastRuntimeTokenUsedAt,
-		time.Now(),
 	)
 	readiness := readinessForAgent(
 		row.Slug,
@@ -1096,7 +1096,7 @@ func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUI
 	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
-	hasRuntime, err := s.queries.HasRecentRuntimePullToken(ctx, agentID)
+	hasRuntime, err := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agentID)
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.runtimeAwareAvailability")
 		return availability
@@ -1106,7 +1106,7 @@ func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUI
 	}
 	availability.Status = "unreachable"
 	availability.Label = "不可达"
-	availability.Hint = "Runtime Agent 最近没有运行时心跳、WebSocket 连接或领取轮询，暂不建议试用。"
+	availability.Hint = "Agent Node 当前没有可用的 Runtime v2 Session，暂时无法接收运行。Node 默认使用 WebSocket，必要时会自动切到 Pull v2。"
 	return availability
 }
 
@@ -1146,15 +1146,10 @@ func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
 	}
 	hints := []string{}
 	switch agent.ConnectionMode {
-	case ConnectionModeRuntimeWS:
+	case ConnectionModeRuntimeWS, ConnectionModeRuntimePull:
 		hints = append(hints,
-			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope、绑定当前 Agent 的访问令牌连接 /api/v1/agent-runtime/ws。",
-			"如果 WebSocket 被代理或网络中断阻断，可临时降级到 heartbeat + claim?wait=25 + result。",
-		)
-	case ConnectionModeRuntimePull:
-		hints = append(hints,
-			"确认本地 Agent 进程正在运行，并使用含 agent:pull scope、绑定当前 Agent 的访问令牌轮询任务。",
-			"如果刚重启过 Agent，先调用 /api/v1/agent-runtime/heartbeat 刷新可用性。",
+			"确认 Agent Node 使用 mTLS 设备证书和含 agent:pull scope 的 Agent Token 建立 Runtime v2 Session。",
+			"建议设置 OPENLINKER_AGENT_NODE_TRANSPORT=auto：优先连接 /api/v1/agent-runtime/v2/ws，网络不适合时自动切到 Pull v2，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
 		)
 	case ConnectionModeMCPServer:
 		hints = append(hints,

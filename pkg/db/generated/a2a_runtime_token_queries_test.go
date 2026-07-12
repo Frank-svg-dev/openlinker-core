@@ -7,8 +7,6 @@ import (
 
 func TestRuntimeTokenReadsAndTouchesRejectExpiredCredentials(t *testing.T) {
 	queries := map[string]string{
-		"count":       countActiveAgentRuntimeTokens,
-		"owner list":  listAgentRuntimeTokensForOwner,
 		"auth lookup": listActiveAgentRuntimeTokensByPrefix,
 		"touch":       touchAgentRuntimeToken,
 		"presence":    hasRecentRuntimePullToken,

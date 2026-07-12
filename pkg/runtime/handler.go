@@ -90,6 +90,9 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 // from admin policy.
 func (h *Handler) RegisterAdmin(api *echo.Group, jwtMw, adminMw echo.MiddlewareFunc) {
 	api.GET("/admin/runtime/dead-letters", h.ListRuntimeDeadLetters, jwtMw, adminMw)
+	api.GET("/admin/runtime/nodes", h.ListRuntimeNodes, jwtMw, adminMw)
+	api.POST("/admin/runtime/nodes/:id/drain", h.DrainRuntimeNode, jwtMw, adminMw)
+	api.POST("/admin/runtime/nodes/:id/revoke", h.RevokeRuntimeNode, jwtMw, adminMw)
 }
 
 // CancelRun cancels an owned, cancellable run. The concrete Service already
@@ -181,6 +184,72 @@ func (h *Handler) ListRuntimeDeadLetters(c echo.Context) error {
 		return httpx.ServiceUnavailable("Runtime 死信查询能力不可用")
 	}
 	resp, err := lister.ListRuntimeDeadLetters(c.Request().Context(), limit, offset)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) ListRuntimeNodes(c echo.Context) error {
+	limit, err := parseOptionalInt32(c.QueryParam("limit"))
+	if err != nil || limit < 0 {
+		return httpx.BadRequest("limit 不是合法非负整数")
+	}
+	offset, err := parseOptionalInt32(c.QueryParam("offset"))
+	if err != nil || offset < 0 {
+		return httpx.BadRequest("offset 不是合法非负整数")
+	}
+	lister, ok := h.svc.(interface {
+		ListRuntimeNodes(context.Context, int32, int32) (*RuntimeNodeListResponse, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Runtime Node 管理能力不可用")
+	}
+	resp, err := lister.ListRuntimeNodes(c.Request().Context(), limit, offset)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) DrainRuntimeNode(c echo.Context) error {
+	nodeID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	drainer, ok := h.svc.(interface {
+		DrainRuntimeNode(context.Context, uuid.UUID) (*RuntimeNodeListItem, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Runtime Node 管理能力不可用")
+	}
+	resp, err := drainer.DrainRuntimeNode(c.Request().Context(), nodeID)
+	if err != nil {
+		return err
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+func (h *Handler) RevokeRuntimeNode(c echo.Context) error {
+	nodeID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		return httpx.BadRequest("id 不是合法 uuid")
+	}
+	var req RevokeRuntimeNodeRequest
+	if err = c.Bind(&req); err != nil {
+		return httpx.BadRequest("请求体格式错误")
+	}
+	req.Reason = strings.TrimSpace(req.Reason)
+	if err = h.validator.Struct(&req); err != nil {
+		return httpx.Unprocessable(err.Error())
+	}
+	revoker, ok := h.svc.(interface {
+		RevokeRuntimeNode(context.Context, uuid.UUID, string) (*RuntimeNodeListItem, error)
+	})
+	if !ok {
+		return httpx.ServiceUnavailable("Runtime Node 管理能力不可用")
+	}
+	resp, err := revoker.RevokeRuntimeNode(c.Request().Context(), nodeID, req.Reason)
 	if err != nil {
 		return err
 	}

@@ -1200,12 +1200,12 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 		return false, nil
 	}
 	if requireRuntimeOnline && (agentRow.ConnectionMode == "runtime_pull" || agentRow.ConnectionMode == "runtime_ws") {
-		hasRecentRuntimeToken, err := s.queries.HasRecentRuntimePullToken(ctx, agentRow.ID)
+		hasActiveSession, err := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agentRow.ID)
 		if err != nil {
-			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasRecentRuntimePullToken")
-			return false, httpx.Internal("校验 workflow Agent 运行时心跳失败")
+			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeV2SessionForAgent")
+			return false, httpx.Internal("校验 workflow Agent Runtime v2 Session 失败")
 		}
-		if !hasRecentRuntimeToken {
+		if !hasActiveSession {
 			return false, nil
 		}
 	}

@@ -379,7 +379,7 @@ func assertAPIKeyAuth(c echo.Context) error {
 				"next_action": map[string]string{
 					"type":   "open_user_token_settings",
 					"label":  "查看 User Token 状态",
-					"hint":   "User Token 是 Core 正式能力；本地签发与验证将在下一实现切片补齐。已有 ol_user_... Token 的部署可用 Authorization: Bearer 传给 MCP 客户端。",
+					"hint":   "User Token 已由 Core 本地签发、校验和撤销。请在 User Token 设置中创建 ol_user_... Token，并通过 Authorization: Bearer 交给 MCP 客户端。",
 					"href":   "/settings/user-tokens",
 					"reason": "MCP 是给外部客户端和 Agent 使用的服务端入口，不能使用浏览器 JWT 会话调用。",
 				},
