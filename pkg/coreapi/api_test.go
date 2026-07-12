@@ -152,7 +152,6 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		RunTimeoutSeconds:             60,
 		AllowLocalHTTPEndpoints:       false,
 		AvailabilityMonitorEnabled:    false,
-		RuntimePullRunWorkerEnabled:   false,
 		WorkflowRunWorkerEnabled:      false,
 		RegistryProxyRunWorkerEnabled: false,
 	}, Options{

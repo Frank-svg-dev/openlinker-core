@@ -26,7 +26,7 @@ type PrincipalAPIKeyVerifier interface {
 	VerifyPrincipal(ctx context.Context, plaintextToken string) (*AuthPrincipal, error)
 }
 
-// HybridAuthMiddleware 同时接受网页登录会话与访问令牌。
+// HybridAuthMiddleware 同时接受网页登录会话与 User Token。
 //
 // 判定规则：
 //   - Authorization: Bearer ol_user_xxx → 走 ApiKeyVerifier
@@ -55,19 +55,19 @@ func HybridAuthMiddlewareWithUserStatus(jwtSecret string, verifier ApiKeyVerifie
 			var principal *AuthPrincipal
 			if credential.HasAnyPrefix(token, credential.UserTokenPrefix) {
 				if verifier == nil {
-					// 配置错误：访问令牌验证器未注入
-					return httpx.Unauthorized("访问令牌鉴权未启用")
+					// 配置错误：User Token 验证器未注入
+					return httpx.Unauthorized("User Token 鉴权未启用")
 				}
 				if principalVerifier, ok := verifier.(PrincipalAPIKeyVerifier); ok {
 					var err error
 					principal, err = principalVerifier.VerifyPrincipal(c.Request().Context(), token)
 					if err != nil {
-						return httpx.Unauthorized("访问令牌无效或已撤销")
+						return httpx.Unauthorized("User Token 无效或已撤销")
 					}
 				} else {
 					uid, scopes, err := verifier.Verify(c.Request().Context(), token)
 					if err != nil {
-						return httpx.Unauthorized("访问令牌无效或已撤销")
+						return httpx.Unauthorized("User Token 无效或已撤销")
 					}
 					grants := make([]Grant, 0, len(scopes))
 					for _, scope := range scopes {

@@ -92,7 +92,6 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 			runEventsResp: []RunEventResponse{eventResp},
 			artifactsResp: []RunArtifactResponse{artifactResp},
 			messagesResp:  []RunMessageResponse{messageResp},
-			reportResp:    &eventResp,
 		}
 		h := NewHandler(mock)
 
@@ -206,19 +205,6 @@ func TestRuntimeHandlerDispatchesServiceSuccess(t *testing.T) {
 			t.Fatalf("stream code=%d limit=%d body=%s", streamRec.Code, mock.eventsLimit, streamRec.Body.String())
 		}
 
-		reportCtx, reportRec := newRuntimeDispatchContext(&runtimeDispatchRequest{
-			method:  http.MethodPost,
-			target:  "/api/v1/runs/" + runID.String() + "/events",
-			body:    `{"event_type":"run.message.delta","payload":{"text":"hi"}}`,
-			params:  map[string]string{"id": runID.String()},
-			headers: map[string]string{"X-OpenLinker-Token": "agent-secret"},
-		})
-		if err := h.PostRunEvent(reportCtx); err != nil {
-			t.Fatalf("PostRunEvent error = %v", err)
-		}
-		if reportRec.Code != http.StatusCreated || mock.reportRunID != runID || mock.reportToken != "agent-secret" || mock.reportReq.EventType != "run.message.delta" {
-			t.Fatalf("report code=%d run=%s token=%q req=%#v", reportRec.Code, mock.reportRunID, mock.reportToken, mock.reportReq)
-		}
 	})
 
 }
@@ -476,17 +462,6 @@ func TestRuntimeHandlerPropagatesServiceErrors(t *testing.T) {
 				userID:     userID.String(),
 				authMethod: "jwt",
 				params:     map[string]string{"id": runID.String()},
-			}),
-		},
-		{
-			name: "report event",
-			call: (*Handler).PostRunEvent,
-			ctx: mustRuntimeDispatchContext(&runtimeDispatchRequest{
-				method:  http.MethodPost,
-				target:  "/api/v1/runs/" + runID.String() + "/events",
-				body:    `{"event_type":"run.message.delta"}`,
-				params:  map[string]string{"id": runID.String()},
-				headers: map[string]string{"X-OpenLinker-Token": "agent-secret"},
 			}),
 		},
 	}
@@ -809,11 +784,6 @@ type mockRuntimeService struct {
 	messagesRunID  uuid.UUID
 	messagesResp   []RunMessageResponse
 
-	reportRunID uuid.UUID
-	reportToken string
-	reportReq   *ReportRunEventRequest
-	reportResp  *RunEventResponse
-
 	validateRuntimeTokenErr       error
 	validateRuntimeTokenPlaintext string
 	validateRuntimeTokenScopes    []string
@@ -935,13 +905,6 @@ func (m *mockRuntimeService) ListRunMessages(_ context.Context, userID, runID uu
 	return m.messagesResp, m.err
 }
 
-func (m *mockRuntimeService) ReportRunEvent(_ context.Context, runID uuid.UUID, token string, req *ReportRunEventRequest) (*RunEventResponse, error) {
-	m.reportRunID = runID
-	m.reportToken = token
-	m.reportReq = req
-	return m.reportResp, m.err
-}
-
 func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token string, scopes ...string) (db.AgentRuntimeToken, error) {
 	m.validateRuntimeTokenPlaintext = token
 	m.validateRuntimeTokenScopes = append([]string(nil), scopes...)
@@ -951,7 +914,7 @@ func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token strin
 	if m.err != nil {
 		return db.AgentRuntimeToken{}, m.err
 	}
-	return db.AgentRuntimeToken{ID: uuid.New(), AgentID: uuid.New(), ConnectionMode: "runtime_pull"}, nil
+	return db.AgentRuntimeToken{ID: uuid.New(), AgentID: uuid.New(), ConnectionMode: "agent_node"}, nil
 }
 
 type pollingRuntimeService struct {

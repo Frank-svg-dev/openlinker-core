@@ -132,7 +132,9 @@ func newTestConfig() *config.Config {
 // newTestService 构造 Service。
 func newTestService(t *testing.T, pool *pgxpool.Pool) *runtime.Service {
 	t.Helper()
-	return runtime.NewService(pool, newTestConfig())
+	svc := runtime.NewService(pool, newTestConfig())
+	svc.ConfigureCoreRuntime(uuid.New())
+	return svc
 }
 
 // ────────────────────────────────────────────────────────────
@@ -212,12 +214,22 @@ func setAgentEndpointToken(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, 
 func insertRunningRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID) uuid.UUID {
 	t.Helper()
 	runID := uuid.New()
+	idempotencyKeyHash := sha256.Sum256(append([]byte("key:"), runID[:]...))
+	idempotencyFingerprint := sha256.Sum256(append([]byte("request:"), runID[:]...))
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO runs (
 			id, user_id, agent_id, input, status,
-			cost_cents, platform_fee_cents, creator_revenue_cents
-		) VALUES ($1, $2, $3, '{}'::jsonb, 'running', 10, 2, 8)`,
-		runID, userID, agentID)
+			cost_cents, platform_fee_cents, creator_revenue_cents,
+			idempotency_key_hash, idempotency_fingerprint, request_metadata,
+			connection_mode_snapshot, endpoint_idempotency_snapshot,
+			max_offer_count, max_attempts, dispatch_deadline_at, run_deadline_at
+		) VALUES (
+			$1, $2, $3, '{}'::jsonb, 'running', 10, 2, 8,
+			$4, $5, '{}'::jsonb, 'direct_http', TRUE,
+			1, 1, clock_timestamp() + INTERVAL '5 minutes',
+			clock_timestamp() + INTERVAL '10 minutes'
+		)`,
+		runID, userID, agentID, idempotencyKeyHash[:], idempotencyFingerprint[:])
 	require.NoError(t, err)
 	return runID
 }
@@ -227,8 +239,8 @@ func TestGetRunIncludesEvidenceSummary(t *testing.T) {
 	svc := newTestService(t, pool)
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
-	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 0, "approved")
-	runID := uuid.New()
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"summary":"ok"}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 0, "approved")
 	taskID := uuid.New()
 
 	_, err := pool.Exec(context.Background(),
@@ -236,16 +248,13 @@ func TestGetRunIncludesEvidenceSummary(t *testing.T) {
 		 VALUES ($1, $2, '分析客服对话', '{content/summarization,content/structured-data}', '{run_agent}', $3)`,
 		taskID, userID, []uuid.UUID{agentID})
 	require.NoError(t, err)
-	_, err = pool.Exec(context.Background(),
-		`INSERT INTO runs (
-			id, user_id, agent_id, input, output, status,
-			cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms, source, finished_at
-		) VALUES (
-			$1, $2, $3, '{"query":"x"}'::jsonb, '{"summary":"ok"}'::jsonb, 'success',
-			0, 0, 0, 18, 'web', NOW()
-		)`,
-		runID, userID, agentID)
+	created, err := svc.Run(
+		context.Background(), userID,
+		makeRunReq(agentID, map[string]any{"query": "x"}), "web",
+	)
 	require.NoError(t, err)
+	require.Equal(t, "success", created.Status)
+	runID := mustParseUUID(t, created.RunID)
 	_, err = pool.Exec(context.Background(),
 		`INSERT INTO run_requirement_evidence (
 				run_id, task_id, agent_id, user_id, required_skill_ids, required_mcp_tools,
@@ -261,13 +270,7 @@ func TestGetRunIncludesEvidenceSummary(t *testing.T) {
 		runID, taskID, agentID, userID)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),
-		`INSERT INTO run_artifacts (run_id, artifact_type, title, content, visibility)
-		 VALUES ($1, 'json', 'Evidence artifact', '{"ok":true}'::jsonb, 'public_example')`,
-		runID)
-	require.NoError(t, err)
-	_, err = pool.Exec(context.Background(),
-		`INSERT INTO run_messages (run_id, role, content, payload)
-		 VALUES ($1, 'agent', 'done', '{"text":"done"}'::jsonb)`,
+		`UPDATE run_artifacts SET visibility = 'public_example' WHERE run_id = $1`,
 		runID)
 	require.NoError(t, err)
 
@@ -519,11 +522,19 @@ func TestRun_HappyPath(t *testing.T) {
 	assert.Equal(t, int32(0), availability.ConsecutiveFailures)
 	require.NotNil(t, availability.LastSuccessfulRunAt)
 
-	run := readRun(t, pool, mustParseUUID(t, resp.RunID))
+	runID := mustParseUUID(t, resp.RunID)
+	run := readRun(t, pool, runID)
 	assert.Equal(t, "success", run.Status)
 	assert.Equal(t, int32(0), run.CostCents)
 	assert.Equal(t, int32(0), run.PlatformFeeCents)
 	assert.Equal(t, int32(0), run.CreatorRevenueCents)
+	var executorType, outcome string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT executor_type, outcome FROM run_attempts WHERE run_id = $1`, runID).Scan(
+		&executorType, &outcome,
+	))
+	assert.Equal(t, "core_http", executorType)
+	assert.Equal(t, "success", outcome)
 
 	events := readRunEvents(t, pool, mustParseUUID(t, resp.RunID))
 	require.Len(t, events, 4)
@@ -551,11 +562,191 @@ func TestRun_HappyPath(t *testing.T) {
 	assertRunAccountingConsistent(t, pool)
 }
 
+func TestRun_MCPServerUsesCoreAttemptAndFinalizer(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	userID := insertRuntimeUser(t, pool)
+	creatorID := insertCreator(t, pool)
+	endpoint := startMockEndpointForService(t, svc, func(w http.ResponseWriter, r *http.Request) {
+		var request map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.Equal(t, "tools/call", request["method"])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","result":{"structuredContent":{"answer":"mcp ok"}}}`))
+	})
+	agentID := insertAgent(t, pool, creatorID, endpoint, 0, "approved")
+	_, err := pool.Exec(ctx, `
+		UPDATE agents
+		SET connection_mode = 'mcp_server', mcp_tool_name = 'analyze'
+		WHERE id = $1`, agentID)
+	require.NoError(t, err)
+
+	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "review"}), "api")
+	require.NoError(t, err)
+	require.Equal(t, "success", resp.Status)
+	require.Equal(t, "mcp ok", resp.Output["answer"])
+
+	runID := mustParseUUID(t, resp.RunID)
+	var executorType, outcome string
+	var finished bool
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT executor_type, outcome, finished_at IS NOT NULL
+		FROM run_attempts
+		WHERE run_id = $1`, runID).Scan(&executorType, &outcome, &finished))
+	require.Equal(t, "core_mcp", executorType)
+	require.Equal(t, "success", outcome)
+	require.True(t, finished)
+
+	events := readRunEvents(t, pool, runID)
+	require.NotEmpty(t, events)
+	require.Equal(t, "run.completed", events[len(events)-1].EventType)
+}
+
+func TestRun_DirectHTTPCommitsAttemptBeforeExternalIO(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+	type observation struct {
+		executorType  string
+		dispatchState string
+		accepted      bool
+		err           error
+	}
+	observed := make(chan observation, 1)
+	endpoint := startMockEndpointForService(t, svc, func(w http.ResponseWriter, r *http.Request) {
+		runID, err := uuid.Parse(r.Header.Get("X-OpenLinker-Run-Id"))
+		if err != nil {
+			observed <- observation{err: err}
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		var got observation
+		got.err = pool.QueryRow(r.Context(), `
+			SELECT a.executor_type, run.dispatch_state, a.accepted_at IS NOT NULL
+			FROM runs run
+			JOIN run_attempts a ON a.run_id = run.id AND a.id = run.active_attempt_id
+			WHERE run.id = $1`, runID).Scan(&got.executorType, &got.dispatchState, &got.accepted)
+		observed <- got
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":{"ok":true}}`))
+	})
+
+	userID := insertRuntimeUser(t, pool)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, endpoint, 0, "approved")
+	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"q": "proof"}), "api")
+	require.NoError(t, err)
+	require.Equal(t, "success", resp.Status)
+	got := <-observed
+	require.NoError(t, got.err)
+	require.Equal(t, "core_http", got.executorType)
+	require.Equal(t, "executing", got.dispatchState)
+	require.True(t, got.accepted)
+}
+
+func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
+	pool := setupTestDB(t)
+	ctx := context.Background()
+	coreID := uuid.New()
+	svc := runtime.NewService(pool, newTestConfig())
+	svc.ConfigureCoreRuntime(coreID)
+
+	userID := insertRuntimeUser(t, pool)
+	creatorID := insertCreator(t, pool)
+	agentID := insertAgent(t, pool, creatorID, "openlinker-agent-node://ready-session", 0, "approved")
+	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode = 'agent_node' WHERE id = $1`, agentID)
+	require.NoError(t, err)
+
+	tokenID, nodeID, sessionID := uuid.New(), uuid.New(), uuid.New()
+	workerID := uuid.NewString()
+	certificateSerial := hex.EncodeToString(nodeID[:])
+	thumbprintDigest := sha256.Sum256(nodeID[:])
+	thumbprint := hex.EncodeToString(thumbprintDigest[:])
+	prefix := "ol_agent_" + hex.EncodeToString(tokenID[:6])
+	fixtureTx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = fixtureTx.Rollback(ctx) }()
+	_, err = fixtureTx.Exec(ctx, `
+		INSERT INTO agent_tokens (
+			id, agent_id, creator_user_id, name, prefix, token_hash,
+			scopes, status, redeemed_at
+		) VALUES ($1, $2, $3, 'Agent Node ready Session', $4, $5,
+			ARRAY['agent:call', 'agent:pull']::text[], 'active_runtime', clock_timestamp())`,
+		tokenID, agentID, creatorID, prefix, "hash-"+tokenID.String())
+	require.NoError(t, err)
+	_, err = fixtureTx.Exec(ctx, `
+		INSERT INTO runtime_nodes (
+			node_id, display_name, device_certificate_serial,
+			device_public_key_thumbprint, node_version, protocol_version,
+			runtime_contract_id, runtime_contract_digest, features,
+			capacity, last_seen_at
+		) VALUES ($1, 'Agent Node ready Session', $2, $3, 'test-v2', 2,
+			'openlinker.runtime.v2', $4, $5, 1, clock_timestamp())`,
+		nodeID, certificateSerial, thumbprint, runtime.RuntimeContractDigest,
+		runtime.RuntimeRequiredFeatures())
+	require.NoError(t, err)
+	_, err = fixtureTx.Exec(ctx, `
+		INSERT INTO runtime_sessions (
+			runtime_session_id, node_id, agent_id, credential_id, worker_id,
+			session_epoch, device_certificate_serial, node_version,
+			protocol_version, runtime_contract_id, runtime_contract_digest,
+			features, capacity, attached_core_instance_id
+		) VALUES ($1, $2, $3, $4, $5, 1, $6, 'test-v2', 2,
+			'openlinker.runtime.v2', $7, $8, 1, $9)`,
+		sessionID, nodeID, agentID, tokenID, workerID, certificateSerial,
+		runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(), coreID)
+	require.NoError(t, err)
+	_, err = fixtureTx.Exec(ctx, `
+		INSERT INTO runtime_session_attachments (
+			runtime_session_id, core_instance_id, attachment_kind
+		) VALUES ($1, $2, 'connected')`, sessionID, coreID)
+	require.NoError(t, err)
+	require.NoError(t, fixtureTx.Commit(ctx))
+
+	created, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"task": "claim me"}), "api")
+	require.NoError(t, err)
+	require.Equal(t, "running", created.Status)
+	require.Equal(t, "agent_node", created.AgentConnectionMode)
+
+	signer, err := runtime.NewRuntimeInvocationSignerWithPrevious(
+		"test-current", "runtime-v2-integration-signing-secret-32-bytes", "", "",
+	)
+	require.NoError(t, err)
+	leases := runtime.NewRuntimeLeaseService(pool, coreID, signer, runtime.DefaultRuntimeLeaseConfig())
+	assigned, err := leases.ClaimOffer(ctx, runtime.RuntimeSessionPrincipal{
+		RuntimeSessionID:                sessionID,
+		NodeID:                          nodeID,
+		AgentID:                         agentID,
+		CredentialID:                    tokenID,
+		WorkerID:                        workerID,
+		SessionEpoch:                    1,
+		CoreInstanceID:                  coreID,
+		DeviceCertificateSerial:         certificateSerial,
+		DevicePublicKeyThumbprintSHA256: thumbprint,
+		Status:                          "active",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, assigned)
+	require.Equal(t, mustParseUUID(t, created.RunID), assigned.AttemptIdentity.RunID)
+	require.Equal(t, sessionID, assigned.AttemptIdentity.RuntimeSessionID)
+
+	var dispatchState, executorType string
+	var offerCount int32
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT r.dispatch_state, r.offer_count, a.executor_type
+		FROM runs r
+		JOIN run_attempts a ON a.id = r.active_attempt_id
+		WHERE r.id = $1`, assigned.AttemptIdentity.RunID).Scan(&dispatchState, &offerCount, &executorType))
+	require.Equal(t, "offered", dispatchState)
+	require.Equal(t, int32(1), offerCount)
+	require.Equal(t, "agent_node", executorType)
+}
+
 func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
-	taskCallbackEvents := &recordingRuntimeTaskCallbackEnqueuer{events: make(chan db.RunEvent, 2)}
-	svc.SetTaskCallbackEnqueuer(taskCallbackEvents)
 	ctx := context.Background()
 
 	userID := insertRuntimeUser(t, pool)
@@ -600,18 +791,16 @@ func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {
 	require.NoError(t, json.Unmarshal(subs[0].Metadata, &metadata))
 	assert.Equal(t, "integration", metadata["client"])
 
-	deadline := time.After(2 * time.Second)
-	for {
-		select {
-		case event := <-taskCallbackEvents.events:
-			assert.Equal(t, runID, event.RunID)
-			if event.EventType == "run.completed" {
-				return
+	effects, err := db.New(pool).ListRunEffectsByRun(ctx, runID)
+	require.NoError(t, err)
+	require.Condition(t, func() bool {
+		for _, effect := range effects {
+			if effect.EffectType == runtime.RunEffectTypeTaskCallback {
+				return true
 			}
-		case <-deadline:
-			t.Fatal("expected run.completed task callback trigger")
 		}
-	}
+		return false
+	}, "terminal finalization must enqueue a durable task callback effect")
 }
 
 func TestRun_WithTaskRequirementEvidence(t *testing.T) {
@@ -630,8 +819,8 @@ func TestRun_WithTaskRequirementEvidence(t *testing.T) {
 
 	var taskID uuid.UUID
 	err = pool.QueryRow(ctx,
-		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
-		 VALUES ($1, '做 SQL 查询和数据分析', ARRAY['data/sql-query','data/analysis']::text[], ARRAY['run_agent']::text[], ARRAY[$2]::uuid[])
+		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids, chosen_agent_id, chosen_at)
+		 VALUES ($1, '做 SQL 查询和数据分析', ARRAY['data/sql-query','data/analysis']::text[], ARRAY['run_agent']::text[], ARRAY[$2]::uuid[], $2, NOW())
 		 RETURNING id`,
 		userID, agentID).Scan(&taskID)
 	require.NoError(t, err)
@@ -648,6 +837,13 @@ func TestRun_WithTaskRequirementEvidence(t *testing.T) {
 	assert.Equal(t, []string{"data/analysis"}, resp.RequirementEvidence.MissingSkillIDs)
 	assert.Equal(t, []string{"run_agent"}, resp.RequirementEvidence.UsedMCPTools)
 	assert.Empty(t, resp.RequirementEvidence.MissingMCPTools)
+	var completionRunID uuid.UUID
+	var completionSummary string
+	require.NoError(t, pool.QueryRow(ctx,
+		`SELECT completion_run_id, completion_summary FROM task_queries WHERE id = $1`, taskID,
+	).Scan(&completionRunID, &completionSummary))
+	require.Equal(t, mustParseUUID(t, resp.RunID), completionRunID)
+	require.Equal(t, "done", completionSummary)
 
 	got, err := svc.GetRun(ctx, userID, mustParseUUID(t, resp.RunID))
 	require.NoError(t, err)
@@ -656,9 +852,10 @@ func TestRun_WithTaskRequirementEvidence(t *testing.T) {
 
 	events := readRunEvents(t, pool, mustParseUUID(t, resp.RunID))
 	require.Len(t, events, 5)
-	assert.Equal(t, "run.requirements.snapshotted", events[2].EventType)
-	assert.Equal(t, taskID.String(), events[2].Payload["task_id"])
-	assert.Equal(t, "partial", events[2].Payload["coverage_status"])
+	assert.Equal(t, "run.requirements.snapshotted", events[1].EventType)
+	assert.Equal(t, taskID.String(), events[1].Payload["task_id"])
+	assert.Equal(t, "partial", events[1].Payload["coverage_status"])
+	assert.Equal(t, "run.started", events[2].EventType)
 	assert.Equal(t, "run.status.changed", events[3].EventType)
 	assert.Equal(t, "run.completed", events[4].EventType)
 }
@@ -882,6 +1079,9 @@ func TestStartRun_ReturnsRunningAndCompletesInBackground(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "running", running.Status)
 
+	require.Eventually(t, func() bool {
+		return len(readRunEvents(t, pool, runID)) >= 2
+	}, time.Second, 10*time.Millisecond)
 	events := readRunEvents(t, pool, runID)
 	require.Len(t, events, 2)
 	assert.Equal(t, "run.created", events[0].EventType)
@@ -1084,11 +1284,25 @@ func TestRun_EndpointTimeout(t *testing.T) {
 	resp, err := svc.Run(ctx, userID, makeRunReq(agentID, nil), "")
 	require.NoError(t, err)
 	require.NotNil(t, resp)
-	assert.Equal(t, "timeout", resp.Status)
+	assert.Equal(t, "failed", resp.Status)
 
-	run := readRun(t, pool, mustParseUUID(t, resp.RunID))
+	runID := mustParseUUID(t, resp.RunID)
+	run := readRun(t, pool, runID)
 	require.NotNil(t, run.ErrorCode)
-	assert.Equal(t, "TIMEOUT", *run.ErrorCode)
+	assert.Equal(t, "ENDPOINT_RESULT_UNKNOWN", *run.ErrorCode)
+	var maxAttempts int32
+	require.NoError(t, pool.QueryRow(ctx, `SELECT max_attempts FROM runs WHERE id = $1`, runID).Scan(&maxAttempts))
+	assert.Equal(t, int32(1), maxAttempts)
+	var attempts int
+	var outcome, attemptErrorCode string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT COUNT(*)::int, max(outcome), max(error_code)
+		FROM run_attempts WHERE run_id = $1`, runID).Scan(
+		&attempts, &outcome, &attemptErrorCode,
+	))
+	assert.Equal(t, 1, attempts)
+	assert.Equal(t, "non_retryable_failure", outcome)
+	assert.Equal(t, "ENDPOINT_RESULT_UNKNOWN", attemptErrorCode)
 
 	assertRunAccountingConsistent(t, pool)
 }
@@ -1259,7 +1473,8 @@ func TestCancelRun_MarksRunningRunCanceledAndEmitsEvent(t *testing.T) {
 
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
-	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
+	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"ok":true}}`))
+	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
 	runID := insertRunningRun(t, pool, userID, agentID)
 
 	resp, err := svc.CancelRun(ctx, userID, runID)
@@ -1305,298 +1520,16 @@ func TestCancelRun_RejectsNonOwnerMissingAndFinishedRuns(t *testing.T) {
 	_, err = svc.CancelRun(ctx, userID, uuid.New())
 	assertHTTPStatus(t, err, http.StatusNotFound)
 
-	finishedRunID := insertRunningRun(t, pool, userID, agentID)
-	_, err = pool.Exec(ctx,
-		`UPDATE runs SET status='success', output='{"ok":true}'::jsonb, finished_at=NOW() WHERE id=$1`,
-		finishedRunID)
+	finished, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"done": true}), "api")
 	require.NoError(t, err)
+	finishedRunID := mustParseUUID(t, finished.RunID)
 	_, err = svc.CancelRun(ctx, userID, finishedRunID)
 	assertHTTPStatus(t, err, http.StatusConflict)
-}
-
-func TestReportRunEvent_HappyPath(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	event, err := svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.message.delta",
-		Payload:   map[string]interface{}{"text": "working"},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, event)
-	assert.Equal(t, int32(1), event.Sequence)
-	assert.Equal(t, "run.message.delta", event.EventType)
-	assert.Equal(t, "working", event.Payload["text"])
-
-	events := readRunEvents(t, pool, runID)
-	require.Len(t, events, 1)
-	assert.Equal(t, "run.message.delta", events[0].EventType)
-	assert.Equal(t, "working", events[0].Payload["text"])
-
-	messages, err := svc.ListRunMessages(ctx, userID, runID)
-	require.NoError(t, err)
-	require.Len(t, messages, 1)
-	assert.Equal(t, "agent", messages[0].Role)
-	assert.Equal(t, "working", messages[0].Content)
-	require.NotNil(t, messages[0].EventSequence)
-	assert.Equal(t, int32(1), *messages[0].EventSequence)
-}
-
-func TestReportRunEvent_PersistsArtifactDelta(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	event, err := svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.artifact.delta",
-		Payload: map[string]interface{}{
-			"artifact_id":   "report",
-			"title":         "Report Stream",
-			"artifact_type": "text",
-			"append":        true,
-			"last_chunk":    false,
-			"parts": []interface{}{
-				map[string]interface{}{"type": "text", "text": "hello "},
-			},
-		},
-	})
-	require.NoError(t, err)
-	require.NotNil(t, event)
-	assert.Equal(t, int32(1), event.Sequence)
-
-	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.artifact.delta",
-		Payload: map[string]interface{}{
-			"artifact_id":   "report",
-			"title":         "Report Stream",
-			"artifact_type": "text",
-			"append":        true,
-			"last_chunk":    true,
-			"parts": []interface{}{
-				map[string]interface{}{"type": "text", "text": "world"},
-			},
-		},
-	})
-	require.NoError(t, err)
-
-	artifacts, err := svc.ListRunArtifacts(ctx, userID, runID)
-	require.NoError(t, err)
-	require.Len(t, artifacts, 1)
-	assert.Equal(t, "report", artifacts[0].SourceArtifactID)
-	assert.Equal(t, "Report Stream", artifacts[0].Title)
-	assert.Equal(t, "text", artifacts[0].ArtifactType)
-	assert.Equal(t, "hello world", artifacts[0].Content["text"])
-	assert.Equal(t, true, artifacts[0].Content["complete"])
-	assert.Equal(t, float64(1), artifacts[0].Content["last_chunk_index"])
-
-	chunks, err := db.New(pool).ListRunArtifactChunksByRun(ctx, runID)
-	require.NoError(t, err)
-	require.Len(t, chunks, 2)
-	assert.Equal(t, int32(0), chunks[0].ChunkIndex)
-	assert.Equal(t, int32(1), chunks[1].ChunkIndex)
-	require.NotNil(t, chunks[1].EventSequence)
-	assert.Equal(t, int32(2), *chunks[1].EventSequence)
-	assert.True(t, chunks[1].LastChunk)
-}
-
-func TestReportRunEvent_VerifiesArtifactChunkChecksum(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	parts := []interface{}{
-		map[string]interface{}{"type": "text", "text": "checksum chunk"},
-	}
-	partsRaw, err := json.Marshal(parts)
-	require.NoError(t, err)
-	expectedSHA := sha256String(partsRaw)
-
-	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.artifact.delta",
-		Payload: map[string]interface{}{
-			"artifact_id":   "checksum-report",
-			"title":         "Checksum Report",
-			"artifact_type": "text",
-			"parts":         parts,
-			"parts_sha256":  expectedSHA,
-			"last_chunk":    true,
-		},
-	})
-	require.NoError(t, err)
-
-	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.artifact.delta",
-		Payload: map[string]interface{}{
-			"artifact_id":   "checksum-report",
-			"title":         "Checksum Report",
-			"artifact_type": "text",
-			"append":        true,
-			"parts": []interface{}{
-				map[string]interface{}{"type": "text", "text": "tampered"},
-			},
-			"parts_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-			"last_chunk":   true,
-		},
-	})
-	require.NoError(t, err)
-
-	chunks, err := db.New(pool).ListRunArtifactChunksByRun(ctx, runID)
-	require.NoError(t, err)
-	require.Len(t, chunks, 2)
-	require.NotNil(t, chunks[0].PartsSha256)
-	require.NotNil(t, chunks[0].PayloadSha256)
-	require.NotNil(t, chunks[0].DeclaredSha256)
-	assert.Equal(t, expectedSHA, *chunks[0].PartsSha256)
-	assert.Equal(t, expectedSHA, *chunks[0].DeclaredSha256)
-	assert.Equal(t, "verified", chunks[0].ChecksumStatus)
-	require.NotNil(t, chunks[1].DeclaredSha256)
-	assert.Equal(t, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", *chunks[1].DeclaredSha256)
-	assert.Equal(t, "mismatch", chunks[1].ChecksumStatus)
-
-	artifacts, err := svc.ListRunArtifacts(ctx, userID, runID)
-	require.NoError(t, err)
-	require.Len(t, artifacts, 1)
-	require.Len(t, artifacts[0].Content["chunks"], 2)
-	assert.Equal(t, "mismatch", artifacts[0].Content["last_checksum_status"])
-}
-
-func TestReportRunEvent_PersistsFilePartMetadata(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	_, err := svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.artifact.delta",
-		Payload: map[string]interface{}{
-			"artifact_id":   "file-report",
-			"title":         "File Report",
-			"artifact_type": "file",
-			"append":        true,
-			"last_chunk":    true,
-			"parts": []interface{}{
-				map[string]interface{}{
-					"kind": "file",
-					"file": map[string]interface{}{
-						"uri":       "https://files.example/from-delta.pdf",
-						"name":      "from-delta.pdf",
-						"mimeType":  "application/pdf",
-						"sha256":    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-						"sizeBytes": float64(4096),
-					},
-				},
-			},
-		},
-	})
-	require.NoError(t, err)
-
-	artifacts, err := svc.ListRunArtifacts(ctx, userID, runID)
-	require.NoError(t, err)
-	require.Len(t, artifacts, 1)
-	assert.Equal(t, "file-report", artifacts[0].SourceArtifactID)
-	assert.Equal(t, "file", artifacts[0].ArtifactType)
-	assert.Equal(t, "application/pdf", artifacts[0].MimeType)
-	assert.Equal(t, "https://files.example/from-delta.pdf", artifacts[0].FileURI)
-	assert.Equal(t, "from-delta.pdf", artifacts[0].FileName)
-	assert.Equal(t, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789", artifacts[0].FileSHA256)
-	require.NotNil(t, artifacts[0].FileSizeBytes)
-	assert.Equal(t, int64(4096), *artifacts[0].FileSizeBytes)
-	assert.Equal(t, "https://files.example/from-delta.pdf", artifacts[0].Content["file_uri"])
 }
 
 func sha256String(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
-}
-
-func TestReportRunEvent_RejectsInvalidToken(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	_, err := svc.ReportRunEvent(ctx, runID, "wrong-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.message.delta",
-		Payload:   map[string]interface{}{"text": "working"},
-	})
-	assertHTTPStatus(t, err, http.StatusUnauthorized)
-	assert.Empty(t, readRunEvents(t, pool, runID))
-}
-
-func TestReportRunEvent_RejectsFinishedRun(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-	_, err := pool.Exec(ctx, `UPDATE runs SET status='success', finished_at=NOW() WHERE id=$1`, runID)
-	require.NoError(t, err)
-
-	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.message.delta",
-		Payload:   map[string]interface{}{"text": "too late"},
-	})
-	assertHTTPStatus(t, err, http.StatusConflict)
-	assert.Empty(t, readRunEvents(t, pool, runID))
-}
-
-func TestReportRunEvent_RejectsUnsupportedEventType(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	_, err := svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{
-		EventType: "run.debug.raw",
-		Payload:   map[string]interface{}{"text": "debug"},
-	})
-	assertHTTPStatus(t, err, http.StatusUnprocessableEntity)
-	assert.Empty(t, readRunEvents(t, pool, runID))
 }
 
 func TestGetRun_NotOwner(t *testing.T) {
@@ -1687,69 +1620,3 @@ func TestRunReadEndpointsRejectMissingInvalidAndNonOwner(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, messages)
 }
-
-func TestReportRunEvent_RejectsRequestAndLookupEdges(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	agentID := insertAgent(t, pool, creatorID, "https://example.com/agent", 10, "approved")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	_, err := svc.ReportRunEvent(ctx, runID, "agent-secret", nil)
-	assertHTTPStatus(t, err, http.StatusBadRequest)
-	_, err = svc.ReportRunEvent(ctx, runID, " ", &runtime.ReportRunEventRequest{EventType: "run.message.delta"})
-	assertHTTPStatus(t, err, http.StatusUnauthorized)
-	_, err = svc.ReportRunEvent(ctx, uuid.New(), "agent-secret", &runtime.ReportRunEventRequest{EventType: "run.message.delta"})
-	assertHTTPStatus(t, err, http.StatusNotFound)
-	_, err = svc.ReportRunEvent(ctx, runID, "agent-secret", &runtime.ReportRunEventRequest{EventType: "run.message.delta"})
-	assertHTTPStatus(t, err, http.StatusUnauthorized)
-	assert.Empty(t, readRunEvents(t, pool, runID))
-}
-
-func TestRunTriggersWebhookAndDeliveryForTerminalRuns(t *testing.T) {
-	pool := setupTestDB(t)
-	svc := newTestService(t, pool)
-	webhookRecorder := &recordingRuntimeWebhookEnqueuer{deliveries: make(chan recordedWebhookDelivery, 4)}
-	deliveryRecorder := &recordingRuntimeDeliveryEnqueuer{runs: make(chan uuid.UUID, 4)}
-	svc.SetWebhookEnqueuer(webhookRecorder)
-	svc.SetDeliveryEnqueuer(deliveryRecorder)
-	ctx := context.Background()
-
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	successEndpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"answer":"ok"}}`))
-	successAgentID := insertAgent(t, pool, creatorID, successEndpoint, 10, "approved")
-
-	successResp, err := svc.Run(ctx, userID, makeRunReq(successAgentID, map[string]any{"q": "success"}), "")
-	require.NoError(t, err)
-	require.Equal(t, "success", successResp.Status)
-	successRunID := mustParseUUID(t, successResp.RunID)
-	successWebhook := waitRecordedWebhookDelivery(t, webhookRecorder.deliveries)
-	assert.Equal(t, successRunID, successWebhook.RunID)
-	assert.NotEmpty(t, successWebhook.AgentSlug)
-	require.NotNil(t, successWebhook.Output)
-	assert.Equal(t, "ok", successWebhook.Output["answer"])
-	assert.Equal(t, successRunID, waitRecordedDelivery(t, deliveryRecorder.runs))
-
-	failureEndpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusBadGateway, `{"error":{"code":"AGENT_FAIL","message":"boom"}}`))
-	failureAgentID := insertAgent(t, pool, creatorID, failureEndpoint, 10, "approved")
-
-	failureResp, err := svc.Run(ctx, userID, makeRunReq(failureAgentID, map[string]any{"q": "fail"}), "")
-	require.NoError(t, err)
-	require.Equal(t, "failed", failureResp.Status)
-	failureRunID := mustParseUUID(t, failureResp.RunID)
-	failureWebhook := waitRecordedWebhookDelivery(t, webhookRecorder.deliveries)
-	assert.Equal(t, failureRunID, failureWebhook.RunID)
-	assert.NotEmpty(t, failureWebhook.AgentSlug)
-	assert.Nil(t, failureWebhook.Output)
-	assert.Equal(t, failureRunID, waitRecordedDelivery(t, deliveryRecorder.runs))
-}
-
-// ensureMockServerSilenced 让 httptest 的默认 ErrorLog 别打扰测试输出。
-// 仅在测试包初始化阶段设置一次。预留 hook，不强制依赖。
-//
-// nolint:unused — go test 在没有 -v 时也会显示这种，作为预留 hook。
-var _ = func() error { return nil }

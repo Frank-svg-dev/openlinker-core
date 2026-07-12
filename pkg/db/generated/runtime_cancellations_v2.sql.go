@@ -120,6 +120,47 @@ func (q *Queries) FindNextDueRuntimeV2Cancellation(ctx context.Context, commandD
 	return i, err
 }
 
+const findNextDueRuntimeV2CoreCancellation = `-- name: FindNextDueRuntimeV2CoreCancellation :one
+SELECT r.id AS run_id,
+       r.agent_id,
+       c.id AS cancellation_id,
+       c.target_attempt_id
+FROM runs r
+JOIN run_cancellations c
+  ON c.run_id = r.id
+ AND c.id = r.cancel_request_id
+JOIN run_attempts a
+  ON a.run_id = r.id
+ AND a.id = c.target_attempt_id
+WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'canceled'
+  AND r.dispatch_state = 'terminal'
+  AND r.cancel_state = c.state
+  AND c.state IN ('requested', 'delivered', 'stopping')
+  AND c.requested_at
+      + ($1::bigint * INTERVAL '1 millisecond')
+      <= clock_timestamp()
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL
+ORDER BY c.requested_at ASC, c.id ASC
+LIMIT 1`
+
+type FindNextDueRuntimeV2CoreCancellationRow struct {
+	RunID           uuid.UUID `db:"run_id" json:"run_id"`
+	AgentID         uuid.UUID `db:"agent_id" json:"agent_id"`
+	CancellationID  uuid.UUID `db:"cancellation_id" json:"cancellation_id"`
+	TargetAttemptID uuid.UUID `db:"target_attempt_id" json:"target_attempt_id"`
+}
+
+func (q *Queries) FindNextDueRuntimeV2CoreCancellation(ctx context.Context, commandDeadlineMs int64) (FindNextDueRuntimeV2CoreCancellationRow, error) {
+	row := q.db.QueryRow(ctx, findNextDueRuntimeV2CoreCancellation, commandDeadlineMs)
+	var i FindNextDueRuntimeV2CoreCancellationRow
+	err := row.Scan(&i.RunID, &i.AgentID, &i.CancellationID, &i.TargetAttemptID)
+	return i, err
+}
+
 const lockRuntimeSessionForCancellationReap = `-- name: LockRuntimeSessionForCancellationReap :one
 SELECT runtime_session_id
 FROM runtime_sessions
@@ -204,6 +245,62 @@ func (q *Queries) LockDueRuntimeV2CancellationRun(ctx context.Context, arg LockD
 		arg.RuntimeSessionID, arg.NodeID, arg.CommandDeadlineMs,
 	)
 	var i LockDueRuntimeV2CancellationRunRow
+	err := row.Scan(&i.RunID, &i.AgentID, &i.CancellationID, &i.TargetAttemptID, &i.DatabaseNow)
+	return i, err
+}
+
+const lockDueRuntimeV2CoreCancellationRun = `-- name: LockDueRuntimeV2CoreCancellationRun :one
+SELECT r.id AS run_id,
+       r.agent_id,
+       c.id AS cancellation_id,
+       c.target_attempt_id,
+       clock_timestamp() AS database_now
+FROM runs r
+JOIN run_cancellations c
+  ON c.run_id = r.id
+ AND c.id = r.cancel_request_id
+JOIN run_attempts a
+  ON a.run_id = r.id
+ AND a.id = c.target_attempt_id
+WHERE r.id = $1
+  AND c.id = $2
+  AND a.id = $3
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'canceled'
+  AND r.dispatch_state = 'terminal'
+  AND r.cancel_state = c.state
+  AND c.state IN ('requested', 'delivered', 'stopping')
+  AND c.requested_at
+      + ($4::bigint * INTERVAL '1 millisecond')
+      <= clock_timestamp()
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL
+ORDER BY c.requested_at ASC, c.id ASC
+LIMIT 1
+FOR UPDATE OF r`
+
+type LockDueRuntimeV2CoreCancellationRunParams struct {
+	RunID             uuid.UUID `db:"run_id" json:"run_id"`
+	CancellationID    uuid.UUID `db:"cancellation_id" json:"cancellation_id"`
+	TargetAttemptID   uuid.UUID `db:"target_attempt_id" json:"target_attempt_id"`
+	CommandDeadlineMs int64     `db:"command_deadline_ms" json:"command_deadline_ms"`
+}
+
+type LockDueRuntimeV2CoreCancellationRunRow struct {
+	RunID           uuid.UUID `db:"run_id" json:"run_id"`
+	AgentID         uuid.UUID `db:"agent_id" json:"agent_id"`
+	CancellationID  uuid.UUID `db:"cancellation_id" json:"cancellation_id"`
+	TargetAttemptID uuid.UUID `db:"target_attempt_id" json:"target_attempt_id"`
+	DatabaseNow     time.Time `db:"database_now" json:"database_now"`
+}
+
+func (q *Queries) LockDueRuntimeV2CoreCancellationRun(ctx context.Context, arg LockDueRuntimeV2CoreCancellationRunParams) (LockDueRuntimeV2CoreCancellationRunRow, error) {
+	row := q.db.QueryRow(ctx, lockDueRuntimeV2CoreCancellationRun,
+		arg.RunID, arg.CancellationID, arg.TargetAttemptID, arg.CommandDeadlineMs,
+	)
+	var i LockDueRuntimeV2CoreCancellationRunRow
 	err := row.Scan(&i.RunID, &i.AgentID, &i.CancellationID, &i.TargetAttemptID, &i.DatabaseNow)
 	return i, err
 }
@@ -460,12 +557,12 @@ WHERE a.run_id = $1
   AND EXISTS (
       SELECT 1
       FROM runs r
-      JOIN run_cancellations c ON c.run_id = r.id
+      JOIN run_cancellations c ON c.run_id = r.id AND c.id = r.cancel_request_id
       WHERE r.id = a.run_id
         AND r.runtime_contract_id = 'openlinker.runtime.v2'
-        AND r.status = 'running'
-        AND r.dispatch_state = 'executing'
-        AND r.active_attempt_id = a.id
+        AND r.status = 'canceled'
+        AND r.dispatch_state = 'terminal'
+        AND r.latest_attempt_id = a.id
         AND c.target_attempt_id = a.id
         AND c.state = 'stopped'
   )
@@ -481,6 +578,48 @@ type FinishRuntimeV2CoreCanceledAttemptParams struct {
 func (q *Queries) FinishRuntimeV2CoreCanceledAttempt(ctx context.Context, arg FinishRuntimeV2CoreCanceledAttemptParams) (RunAttempt, error) {
 	var attempt RunAttempt
 	err := scanRunAttempt(q.db.QueryRow(ctx, finishRuntimeV2CoreCanceledAttempt,
+		arg.RunID, arg.AttemptID, arg.LeaseID, arg.FencingToken,
+	), &attempt)
+	return attempt, err
+}
+
+const finishRuntimeV2CoreUnconfirmedAttempt = `-- name: FinishRuntimeV2CoreUnconfirmedAttempt :one
+UPDATE run_attempts a
+SET finished_at = clock_timestamp(), outcome = 'canceled',
+    error_code = 'CANCEL_UNCONFIRMED', error_detail_redacted = NULL
+WHERE a.run_id = $1
+  AND a.id = $2
+  AND a.lease_id = $3
+  AND a.fencing_token = $4
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL
+  AND EXISTS (
+      SELECT 1
+      FROM runs r
+      JOIN run_cancellations c ON c.run_id = r.id AND c.id = r.cancel_request_id
+      WHERE r.id = a.run_id
+        AND r.runtime_contract_id = 'openlinker.runtime.v2'
+        AND r.status = 'canceled'
+        AND r.dispatch_state = 'terminal'
+        AND r.latest_attempt_id = a.id
+        AND c.target_attempt_id = a.id
+        AND c.state = 'unconfirmed'
+        AND c.error_code = 'CANCEL_UNCONFIRMED'
+  )
+RETURNING *`
+
+type FinishRuntimeV2CoreUnconfirmedAttemptParams struct {
+	RunID        uuid.UUID `db:"run_id" json:"run_id"`
+	AttemptID    uuid.UUID `db:"attempt_id" json:"attempt_id"`
+	LeaseID      uuid.UUID `db:"lease_id" json:"lease_id"`
+	FencingToken int64     `db:"fencing_token" json:"fencing_token"`
+}
+
+func (q *Queries) FinishRuntimeV2CoreUnconfirmedAttempt(ctx context.Context, arg FinishRuntimeV2CoreUnconfirmedAttemptParams) (RunAttempt, error) {
+	var attempt RunAttempt
+	err := scanRunAttempt(q.db.QueryRow(ctx, finishRuntimeV2CoreUnconfirmedAttempt,
 		arg.RunID, arg.AttemptID, arg.LeaseID, arg.FencingToken,
 	), &attempt)
 	return attempt, err

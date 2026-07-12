@@ -66,6 +66,7 @@ func TestRegistrationService_RegisterAgentViaToken_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, resp.Agent.ID)
 	require.True(t, strings.HasPrefix(resp.Agent.Slug, "self-registered-translator-"))
+	require.Equal(t, "private", resp.Agent.Visibility)
 	require.Equal(t, "active_runtime", resp.AgentToken.Status)
 	require.Empty(t, resp.AgentToken.PlaintextToken, "registration response must not mint a second plaintext token")
 	require.NotNil(t, resp.AgentToken.AgentID)

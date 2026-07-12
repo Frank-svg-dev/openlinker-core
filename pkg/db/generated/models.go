@@ -795,9 +795,7 @@ type AgentSkill struct {
 //
 // query 是用户自然语言描述；parsed_skills 是关联/解析出的 skill_id 列表；mcp_tools 是任务关联的 MCP 工具名。
 // recommended_agent_ids 按推荐顺序保存（top 3）；chosen_agent_id 记录用户最终选择（可空）。
-// claimed_* / completion_* 让任务广场形成"接单 -> 运行 -> 结果回填"的最小闭环。
-// delivery_* / accepted_at / revision_* 记录任务交付、验收和修订状态。
-// visibility / public_summary / published_at 区分仅创建者可见的任务和已发布公开摘要的任务。
+// completion_* records the successful Run linked to this private Task.
 type TaskQuery struct {
 	ID                  uuid.UUID   `db:"id" json:"id"`
 	UserID              uuid.UUID   `db:"user_id" json:"user_id"`
@@ -807,22 +805,9 @@ type TaskQuery struct {
 	RecommendedAgentIDs []uuid.UUID `db:"recommended_agent_ids" json:"recommended_agent_ids"`
 	ChosenAgentID       *uuid.UUID  `db:"chosen_agent_id" json:"chosen_agent_id"`
 	ChosenAt            *time.Time  `db:"chosen_at" json:"chosen_at"`
-	ClaimedAgentID      *uuid.UUID  `db:"claimed_agent_id" json:"claimed_agent_id"`
-	ClaimedByUserID     *uuid.UUID  `db:"claimed_by_user_id" json:"claimed_by_user_id"`
-	ClaimedAt           *time.Time  `db:"claimed_at" json:"claimed_at"`
-	ClaimRunID          *uuid.UUID  `db:"claim_run_id" json:"claim_run_id"`
 	CompletedAt         *time.Time  `db:"completed_at" json:"completed_at"`
 	CompletionSummary   *string     `db:"completion_summary" json:"completion_summary"`
 	CompletionRunID     *uuid.UUID  `db:"completion_run_id" json:"completion_run_id"`
-	DeliveryStatus      string      `db:"delivery_status" json:"delivery_status"`
-	DeliveryVisibility  string      `db:"delivery_visibility" json:"delivery_visibility"`
-	DeliveryArtifact    []byte      `db:"delivery_artifact" json:"delivery_artifact"`
-	AcceptedAt          *time.Time  `db:"accepted_at" json:"accepted_at"`
-	RevisionRequestedAt *time.Time  `db:"revision_requested_at" json:"revision_requested_at"`
-	RevisionNote        *string     `db:"revision_note" json:"revision_note"`
-	Visibility          string      `db:"visibility" json:"visibility"`
-	PublicSummary       *string     `db:"public_summary" json:"public_summary"`
-	PublishedAt         *time.Time  `db:"published_at" json:"published_at"`
 	CreatedAt           time.Time   `db:"created_at" json:"created_at"`
 }
 

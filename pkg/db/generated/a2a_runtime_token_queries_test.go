@@ -9,7 +9,6 @@ func TestRuntimeTokenReadsAndTouchesRejectExpiredCredentials(t *testing.T) {
 	queries := map[string]string{
 		"auth lookup": listActiveAgentRuntimeTokensByPrefix,
 		"touch":       touchAgentRuntimeToken,
-		"presence":    hasRecentRuntimePullToken,
 	}
 	for name, query := range queries {
 		if !strings.Contains(query, "expires_at IS NULL OR") ||

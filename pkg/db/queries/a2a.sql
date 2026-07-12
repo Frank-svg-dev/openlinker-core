@@ -19,18 +19,6 @@ WHERE id = $1
   AND revoked_at IS NULL
   AND (expires_at IS NULL OR expires_at > clock_timestamp());
 
--- name: HasRecentRuntimePullToken :one
-SELECT EXISTS(
-    SELECT 1
-    FROM agent_tokens
-    WHERE agent_id = $1
-      AND revoked_at IS NULL
-      AND status = 'active_runtime'
-      AND (expires_at IS NULL OR expires_at > clock_timestamp())
-      AND 'agent:pull' = ANY(scopes)
-      AND last_used_at >= NOW() - INTERVAL '5 minutes'
-)::bool AS has_recent_runtime_pull_token;
-
 -- name: GetAgentCallPolicy :one
 SELECT COALESCE(
     (SELECT callable_by FROM agent_call_policies WHERE agent_id = $1),

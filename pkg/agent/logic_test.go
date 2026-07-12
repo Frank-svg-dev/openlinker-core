@@ -165,46 +165,43 @@ func TestNormalizeConnectionSettings(t *testing.T) {
 			wantTool: "search",
 		},
 		{
-			name:        "runtime pull fills endpoint",
-			slug:        "pull-agent",
-			mode:        ConnectionModeRuntimePull,
-			wantMode:    ConnectionModeRuntimePull,
-			wantURL:     runtimePullEndpointPrefix + "pull-agent",
+			name:        "agent node fills endpoint",
+			slug:        "node-agent",
+			mode:        ConnectionModeAgentNode,
+			wantMode:    ConnectionModeAgentNode,
+			wantURL:     agentNodeEndpointPrefix + "node-agent",
 			wantToolNil: true,
 		},
 		{
-			name:        "runtime pull replaces non canonical endpoint",
-			slug:        "pull-agent",
+			name:        "agent node replaces non canonical endpoint",
+			slug:        "node-agent",
 			endpoint:    "https://example.com/ignored",
-			mode:        ConnectionModeRuntimePull,
-			wantMode:    ConnectionModeRuntimePull,
-			wantURL:     runtimePullEndpointPrefix + "pull-agent",
+			mode:        ConnectionModeAgentNode,
+			wantMode:    ConnectionModeAgentNode,
+			wantURL:     agentNodeEndpointPrefix + "node-agent",
 			wantToolNil: true,
 		},
 		{
-			name:        "runtime pull preserves canonical endpoint",
-			slug:        "pull-agent",
-			endpoint:    runtimePullEndpointPrefix + "custom",
-			mode:        ConnectionModeRuntimePull,
-			wantMode:    ConnectionModeRuntimePull,
-			wantURL:     runtimePullEndpointPrefix + "custom",
+			name:        "agent node preserves canonical endpoint",
+			slug:        "node-agent",
+			endpoint:    agentNodeEndpointPrefix + "custom",
+			mode:        ConnectionModeAgentNode,
+			wantMode:    ConnectionModeAgentNode,
+			wantURL:     agentNodeEndpointPrefix + "custom",
 			wantToolNil: true,
 		},
 		{
-			name:        "runtime ws fills endpoint",
-			slug:        "ws-agent",
-			mode:        ConnectionModeRuntimeWS,
-			wantMode:    ConnectionModeRuntimeWS,
-			wantURL:     runtimeWSEndpointPrefix + "ws-agent",
+			name:        "retired runtime pull is rejected",
+			slug:        "old-pull-agent",
+			mode:        "runtime_pull",
+			wantHTTP:    http.StatusUnprocessableEntity,
 			wantToolNil: true,
 		},
 		{
-			name:        "runtime ws replaces non canonical endpoint",
-			slug:        "ws-agent",
-			endpoint:    "https://example.com/ignored",
-			mode:        ConnectionModeRuntimeWS,
-			wantMode:    ConnectionModeRuntimeWS,
-			wantURL:     runtimeWSEndpointPrefix + "ws-agent",
+			name:        "retired runtime websocket is rejected",
+			slug:        "old-ws-agent",
+			mode:        "runtime_ws",
+			wantHTTP:    http.StatusUnprocessableEntity,
 			wantToolNil: true,
 		},
 		{
@@ -432,7 +429,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	if unreachableAvailability.Status != "unreachable" || unreachableAvailability.Label != "不可达" || unreachableAvailability.LastSuccessfulRunAt != nil {
 		t.Fatalf("unexpected unreachable availability: %#v", unreachableAvailability)
 	}
-	if !isQueuedRuntimeConnectionMode(ConnectionModeRuntimePull) || !isQueuedRuntimeConnectionMode(ConnectionModeRuntimeWS) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
+	if !isQueuedRuntimeConnectionMode(ConnectionModeAgentNode) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
 		t.Fatalf("queued runtime connection mode detection failed")
 	}
 
@@ -441,8 +438,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 		wantSignal string
 	}{
 		{mode: ConnectionModeDirectHTTP, wantSignal: "direct_endpoint_probe_and_run_result"},
-		{mode: ConnectionModeRuntimePull, wantSignal: "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"},
-		{mode: ConnectionModeRuntimeWS, wantSignal: "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"},
+		{mode: ConnectionModeAgentNode, wantSignal: "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"},
 		{mode: ConnectionModeMCPServer, wantSignal: "mcp_tool_call_and_run_result"},
 	} {
 		if got := agentCardRuntimeExt(tc.mode); got.Adapter != "openlinker_a2a_proxy" || got.ConnectionMode != tc.mode || got.OnlineSignal != tc.wantSignal {
@@ -453,9 +449,9 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	if hints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeDirectHTTP}, ""); hints != nil {
 		t.Fatalf("empty dry-run error should not produce hints: %#v", hints)
 	}
-	pullHints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeRuntimePull}, "schema timeout")
-	if len(pullHints) < 4 || !strings.Contains(strings.Join(pullHints, " "), "schema") {
-		t.Fatalf("runtime pull hints did not include mode/schema/timeout help: %#v", pullHints)
+	nodeHints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeAgentNode}, "schema timeout")
+	if len(nodeHints) < 4 || !strings.Contains(strings.Join(nodeHints, " "), "schema") {
+		t.Fatalf("agent node hints did not include mode/schema/timeout help: %#v", nodeHints)
 	}
 	mcpHints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeMCPServer}, "bad")
 	if len(mcpHints) == 0 || !strings.Contains(mcpHints[0], "MCP") {

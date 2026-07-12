@@ -309,7 +309,7 @@ WHERE a.creator_id = $1
         AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
       )
     ) AND NOT (
-      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      a.connection_mode = 'agent_node'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
     ))
     OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
@@ -321,7 +321,7 @@ WHERE a.creator_id = $1
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     ))
@@ -453,7 +453,7 @@ WHERE a.creator_id = $1
         AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
       )
     ) AND NOT (
-      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      a.connection_mode = 'agent_node'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
     ))
     OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
@@ -465,7 +465,7 @@ WHERE a.creator_id = $1
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     ))
@@ -511,7 +511,7 @@ SELECT
       AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
     )
   ) AND NOT (
-    a.connection_mode IN ('runtime_pull', 'runtime_ws')
+    a.connection_mode = 'agent_node'
     AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
   ))::int AS online,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'public')::int AS public,
@@ -735,7 +735,6 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        u.display_name AS creator_name,
        COALESCE(task_stats.recommended_task_count, 0)::int AS recommended_task_count,
        COALESCE(task_stats.chosen_task_count, 0)::int AS chosen_task_count,
-       COALESCE(task_stats.claimed_task_count, 0)::int AS claimed_task_count,
        COALESCE(task_stats.completed_task_count, 0)::int AS completed_task_count,
        run_stats.last_run_at
 FROM agents a
@@ -744,12 +743,10 @@ LEFT JOIN LATERAL (
     SELECT
         COUNT(*) FILTER (WHERE a.id = ANY(t.recommended_agent_ids))::int AS recommended_task_count,
         COUNT(*) FILTER (WHERE t.chosen_agent_id = a.id)::int AS chosen_task_count,
-        COUNT(*) FILTER (WHERE t.claimed_agent_id = a.id)::int AS claimed_task_count,
-        COUNT(*) FILTER (WHERE t.claimed_agent_id = a.id AND t.completed_at IS NOT NULL)::int AS completed_task_count
+        COUNT(*) FILTER (WHERE t.chosen_agent_id = a.id AND t.completion_run_id IS NOT NULL)::int AS completed_task_count
     FROM task_queries t
     WHERE a.id = ANY(t.recommended_agent_ids)
        OR t.chosen_agent_id = a.id
-       OR t.claimed_agent_id = a.id
 ) task_stats ON TRUE
 LEFT JOIN LATERAL (
     SELECT MAX(started_at) AS last_run_at
@@ -785,7 +782,6 @@ type ListAdminAgentsRow struct {
 	CreatorName          string     `db:"creator_name" json:"creator_name"`
 	RecommendedTaskCount int32      `db:"recommended_task_count" json:"recommended_task_count"`
 	ChosenTaskCount      int32      `db:"chosen_task_count" json:"chosen_task_count"`
-	ClaimedTaskCount     int32      `db:"claimed_task_count" json:"claimed_task_count"`
 	CompletedTaskCount   int32      `db:"completed_task_count" json:"completed_task_count"`
 	LastRunAt            *time.Time `db:"last_run_at" json:"last_run_at"`
 }
@@ -826,7 +822,6 @@ func (q *Queries) ListAdminAgents(ctx context.Context, arg ListAdminAgentsParams
 			&r.CreatorName,
 			&r.RecommendedTaskCount,
 			&r.ChosenTaskCount,
-			&r.ClaimedTaskCount,
 			&r.CompletedTaskCount,
 			&r.LastRunAt,
 		); err != nil {
@@ -922,32 +917,20 @@ SELECT
   (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'pending') AS pending_agents,
   (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'certified') AS certified_agents,
   (SELECT COUNT(*)::int FROM task_queries) AS total_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE visibility = 'public') AS public_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE visibility = 'private') AS private_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0) AS open_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE completed_at IS NULL AND claimed_agent_id IS NOT NULL) AS claimed_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE completed_at IS NOT NULL) AS completed_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE delivery_status = 'accepted') AS accepted_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE delivery_status = 'revision_requested') AS revision_requested_tasks`
+  (SELECT COUNT(*)::int FROM task_queries WHERE completion_run_id IS NOT NULL) AS completed_tasks`
 
 type GetAdminSummaryRow struct {
-	TotalUsers             int32 `db:"total_users" json:"total_users"`
-	AdminUsers             int32 `db:"admin_users" json:"admin_users"`
-	CreatorUsers           int32 `db:"creator_users" json:"creator_users"`
-	VerifiedCreators       int32 `db:"verified_creators" json:"verified_creators"`
-	TotalAgents            int32 `db:"total_agents" json:"total_agents"`
-	ActiveAgents           int32 `db:"active_agents" json:"active_agents"`
-	DisabledAgents         int32 `db:"disabled_agents" json:"disabled_agents"`
-	PendingAgents          int32 `db:"pending_agents" json:"pending_agents"`
-	CertifiedAgents        int32 `db:"certified_agents" json:"certified_agents"`
-	TotalTasks             int32 `db:"total_tasks" json:"total_tasks"`
-	PublicTasks            int32 `db:"public_tasks" json:"public_tasks"`
-	PrivateTasks           int32 `db:"private_tasks" json:"private_tasks"`
-	OpenTasks              int32 `db:"open_tasks" json:"open_tasks"`
-	ClaimedTasks           int32 `db:"claimed_tasks" json:"claimed_tasks"`
-	CompletedTasks         int32 `db:"completed_tasks" json:"completed_tasks"`
-	AcceptedTasks          int32 `db:"accepted_tasks" json:"accepted_tasks"`
-	RevisionRequestedTasks int32 `db:"revision_requested_tasks" json:"revision_requested_tasks"`
+	TotalUsers       int32 `db:"total_users" json:"total_users"`
+	AdminUsers       int32 `db:"admin_users" json:"admin_users"`
+	CreatorUsers     int32 `db:"creator_users" json:"creator_users"`
+	VerifiedCreators int32 `db:"verified_creators" json:"verified_creators"`
+	TotalAgents      int32 `db:"total_agents" json:"total_agents"`
+	ActiveAgents     int32 `db:"active_agents" json:"active_agents"`
+	DisabledAgents   int32 `db:"disabled_agents" json:"disabled_agents"`
+	PendingAgents    int32 `db:"pending_agents" json:"pending_agents"`
+	CertifiedAgents  int32 `db:"certified_agents" json:"certified_agents"`
+	TotalTasks       int32 `db:"total_tasks" json:"total_tasks"`
+	CompletedTasks   int32 `db:"completed_tasks" json:"completed_tasks"`
 }
 
 func (q *Queries) GetAdminSummary(ctx context.Context) (GetAdminSummaryRow, error) {
@@ -964,13 +947,7 @@ func (q *Queries) GetAdminSummary(ctx context.Context) (GetAdminSummaryRow, erro
 		&r.PendingAgents,
 		&r.CertifiedAgents,
 		&r.TotalTasks,
-		&r.PublicTasks,
-		&r.PrivateTasks,
-		&r.OpenTasks,
-		&r.ClaimedTasks,
 		&r.CompletedTasks,
-		&r.AcceptedTasks,
-		&r.RevisionRequestedTasks,
 	)
 	return r, err
 }

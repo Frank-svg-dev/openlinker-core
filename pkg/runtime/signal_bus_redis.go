@@ -150,6 +150,13 @@ func (b *RedisSignalBus) Health(ctx context.Context) error {
 	return nil
 }
 
+func (b *RedisSignalBus) RuntimePresenceStore() (RuntimePresenceStore, error) {
+	if b == nil || runtimeRedisClientUnavailable(b.client) {
+		return nil, ErrRuntimeSignalBusUnavailable
+	}
+	return NewRedisRuntimePresenceStore(b.client, "")
+}
+
 func (b *RedisSignalBus) Close() error {
 	if b == nil {
 		return nil
@@ -204,3 +211,4 @@ func runtimeRedisClientUnavailable(client redis.UniversalClient) bool {
 }
 
 var _ RuntimeSignalBus = (*RedisSignalBus)(nil)
+var _ RuntimePresenceStoreProvider = (*RedisSignalBus)(nil)

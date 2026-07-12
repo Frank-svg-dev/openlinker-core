@@ -48,7 +48,7 @@ func TestHasActiveRuntimeV2SessionForAgentAgainstPostgres(t *testing.T) {
 			id, creator_id, slug, name, description, endpoint_url,
 			price_per_call_cents, connection_mode
 		) VALUES ($1, $2, $3, 'Signal Agent', 'Signal integration fixture',
-			'openlinker-runtime-pull://node', 0, 'runtime_pull')`,
+			'openlinker-agent-node://node', 0, 'agent_node')`,
 		agentID, userID, "signal-"+agentID.String()); err != nil {
 		t.Fatalf("insert agent: %v", err)
 	}
@@ -69,8 +69,8 @@ func TestHasActiveRuntimeV2SessionForAgentAgainstPostgres(t *testing.T) {
 			last_seen_at
 		) VALUES ($1, 'Signal Node', $2, $3, 'test-v2', 2,
 			'openlinker.runtime.v2',
-			'60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
-			$4, 4, clock_timestamp() - INTERVAL '16 seconds')`,
+			'857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
+			$4, 4, clock_timestamp() - INTERVAL '46 seconds')`,
 		nodeID, nodeID.String(), "sha256:"+nodeID.String(), features); err != nil {
 		t.Fatalf("insert node: %v", err)
 	}
@@ -82,8 +82,8 @@ func TestHasActiveRuntimeV2SessionForAgentAgainstPostgres(t *testing.T) {
 			features, capacity, status, attached_core_instance_id, heartbeat_at
 		) VALUES ($1, $2, $3, $4, 'worker-signal', 1, $5, 'test-v2', 2,
 			'openlinker.runtime.v2',
-			'60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
-			$6, 4, 'active', $7, clock_timestamp() - INTERVAL '16 seconds')`,
+			'857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f',
+			$6, 4, 'active', $7, clock_timestamp() - INTERVAL '46 seconds')`,
 		sessionID, nodeID, agentID, tokenID, nodeID.String(), features, coreID); err != nil {
 		t.Fatalf("insert session: %v", err)
 	}

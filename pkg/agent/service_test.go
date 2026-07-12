@@ -477,30 +477,30 @@ func TestSetVisibility_HappyPath(t *testing.T) {
 	require.Equal(t, "active", resp.LifecycleStatus)
 }
 
-func TestUpdateAgentRuntimeWSVisibilityAndDisabledBoundaries(t *testing.T) {
+func TestUpdateAgentNodeVisibilityAndDisabledBoundaries(t *testing.T) {
 	pool := setupTestDB(t)
 	svc := newTestService(t, pool)
 	ctx := context.Background()
 
 	ownerID := insertCreator(t, pool)
 	otherCreatorID := insertCreator(t, pool)
-	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("runtime-ws-update")))
+	created, err := svc.CreateAgent(ctx, ownerID, validCreateReq(freshSlug("agent-node-update")))
 	require.NoError(t, err)
 	agentID := uuid.MustParse(created.ID)
 
 	updated, err := svc.UpdateAgent(ctx, agentID, ownerID, &agent.UpdateAgentRequest{
-		Name:               "Runtime WS Agent",
-		Description:        "Updated to websocket runtime mode.",
-		EndpointURL:        "https://example.com/ignored-for-runtime-ws",
-		EndpointAuthHeader: "  Bearer websocket-secret  ",
+		Name:               "Agent Node",
+		Description:        "Updated to the transport-neutral Agent Node mode.",
+		EndpointURL:        "https://example.com/ignored-for-agent-node",
+		EndpointAuthHeader: "  Bearer node-secret  ",
 		PricePerCallCents:  321,
 		Tags:               []string{" Runtime ", "WS"},
 		Visibility:         "unlisted",
-		ConnectionMode:     "runtime_ws",
+		ConnectionMode:     "agent_node",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "runtime_ws", updated.ConnectionMode)
-	assert.Equal(t, "openlinker-runtime-ws://"+created.Slug, updated.EndpointURL)
+	assert.Equal(t, "agent_node", updated.ConnectionMode)
+	assert.Equal(t, "openlinker-agent-node://"+created.Slug, updated.EndpointURL)
 	assert.Equal(t, "unlisted", updated.Visibility)
 	assert.ElementsMatch(t, []string{"runtime", "ws"}, updated.Tags)
 	assert.Nil(t, updated.MCPToolName)

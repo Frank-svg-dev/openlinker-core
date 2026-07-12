@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -196,7 +197,7 @@ func TestRuntimeCancellationV2DeadlineReaperStopsDeliveryAndReleasesAtomically(t
 	require.Equal(t, cancellationState, runCancelState)
 }
 
-func TestRuntimeCancellationV2CoreAttemptEndsBeforePublicCancellation(t *testing.T) {
+func TestRuntimeCancellationV2CoreAttemptEndsOnlyAfterExecutionStops(t *testing.T) {
 	pool := setupTestDB(t)
 	requireRuntimeCancellationV2Schema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
@@ -210,7 +211,7 @@ func TestRuntimeCancellationV2CoreAttemptEndsBeforePublicCancellation(t *testing
 	)
 	require.NoError(t, err)
 	require.Equal(t, "canceled", result.Run.Status)
-	require.Equal(t, "stopped", result.Cancellation.State)
+	require.Equal(t, "requested", result.Cancellation.State)
 
 	var finishedAt *time.Time
 	var outcome *string
@@ -219,10 +220,54 @@ func TestRuntimeCancellationV2CoreAttemptEndsBeforePublicCancellation(t *testing
 		WHERE run_id = $1 AND id = $2`, fixture.identity.RunID, fixture.identity.AttemptID).Scan(
 		&finishedAt, &outcome,
 	))
-	require.NotNil(t, finishedAt)
-	require.NotNil(t, outcome)
-	require.Equal(t, "canceled", *outcome)
-	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 0)
+	require.Nil(t, finishedAt)
+	require.Nil(t, outcome)
+
+	coreIdentity := fixture.identity
+	coreIdentity.NodeID = nil
+	coreIdentity.WorkerID = nil
+	coreIdentity.RuntimeSessionID = nil
+	stopped, err := runtime.NewRuntimeCancellationCoordinator(pool).AcknowledgeCoreStopped(
+		context.Background(), fixture.coreInstanceID, coreIdentity,
+	)
+	require.NoError(t, err)
+	require.Equal(t, runtime.RuntimeCancelStopped, stopped.CancelState)
+	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
+}
+
+func TestRuntimeCancellationV2CoreCrashBecomesUnconfirmedAtDatabaseDeadline(t *testing.T) {
+	pool := setupTestDB(t)
+	requireRuntimeCancellationV2Schema(t, pool)
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	convertRuntimeCancellationFixtureToCoreHTTP(t, pool, fixture)
+	var ownerID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(&ownerID))
+	coordinator := runtime.NewRuntimeCancellationCoordinator(pool)
+	created, err := coordinator.CancelOwnedRun(
+		context.Background(), ownerID, fixture.identity.RunID, "Core process disappeared",
+	)
+	require.NoError(t, err)
+	require.Equal(t, "requested", created.Cancellation.State)
+	expireRuntimeCancellationRequestAtDatabaseClock(
+		t, pool, fixture.identity.RunID, created.Cancellation.ID,
+	)
+
+	state, err := coordinator.ReapExpiredCancellation(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, runtime.RuntimeCancelUnconfirmed, state.CancelState)
+	var outcome, errorCode string
+	var finished bool
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT outcome, error_code, finished_at IS NOT NULL
+		FROM run_attempts WHERE run_id = $1 AND id = $2`,
+		fixture.identity.RunID, fixture.identity.AttemptID,
+	).Scan(&outcome, &errorCode, &finished))
+	require.Equal(t, "canceled", outcome)
+	require.Equal(t, "CANCEL_UNCONFIRMED", errorCode)
+	require.True(t, finished)
+	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 
 func TestRuntimeCancellationV2ConcurrentOwnerRequestsHaveOneWinner(t *testing.T) {
@@ -274,6 +319,134 @@ func TestRuntimeCancellationV2ConcurrentOwnerRequestsHaveOneWinner(t *testing.T)
 	require.Equal(t, 1, winners)
 	require.Equal(t, workers-1, replays)
 	assertRuntimeCancellationAttemptCapacity(t, pool, fixture, false, 1, 1)
+	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
+}
+
+func TestRuntimeCancellationV2CancelResultRace1000Contenders(t *testing.T) {
+	pool := setupTestDB(t)
+	requireRuntimeCancellationV2Schema(t, pool)
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	var ownerID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(&ownerID))
+
+	coordinator := runtime.NewRuntimeCancellationCoordinator(pool)
+	finalizer := runtime.NewResultFinalizer(pool, nil, nil)
+	request := successfulRuntimeResult(fixture, map[string]any{"winner": "result"})
+	const contenders = 1000
+	start := make(chan struct{})
+	errorsSeen := make(chan error, contenders)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var wait sync.WaitGroup
+	wait.Add(contenders)
+	for index := range contenders {
+		index := index
+		go func() {
+			defer wait.Done()
+			<-start
+			if index%2 == 0 {
+				_, err := finalizer.Finalize(ctx, fixture.principal, request)
+				if err != nil &&
+					!runtime.IsRuntimeResultError(err, runtime.RuntimeResultErrorRunAlreadyTerminal) &&
+					!runtime.IsRuntimeResultError(err, runtime.RuntimeResultErrorRunCancelRequested) {
+					errorsSeen <- err
+				}
+				return
+			}
+			_, err := coordinator.CancelOwnedRun(ctx, ownerID, fixture.identity.RunID, "cancel/result race")
+			if err != nil && !errors.Is(err, runtime.ErrRuntimeCancellationRunEnded) {
+				errorsSeen <- err
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		require.NoError(t, err)
+	}
+
+	var status, dispatchState string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT status, dispatch_state FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(
+		&status, &dispatchState,
+	))
+	require.Contains(t, []string{"success", "canceled"}, status)
+	require.Equal(t, "terminal", dispatchState)
+	var terminalEvents, ledgerRows int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT
+			(SELECT COUNT(*)::int FROM run_events WHERE run_id = $1 AND event_type IN ('run.completed', 'run.canceled')),
+			(SELECT COUNT(*)::int FROM run_accounting_ledger WHERE run_id = $1)`, fixture.identity.RunID).Scan(
+		&terminalEvents, &ledgerRows,
+	))
+	require.Equal(t, 1, terminalEvents)
+	require.Equal(t, 1, ledgerRows)
+}
+
+func TestRuntimeCancellationV2CancelAckRace1000Contenders(t *testing.T) {
+	pool := setupTestDB(t)
+	requireRuntimeCancellationV2Schema(t, pool)
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	var ownerID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(),
+		`SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(&ownerID))
+	coordinator := runtime.NewRuntimeCancellationCoordinator(pool)
+	created, err := coordinator.CancelOwnedRun(
+		context.Background(), ownerID, fixture.identity.RunID, "cancel/ack race",
+	)
+	require.NoError(t, err)
+	principal := runtimeCancellationSessionPrincipal(t, pool, fixture)
+	commands, err := coordinator.PollCommands(context.Background(), principal)
+	require.NoError(t, err)
+	require.Len(t, commands.Commands, 1)
+	command, err := runtime.DecodePendingCommand(commands.Commands[0])
+	require.NoError(t, err)
+	require.NotNil(t, command.Cancel)
+	ack := runtime.RunCancelAckPayload{
+		CancellationID:  command.Cancel.CancellationID,
+		AttemptIdentity: command.Cancel.AttemptIdentity,
+		CancelState:     runtime.RuntimeCancelStopped,
+	}
+
+	const contenders = 1000
+	start := make(chan struct{})
+	errorsSeen := make(chan error, contenders)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	var wait sync.WaitGroup
+	wait.Add(contenders)
+	for index := range contenders {
+		index := index
+		go func() {
+			defer wait.Done()
+			<-start
+			if index%2 == 0 {
+				_, err := coordinator.CancelOwnedRun(ctx, ownerID, fixture.identity.RunID, "cancel replay")
+				if err != nil {
+					errorsSeen <- err
+				}
+				return
+			}
+			_, err := coordinator.AckCancel(ctx, principal, ack)
+			if err != nil {
+				errorsSeen <- err
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsSeen)
+	for err := range errorsSeen {
+		require.NoError(t, err)
+	}
+
+	state, err := coordinator.AckCancel(context.Background(), principal, ack)
+	require.NoError(t, err)
+	require.Equal(t, runtime.RuntimeCancelStopped, state.CancelState)
+	require.Equal(t, created.Cancellation.ID, state.CancellationID)
+	assertRuntimeCancellationAttemptCapacity(t, pool, fixture, true, 0, 0)
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 

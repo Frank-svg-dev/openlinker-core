@@ -49,8 +49,11 @@ type RuntimeV2LeaseService interface {
 	ReleaseUnackedOffer(context.Context, RuntimeSessionPrincipal, ...string) error
 }
 
-type RuntimeV2EventStore interface {
-	Append(context.Context, RuntimeEventPrincipal, RuntimeAttemptIdentity, RuntimeEventRequest) (RuntimeEventAck, error)
+// RuntimeV2EventProjector is the only execution-event entrypoint exposed to
+// transport adapters. Persistence and message/artifact/callback projections
+// must stay behind this boundary so WebSocket and Pull cannot diverge.
+type RuntimeV2EventProjector interface {
+	AppendRuntimeEvent(context.Context, RuntimeEventPrincipal, RuntimeAttemptIdentity, RuntimeEventRequest) (RuntimeEventAck, error)
 }
 
 type RuntimeV2ResultFinalizer interface {
@@ -74,11 +77,14 @@ type RuntimeV2HTTPDependencies struct {
 	DeviceAuthenticator RuntimeV2DeviceAuthenticator
 	Sessions            RuntimeV2SessionService
 	Leases              RuntimeV2LeaseService
-	EventStore          RuntimeV2EventStore
+	EventProjector      RuntimeV2EventProjector
 	Finalizer           RuntimeV2ResultFinalizer
 	Resume              RuntimeV2ResumeService
 	Delegation          RuntimeV2DelegationAPI
 	Cancellations       RuntimeV2CancellationService
+	WakeHub             *RuntimeWakeHub
+	Presence            RuntimePresenceStore
+	CoreInstanceID      uuid.UUID
 }
 
 // RuntimeV2HTTPController is the strict HTTP transport adapter for the durable
@@ -153,6 +159,7 @@ func (h *RuntimeV2HTTPController) CreateSession(c echo.Context) error {
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
 	}
+	h.refreshPresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	ready, err := runtimeReadyFromSessionState(state)
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
@@ -185,6 +192,7 @@ func (h *RuntimeV2HTTPController) HeartbeatSession(c echo.Context) error {
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
 	}
+	h.refreshPresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	ready, err := runtimeReadyFromSessionState(state)
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
@@ -211,9 +219,11 @@ func (h *RuntimeV2HTTPController) CloseSession(c echo.Context) error {
 	if request.RuntimeSessionID != sessionID {
 		return writeRuntimeV2Error(c, runtimeV2ValidationError())
 	}
-	if _, err = h.dependencies.Sessions.CloseSession(c.Request().Context(), principal, request); err != nil {
+	state, err := h.dependencies.Sessions.CloseSession(c.Request().Context(), principal, request)
+	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
 	}
+	h.removePresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -345,7 +355,7 @@ func (h *RuntimeV2HTTPController) AppendEvent(c echo.Context) error {
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
 	}
-	if h.dependencies.Sessions == nil || h.dependencies.EventStore == nil {
+	if h.dependencies.Sessions == nil || h.dependencies.EventProjector == nil {
 		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
 	}
 	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
@@ -363,7 +373,7 @@ func (h *RuntimeV2HTTPController) AppendEvent(c echo.Context) error {
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
 	}
-	ack, err := h.dependencies.EventStore.Append(
+	ack, err := h.dependencies.EventProjector.AppendRuntimeEvent(
 		c.Request().Context(), principal.EventPrincipal(), request.AttemptIdentity.RuntimeIdentity(), request.StoreRequest(),
 	)
 	if err != nil {
@@ -623,16 +633,17 @@ func (h *RuntimeV2HTTPController) claimWithWait(
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,
 ) (*RunAssignedPayload, error) {
-	if wait == 0 {
-		return h.dependencies.Leases.ClaimOffer(ctx, principal)
-	}
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	poll := time.NewTicker(200 * time.Millisecond)
 	defer poll.Stop()
 	for {
+		var wake <-chan struct{}
+		if h.dependencies.WakeHub != nil {
+			wake = h.dependencies.WakeHub.Wait(principal.AgentID)
+		}
 		assignment, err := h.dependencies.Leases.ClaimOffer(ctx, principal)
-		if err != nil || assignment != nil {
+		if err != nil || assignment != nil || wait == 0 {
 			return assignment, err
 		}
 		select {
@@ -640,6 +651,7 @@ func (h *RuntimeV2HTTPController) claimWithWait(
 			return nil, ctx.Err()
 		case <-deadline.C:
 			return nil, nil
+		case <-wake:
 		case <-poll.C:
 		}
 	}
@@ -650,25 +662,26 @@ func (h *RuntimeV2HTTPController) pollCommandsWithWait(
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,
 ) (RuntimeCommandsResponse, error) {
-	response, err := h.dependencies.Cancellations.PollCommands(ctx, principal)
-	if err != nil || len(response.Commands) > 0 || wait == 0 {
-		return response, err
-	}
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	poll := time.NewTicker(200 * time.Millisecond)
 	defer poll.Stop()
 	for {
+		var wake <-chan struct{}
+		if h.dependencies.WakeHub != nil {
+			wake = h.dependencies.WakeHub.Wait(principal.AgentID)
+		}
+		response, err := h.dependencies.Cancellations.PollCommands(ctx, principal)
+		if err != nil || len(response.Commands) > 0 || wait == 0 {
+			return response, err
+		}
 		select {
 		case <-ctx.Done():
 			return RuntimeCommandsResponse{}, ctx.Err()
 		case <-deadline.C:
 			return response, nil
+		case <-wake:
 		case <-poll.C:
-			response, err = h.dependencies.Cancellations.PollCommands(ctx, principal)
-			if err != nil || len(response.Commands) > 0 {
-				return response, err
-			}
 		}
 	}
 }

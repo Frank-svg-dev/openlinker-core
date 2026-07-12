@@ -322,31 +322,6 @@ func TestRecommendPersistsAndDetailRoundTrip(t *testing.T) {
 	assert.Equal(t, secondAgent.String(), detail.Recommendations[1].Agent.ID)
 	require.Len(t, detail.Recommendations[1].MatchedSkills, 1)
 
-	board, err := svc.ListBoard(context.Background(), 20)
-	require.NoError(t, err)
-	require.Empty(t, board, "recommend should create a private draft, not a public board task")
-
-	published, err := svc.Publish(context.Background(), resp.TaskID, userID, &task.PublishRequest{
-		PublicSummary: "公开 SQL 数据分析任务",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "public", published.Visibility)
-	require.NotNil(t, published.PublicSummary)
-	assert.Equal(t, "公开 SQL 数据分析任务", *published.PublicSummary)
-
-	board, err = svc.ListBoard(context.Background(), 20)
-	require.NoError(t, err)
-	require.Len(t, board, 1)
-	assert.Equal(t, resp.TaskID.String(), board[0].ID)
-	assert.Equal(t, "公开 SQL 数据分析任务", board[0].Query)
-	assert.Equal(t, "公开 SQL 数据分析任务", board[0].PublicSummary)
-	assert.Equal(t, "open", board[0].Status)
-	assert.Equal(t, 2, board[0].RecommendedAgentCount)
-	require.Len(t, board[0].ParsedSkillRefs, len(fake.gotSkillIDs))
-	assert.Equal(t, "数据分析", board[0].ParsedSkillRefs[1].Name)
-	assert.Equal(t, []string{"create_task", "run_agent"}, board[0].MCPTools)
-	require.Len(t, board[0].MCPToolRefs, 2)
-
 	require.NoError(t, svc.Choose(context.Background(), resp.TaskID, userID, secondAgent))
 	history, err := svc.ListMine(context.Background(), userID, 20)
 	require.NoError(t, err)
@@ -376,8 +351,10 @@ func TestRecommendPersistsPendingExplicitSkill(t *testing.T) {
 	assert.Equal(t, "ai/custom-capability", resp.ParsedSkillRefs[0].Name)
 	assert.Empty(t, resp.Recommendations)
 	require.NotNil(t, resp.NextAction)
-	assert.Equal(t, "publish_task", resp.NextAction.Type)
+	assert.Equal(t, "connect_agent", resp.NextAction.Type)
 	assert.Equal(t, "no_public_agent", resp.NextAction.ReasonCode)
+	assert.Contains(t, resp.NextAction.Href, "/publish?")
+	assert.Contains(t, resp.NextAction.Href, "skill=ai%2Fcustom-capability")
 
 	var parsed []string
 	var recommended []uuid.UUID
@@ -414,7 +391,8 @@ func TestRecommendPendingExplicitSkillLimitsRecommendationScope(t *testing.T) {
 	assert.Contains(t, resp.ParsedSkills, "data/analysis")
 	assert.Empty(t, resp.Recommendations)
 	require.NotNil(t, resp.NextAction)
-	assert.Equal(t, "publish_task", resp.NextAction.Type)
+	assert.Equal(t, "connect_agent", resp.NextAction.Type)
+	assert.Contains(t, resp.NextAction.Href, "skill_ids=")
 }
 
 func TestRecommendPreferredAgentSlugRanksFirst(t *testing.T) {
@@ -495,141 +473,6 @@ func TestTaskTemplatesAndTemplateIDDriveRecommendationSkills(t *testing.T) {
 	assert.Equal(t, "结构化抽取", resp.ParsedSkillRefs[1].Name)
 }
 
-func TestTaskBoardClaimAndCompleteRoundTrip(t *testing.T) {
-	pool := setupTaskTestDB(t)
-	ownerID := insertTaskUser(t, pool)
-	creatorID := insertTaskCreator(t, pool)
-	agentID := insertTaskAgent(t, pool, creatorID, "task-worker-"+uuid.NewString()[:8], "approved")
-	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
-
-	var taskID uuid.UUID
-	err := pool.QueryRow(context.Background(),
-		`INSERT INTO task_queries (user_id, query, parsed_skills, recommended_agent_ids)
-		 VALUES ($1, '帮我做 SQL 统计分析', '{data/sql-query}', '{}')
-		 RETURNING id`,
-		ownerID).Scan(&taskID)
-	require.NoError(t, err)
-
-	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
-	_, err = svc.Claim(context.Background(), taskID, creatorID, agentID)
-	assertTaskHTTPStatus(t, err, http.StatusConflict)
-
-	published, err := svc.Publish(context.Background(), taskID, ownerID, &task.PublishRequest{
-		PublicSummary: "SQL 统计分析公开任务",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "public", published.Visibility)
-
-	claimed, err := svc.Claim(context.Background(), taskID, creatorID, agentID)
-	require.NoError(t, err)
-	assert.Equal(t, taskID.String(), claimed.TaskID)
-	assert.Equal(t, "in_progress", claimed.Status)
-	assert.Equal(t, "SQL 统计分析公开任务", claimed.Query)
-	require.NotNil(t, claimed.ClaimedAt)
-
-	board, err := svc.ListBoard(context.Background(), 20)
-	require.NoError(t, err)
-	require.Len(t, board, 1)
-	assert.Equal(t, "in_progress", board[0].Status)
-	require.NotNil(t, board[0].ClaimedAgentID)
-	assert.Equal(t, agentID.String(), *board[0].ClaimedAgentID)
-
-	boardPage, err := svc.ListBoardPage(context.Background(), "SQL", "in_progress", "data/sql-query", "", "published_desc", 1, 10)
-	require.NoError(t, err)
-	require.Len(t, boardPage.Items, 1)
-	assert.Equal(t, int32(1), boardPage.Total)
-	assert.Equal(t, "in_progress", boardPage.StatusFilter)
-	assert.Equal(t, "data/sql-query", boardPage.SkillFilter)
-	assert.Equal(t, []string{"data/sql-query"}, boardPage.SkillIDsFilter)
-
-	runID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "分析完成")
-	completed, err := svc.Complete(context.Background(), taskID, creatorID, &task.CompleteRequest{
-		AgentID:       agentID,
-		RunID:         runID,
-		ResultSummary: "分析完成",
-		ResultArtifact: map[string]interface{}{
-			"summary": "分析完成",
-			"rows":    3,
-		},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "completed", completed.Status)
-	assert.Equal(t, "submitted", completed.DeliveryStatus)
-	assert.Equal(t, "private", completed.DeliveryVisibility)
-	require.NotNil(t, completed.CompletionRunID)
-	assert.Equal(t, runID.String(), *completed.CompletionRunID)
-
-	detail, err := svc.GetByID(context.Background(), taskID, ownerID)
-	require.NoError(t, err)
-	assert.Equal(t, "completed", detail.Status)
-	assert.Equal(t, "submitted", detail.DeliveryStatus)
-	assert.Equal(t, "private", detail.DeliveryVisibility)
-	require.NotNil(t, detail.CompletionSummary)
-	assert.Equal(t, "分析完成", *detail.CompletionSummary)
-	require.NotNil(t, detail.DeliveryArtifact)
-	assert.Equal(t, "分析完成", detail.DeliveryArtifact["summary"])
-
-	_, err = svc.Claim(context.Background(), taskID, creatorID, agentID)
-	assertTaskHTTPStatus(t, err, http.StatusConflict)
-
-	revision, err := svc.RequestRevision(context.Background(), taskID, ownerID, &task.RevisionRequest{
-		Note: "请补充样本量和 SQL 口径",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "revision_requested", revision.Status)
-	assert.Equal(t, "revision_requested", revision.DeliveryStatus)
-	require.NotNil(t, revision.RevisionNote)
-	assert.Equal(t, "请补充样本量和 SQL 口径", *revision.RevisionNote)
-
-	runner := &fakeRuntimeStarter{}
-	svc.SetRunStarter(runner)
-	revisionRun, err := svc.RunTask(context.Background(), taskID, creatorID, &task.RunTaskRequest{
-		AgentID:        agentID,
-		IdempotencyKey: "task-revision-run-1",
-		Input: map[string]interface{}{
-			"text": "按返修要求补充样本量和 SQL 口径",
-		},
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "revision_requested", revisionRun.Status)
-	require.NotNil(t, runner.gotReq)
-	assert.Equal(t, taskID.String(), runner.gotReq.Metadata["task_id"])
-	assert.Equal(t, "按返修要求补充样本量和 SQL 口径", runner.gotReq.Input["text"])
-
-	secondRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "补充完成")
-	resubmitted, err := svc.Complete(context.Background(), taskID, creatorID, &task.CompleteRequest{
-		AgentID:       agentID,
-		RunID:         secondRunID,
-		ResultSummary: "补充完成",
-	})
-	require.NoError(t, err)
-	assert.Equal(t, "completed", resubmitted.Status)
-	assert.Equal(t, "submitted", resubmitted.DeliveryStatus)
-	assert.Nil(t, resubmitted.RevisionNote)
-
-	accepted, err := svc.AcceptDelivery(context.Background(), taskID, ownerID)
-	require.NoError(t, err)
-	assert.Equal(t, "accepted", accepted.Status)
-	assert.Equal(t, "accepted", accepted.DeliveryStatus)
-	require.NotNil(t, accepted.AcceptedAt)
-
-	unpublished, err := svc.Unpublish(context.Background(), taskID, ownerID)
-	require.NoError(t, err)
-	assert.Equal(t, "private", unpublished.Visibility)
-	assert.Equal(t, "accepted", unpublished.Status)
-	assert.Nil(t, unpublished.PublicSummary)
-	assert.Nil(t, unpublished.PublishedAt)
-	require.NotNil(t, unpublished.AcceptedAt)
-
-	boardAfterUnpublish, err := svc.ListBoard(context.Background(), 20)
-	require.NoError(t, err)
-	require.Empty(t, boardAfterUnpublish)
-
-	again, err := svc.Unpublish(context.Background(), taskID, ownerID)
-	require.NoError(t, err)
-	assert.Equal(t, "private", again.Visibility)
-}
-
 func TestRecommendWithoutMatchesReturnsPrivateDraftNextAction(t *testing.T) {
 	pool := setupTaskTestDB(t)
 	userID := insertTaskUser(t, pool)
@@ -644,137 +487,23 @@ func TestRecommendWithoutMatchesReturnsPrivateDraftNextAction(t *testing.T) {
 	assert.Equal(t, "private", resp.Visibility)
 	require.Empty(t, resp.Recommendations)
 	require.NotNil(t, resp.NextAction)
-	assert.Equal(t, "publish_task", resp.NextAction.Type)
-	assert.Contains(t, resp.NextAction.Href, resp.TaskID.String())
+	assert.Equal(t, "connect_agent", resp.NextAction.Type)
+	assert.Contains(t, resp.NextAction.Href, "/publish?")
+	assert.Contains(t, resp.NextAction.Href, "q=")
+	assert.Contains(t, resp.NextAction.Href, "data%2Fsql-query")
+	assert.NotContains(t, resp.NextAction.Href, resp.TaskID.String())
 
-	board, err := svc.ListBoard(context.Background(), 20)
-	require.NoError(t, err)
-	require.Empty(t, board)
 }
 
-func TestPublicTaskBoundariesAndCatalogFallback(t *testing.T) {
-	pool := setupTaskTestDB(t)
-	ownerID := insertTaskUser(t, pool)
-	otherUserID := insertTaskUser(t, pool)
-	creatorID := insertTaskCreator(t, pool)
-	agentID := insertTaskAgent(t, pool, creatorID, "task-public-"+uuid.NewString()[:8], "approved")
-	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
-
-	privateTailMarker := "private-tail-" + uuid.NewString()
-	longQuery := strings.TrimSpace(strings.Repeat("SQL task boundary ", 20)) + " " + privateTailMarker
-	var taskID uuid.UUID
-	err := pool.QueryRow(context.Background(),
-		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
-		 VALUES ($1, $2, $3, $4, $5)
-		 RETURNING id`,
-		ownerID, longQuery, []string{"missing/skill", "data/sql-query"}, []string{"run_agent", "create_task"}, []uuid.UUID{agentID}).Scan(&taskID)
-	require.NoError(t, err)
-
-	svc := task.NewService(pool, nil, &fakeSkillRecommender{listErr: errors.New("catalog offline")})
-	published, err := svc.Publish(context.Background(), taskID, ownerID, nil)
-	require.NoError(t, err)
-	require.NotNil(t, published.PublicSummary)
-	assert.Equal(t, longQuery, published.Query)
-	assert.Len(t, []rune(*published.PublicSummary), 240)
-	assert.Equal(t, longQuery[:240], *published.PublicSummary)
-	require.Len(t, published.ParsedSkillRefs, 2)
-	assert.Equal(t, "missing/skill", published.ParsedSkillRefs[0].Name)
-	assert.Equal(t, "data/sql-query", published.ParsedSkillRefs[1].Name)
-	require.Len(t, published.Recommendations, 1)
-	assert.Equal(t, agentID.String(), published.Recommendations[0].Agent.ID)
-
-	republished, err := svc.Publish(context.Background(), taskID, ownerID, &task.PublishRequest{
-		PublicSummary: "do not replace an already public task",
-	})
-	require.NoError(t, err)
-	require.NotNil(t, republished.PublicSummary)
-	assert.Equal(t, *published.PublicSummary, *republished.PublicSummary)
-
-	_, err = svc.Publish(context.Background(), taskID, otherUserID, &task.PublishRequest{PublicSummary: "wrong owner"})
-	assertTaskHTTPStatus(t, err, http.StatusNotFound)
-
-	_, err = svc.GetByID(context.Background(), taskID, otherUserID)
-	assertTaskHTTPStatus(t, err, http.StatusNotFound)
-	_, err = svc.GetByID(context.Background(), uuid.New(), ownerID)
-	assertTaskHTTPStatus(t, err, http.StatusNotFound)
-
-	board, err := svc.ListBoard(context.Background(), 0)
-	require.NoError(t, err)
-	require.Len(t, board, 1)
-	assert.Equal(t, taskID.String(), board[0].ID)
-	assert.Equal(t, *published.PublicSummary, board[0].Query)
-	assert.Equal(t, "open", board[0].Status)
-	assert.Equal(t, "pending", board[0].DeliveryStatus)
-	require.Len(t, board[0].ParsedSkillRefs, 2)
-	assert.Equal(t, "missing/skill", board[0].ParsedSkillRefs[0].Name)
-	assert.Equal(t, "data/sql-query", board[0].ParsedSkillRefs[1].Name)
-	require.Len(t, board[0].MCPToolRefs, 2)
-	assert.Equal(t, "run_agent", board[0].MCPToolRefs[0].Name)
-
-	boardPage, err := svc.ListBoardPage(context.Background(), "SQL", "open", "data/sql-query", "run_agent", "recommended_desc", 1, 10)
-	require.NoError(t, err)
-	require.Len(t, boardPage.Items, 1)
-	assert.Equal(t, int32(1), boardPage.Total)
-	assert.Equal(t, "recommended_desc", boardPage.Sort)
-	assert.Equal(t, "run_agent", boardPage.MCPFilter)
-	assert.Equal(t, []string{"data/sql-query"}, boardPage.SkillIDsFilter)
-
-	multiSkillBoardPage, err := svc.ListBoardPage(context.Background(), "SQL", "open", "missing/other,data/sql-query", "", "published_desc", 1, 10)
-	require.NoError(t, err)
-	require.Len(t, multiSkillBoardPage.Items, 1)
-	assert.Equal(t, int32(1), multiSkillBoardPage.Total)
-	assert.Equal(t, "missing/other,data/sql-query", multiSkillBoardPage.SkillFilter)
-	assert.Equal(t, []string{"missing/other", "data/sql-query"}, multiSkillBoardPage.SkillIDsFilter)
-
-	privateQuerySearch, err := svc.ListBoardPage(context.Background(), privateTailMarker, "", "", "", "", 1, 10)
-	require.NoError(t, err)
-	require.Empty(t, privateQuerySearch.Items)
-	assert.Equal(t, int32(0), privateQuerySearch.Total)
-
-	history, err := svc.ListMine(context.Background(), ownerID, 0)
-	require.NoError(t, err)
-	require.NotEmpty(t, history)
-	assert.Equal(t, taskID.String(), history[0].ID)
-	assert.Equal(t, "public", history[0].Visibility)
-
-	var completedTaskID uuid.UUID
-	err = pool.QueryRow(context.Background(),
-		`INSERT INTO task_queries (
-			user_id, query, parsed_skills, recommended_agent_ids,
-			claimed_agent_id, claimed_by_user_id, claimed_at,
-			completed_at, completion_summary, delivery_status
-		) VALUES (
-			$1, 'completed task cannot publish', '{}', $2,
-			$3, $4, NOW(),
-			NOW(), 'done', 'submitted'
-		) RETURNING id`,
-		ownerID, []uuid.UUID{agentID}, agentID, creatorID).Scan(&completedTaskID)
-	require.NoError(t, err)
-
-	_, err = svc.Publish(context.Background(), completedTaskID, ownerID, &task.PublishRequest{
-		PublicSummary: "completed task cannot publish",
-	})
-	assertTaskHTTPStatus(t, err, http.StatusConflict)
-}
-
-func TestTaskHandlersListBoardAndMineSuccess(t *testing.T) {
+func TestTaskHandlersListMineReturnsOnlyPrivateOwnerTasks(t *testing.T) {
 	pool := setupTaskTestDB(t)
 	ownerID := insertTaskUser(t, pool)
 	otherID := insertTaskUser(t, pool)
 	creatorID := insertTaskCreator(t, pool)
 	agentID := insertTaskAgent(t, pool, creatorID, "task-handler-"+uuid.NewString()[:8], "approved")
-	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
 
 	ctx := context.Background()
-	publicSummary := "公开任务广场摘要"
 	_, err := pool.Exec(ctx,
-		`INSERT INTO task_queries (
-			user_id, query, parsed_skills, mcp_tools, recommended_agent_ids,
-			visibility, public_summary, published_at
-		) VALUES ($1, 'private board source', '{data/sql-query}', '{run_agent}', $2, 'public', $3, NOW())`,
-		ownerID, []uuid.UUID{agentID}, publicSummary)
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx,
 		`INSERT INTO task_queries (
 			user_id, query, parsed_skills, mcp_tools, recommended_agent_ids
 		) VALUES ($1, 'owner private task', '{data/sql-query}', '{create_task}', $2)`,
@@ -787,199 +516,20 @@ func TestTaskHandlersListBoardAndMineSuccess(t *testing.T) {
 		otherID, []uuid.UUID{agentID})
 	require.NoError(t, err)
 
-	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
-	h := task.NewHandler(svc)
+	h := task.NewHandler(task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()}))
 	e := echo.New()
-
-	boardRec := httptest.NewRecorder()
-	boardCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/board?limit=99", nil), boardRec)
-	require.NoError(t, h.ListBoard(boardCtx))
-	require.Equal(t, http.StatusOK, boardRec.Code)
-	var boardBody struct {
-		Items []task.PublicTaskItem `json:"items"`
-		Total int32                 `json:"total"`
-		Page  int32                 `json:"page"`
-		Size  int32                 `json:"size"`
-	}
-	decodeTaskHandlerJSON(t, boardRec, &boardBody)
-	require.Len(t, boardBody.Items, 1)
-	assert.Equal(t, int32(1), boardBody.Total)
-	assert.Equal(t, int32(1), boardBody.Page)
-	assert.Equal(t, int32(50), boardBody.Size)
-	assert.Equal(t, publicSummary, boardBody.Items[0].Query)
-	assert.Equal(t, "open", boardBody.Items[0].Status)
-	require.Len(t, boardBody.Items[0].ParsedSkillRefs, 1)
-	assert.Equal(t, "SQL 查询", boardBody.Items[0].ParsedSkillRefs[0].Name)
-
-	privateSearchRec := httptest.NewRecorder()
-	privateSearchCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/board?q=private+board+source", nil), privateSearchRec)
-	require.NoError(t, h.ListBoard(privateSearchCtx))
-	require.Equal(t, http.StatusOK, privateSearchRec.Code)
-	var privateSearchBody struct {
-		Items []task.PublicTaskItem `json:"items"`
-		Total int32                 `json:"total"`
-	}
-	decodeTaskHandlerJSON(t, privateSearchRec, &privateSearchBody)
-	require.Empty(t, privateSearchBody.Items)
-	assert.Equal(t, int32(0), privateSearchBody.Total)
-
 	mineRec := httptest.NewRecorder()
 	mineCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/me?limit=99", nil), mineRec)
 	mineCtx.Set(string(httpx.CtxKeyUserID), ownerID.String())
 	require.NoError(t, h.ListMine(mineCtx))
 	require.Equal(t, http.StatusOK, mineRec.Code)
-	var mineBody struct {
+	var body struct {
 		Items []task.HistoryItem `json:"items"`
 	}
-	decodeTaskHandlerJSON(t, mineRec, &mineBody)
-	require.Len(t, mineBody.Items, 2)
-	queries := map[string]bool{}
-	for _, item := range mineBody.Items {
-		queries[item.Query] = true
-		assert.NotEqual(t, "other private task", item.Query)
-	}
-	assert.True(t, queries["private board source"])
-	assert.True(t, queries["owner private task"])
-}
-
-func TestTaskHandlersWorkLifecycleSuccess(t *testing.T) {
-	pool := setupTaskTestDB(t)
-	ownerID := insertTaskUser(t, pool)
-	creatorID := insertTaskCreator(t, pool)
-	agentID := insertTaskAgent(t, pool, creatorID, "task-handler-flow-"+uuid.NewString()[:8], "approved")
-	insertTaskAgentSkills(t, pool, agentID, "data/sql-query")
-
-	var taskID uuid.UUID
-	err := pool.QueryRow(context.Background(),
-		`INSERT INTO task_queries (user_id, query, parsed_skills, mcp_tools, recommended_agent_ids)
-		 VALUES ($1, '请分析订单 SQL 趋势', '{data/sql-query}', '{run_agent}', $2)
-		 RETURNING id`,
-		ownerID, []uuid.UUID{agentID}).Scan(&taskID)
-	require.NoError(t, err)
-
-	runner := &fakeRuntimeStarter{}
-	svc := task.NewService(pool, nil, &fakeSkillRecommender{skills: testSkills()})
-	svc.SetRunStarter(runner)
-	h := task.NewHandler(svc)
-	e := echo.New()
-
-	c, rec := newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/publish",
-		`{"public_summary":"公开 handler 工作流任务"}`, ownerID, taskID)
-	require.NoError(t, h.Publish(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var published task.DetailResponse
-	decodeTaskHandlerJSON(t, rec, &published)
-	assert.Equal(t, "public", published.Visibility)
-	require.NotNil(t, published.PublicSummary)
-	assert.Equal(t, "公开 handler 工作流任务", *published.PublicSummary)
-
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/claim",
-		`{"agent_id":"`+agentID.String()+`"}`, creatorID, taskID)
-	require.NoError(t, h.Claim(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var claimed task.WorkResponse
-	decodeTaskHandlerJSON(t, rec, &claimed)
-	assert.Equal(t, "in_progress", claimed.Status)
-	assert.Equal(t, agentID.String(), claimed.AgentID)
-
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
-		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"},"idempotency_key":"task-handler-run-1"}`, creatorID, taskID)
-	require.NoError(t, h.Run(c))
-	require.Equal(t, http.StatusCreated, rec.Code)
-	var runResp task.RunTaskResponse
-	decodeTaskHandlerJSON(t, rec, &runResp)
-	assert.Equal(t, taskID.String(), runResp.TaskID)
-	assert.Equal(t, "in_progress", runResp.Status)
-	require.NotNil(t, runResp.Run)
-	assert.Equal(t, "/api/v1/runs/"+runResp.Run.RunID, rec.Header().Get(echo.HeaderLocation))
-	assert.Empty(t, rec.Header().Get("Idempotency-Replayed"))
-	require.NotNil(t, runner.gotReq)
-	assert.Equal(t, "按公开任务执行 SQL 分析", runner.gotReq.Input["text"])
-	assert.Equal(t, "task-handler-run-1", runner.gotReq.IdempotencyKey)
-	assert.Equal(t, "task", runner.gotReq.CreationProtocol)
-	assert.Equal(t, "run", runner.gotReq.CreationMethod)
-
-	runner.resp = &runtime.RunResponse{RunID: runResp.Run.RunID, Status: "running", Replayed: true}
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
-		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"},"idempotency_key":"task-handler-run-1"}`, creatorID, taskID)
-	require.NoError(t, h.Run(c))
-	require.Equal(t, http.StatusAccepted, rec.Code)
-	assert.Equal(t, "true", rec.Header().Get("Idempotency-Replayed"))
-	assert.Equal(t, "/api/v1/runs/"+runResp.Run.RunID, rec.Header().Get(echo.HeaderLocation))
-
-	runner.resp = &runtime.RunResponse{RunID: runResp.Run.RunID, Status: "success", Replayed: true}
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/run",
-		`{"agent_id":"`+agentID.String()+`","input":{"text":"按公开任务执行 SQL 分析"},"idempotency_key":"task-handler-run-1"}`, creatorID, taskID)
-	require.NoError(t, h.Run(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "true", rec.Header().Get("Idempotency-Replayed"))
-
-	firstRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "handler 分析完成")
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/complete",
-		`{"agent_id":"`+agentID.String()+`","run_id":"`+firstRunID.String()+`","result_summary":"handler 分析完成","delivery_visibility":"shared","result_artifact":{"summary":"handler 分析完成"}}`,
-		creatorID, taskID)
-	require.NoError(t, h.Complete(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var completed task.WorkResponse
-	decodeTaskHandlerJSON(t, rec, &completed)
-	assert.Equal(t, "completed", completed.Status)
-	assert.Equal(t, "submitted", completed.DeliveryStatus)
-	assert.Equal(t, "shared", completed.DeliveryVisibility)
-
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/revision",
-		`{"note":"请补充 SQL 口径"}`, ownerID, taskID)
-	require.NoError(t, h.RequestRevision(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var revision task.WorkResponse
-	decodeTaskHandlerJSON(t, rec, &revision)
-	assert.Equal(t, "revision_requested", revision.Status)
-	require.NotNil(t, revision.RevisionNote)
-	assert.Equal(t, "请补充 SQL 口径", *revision.RevisionNote)
-
-	secondRunID := insertSuccessfulTaskRun(t, pool, creatorID, agentID, "handler 补充完成")
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/complete",
-		`{"agent_id":"`+agentID.String()+`","run_id":"`+secondRunID.String()+`","result_summary":"handler 补充完成"}`,
-		creatorID, taskID)
-	require.NoError(t, h.Complete(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/accept", "", ownerID, taskID)
-	require.NoError(t, h.Accept(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var accepted task.WorkResponse
-	decodeTaskHandlerJSON(t, rec, &accepted)
-	assert.Equal(t, "accepted", accepted.Status)
-	assert.Equal(t, "accepted", accepted.DeliveryStatus)
-
-	c, rec = newTaskHandlerContext(e, http.MethodPost, "/api/v1/tasks/"+taskID.String()+"/unpublish", "", ownerID, taskID)
-	require.NoError(t, h.Unpublish(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var unpublished task.DetailResponse
-	decodeTaskHandlerJSON(t, rec, &unpublished)
-	assert.Equal(t, "private", unpublished.Visibility)
-	assert.Equal(t, "accepted", unpublished.Status)
-
-	boardRec := httptest.NewRecorder()
-	boardCtx := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/tasks/board?limit=50", nil), boardRec)
-	require.NoError(t, h.ListBoard(boardCtx))
-	require.Equal(t, http.StatusOK, boardRec.Code)
-	var boardBody struct {
-		Items []task.PublicTaskItem `json:"items"`
-		Total int32                 `json:"total"`
-	}
-	decodeTaskHandlerJSON(t, boardRec, &boardBody)
-	require.Empty(t, boardBody.Items)
-	assert.Equal(t, int32(0), boardBody.Total)
-
-	c, rec = newTaskHandlerContext(e, http.MethodGet, "/api/v1/tasks/"+taskID.String(), "", ownerID, taskID)
-	require.NoError(t, h.GetByID(c))
-	require.Equal(t, http.StatusOK, rec.Code)
-	var detail task.DetailResponse
-	decodeTaskHandlerJSON(t, rec, &detail)
-	assert.Equal(t, "accepted", detail.Status)
-	assert.Equal(t, "accepted", detail.DeliveryStatus)
-	require.NotNil(t, detail.CompletionSummary)
-	assert.Equal(t, "handler 补充完成", *detail.CompletionSummary)
+	decodeTaskHandlerJSON(t, mineRec, &body)
+	require.Len(t, body.Items, 1)
+	assert.Equal(t, "owner private task", body.Items[0].Query)
+	assert.Equal(t, "private", body.Items[0].Visibility)
 }
 
 func TestRunTaskUsesSelectedAgentAndTaskInput(t *testing.T) {

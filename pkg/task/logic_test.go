@@ -3,11 +3,9 @@ package task
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -15,44 +13,10 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
-	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
-
-func TestTaskActionHonorsResourceSpecificGrant(t *testing.T) {
-	userID := uuid.New()
-	targetTaskID := uuid.New()
-	otherTaskID := uuid.New()
-	newContext := func(grantedTaskID uuid.UUID) echo.Context {
-		e := echo.New()
-		c := e.NewContext(
-			taskJSONRequest(http.MethodPost, "/api/v1/tasks/"+targetTaskID.String()+"/publish", `{`),
-			httptest.NewRecorder(),
-		)
-		c.SetParamNames("id")
-		c.SetParamValues(targetTaskID.String())
-		auth.SetPrincipal(c, &auth.AuthPrincipal{
-			UserID: userID, AuthMethod: auth.AuthMethodUserToken,
-			Grants: []auth.Grant{{
-				Permission: "tasks:publish", ResourceType: "task", ResourceID: &grantedTaskID,
-				Constraints: json.RawMessage(`{}`),
-			}},
-		})
-		return c
-	}
-
-	err := NewHandler(nil).Publish(newContext(otherTaskID))
-	var httpErr *httpx.HTTPError
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, httpx.CodePermissionDenied, httpErr.Code)
-
-	err = NewHandler(nil).Publish(newContext(targetTaskID))
-	require.ErrorAs(t, err, &httpErr)
-	require.Equal(t, http.StatusBadRequest, httpErr.Status)
-	require.Equal(t, "请求体格式错误", httpErr.Message)
-}
 
 func TestTokenizeAndRuleParse(t *testing.T) {
 	tokens := tokenize("SQL2 R2 API a I 7 é 数据分析 中, SQL2!")
@@ -158,35 +122,10 @@ func TestNormalizeAndMergeReferences(t *testing.T) {
 	require.Contains(t, mcpToolCatalogByName(), "create_task")
 }
 
-func TestPublicSummaryVisibilityAndTemplateHelpers(t *testing.T) {
-	summary, err := normalizePublicSummary(&PublishRequest{PublicSummary: "  hello \n world  "}, "private")
-	require.NoError(t, err)
-	require.Equal(t, "hello world", summary)
-	_, err = normalizePublicSummary(&PublishRequest{PublicSummary: "abc"}, "fallback")
-	require.Error(t, err)
-
-	long := strings.Repeat("数", 260)
-	summary, err = normalizePublicSummary(nil, long)
-	require.NoError(t, err)
-	require.Len(t, []rune(summary), maxTaskPublicSummaryLen)
+func TestPrivateTaskIntentAndTemplateHelpers(t *testing.T) {
 	require.Equal(t, "a b c", compactWhitespace("  a\tb\nc  "))
 	require.Equal(t, "数据", truncateRunes("数据分析", 2))
 	require.Equal(t, "", truncateRunes("abc", 0))
-
-	public := "公开摘要"
-	owner := uuid.New()
-	worker := uuid.New()
-	task := db.TaskQuery{UserID: owner, Query: "private query", Visibility: taskVisibilityPublic, PublicSummary: &public}
-	require.Equal(t, "公开摘要", publicTaskSummary(&task))
-	require.Equal(t, "公开摘要", runnableTaskText(&task, worker))
-	require.Equal(t, "private query", runnableTaskText(&task, owner))
-	require.Equal(t, "公开摘要", workResponseQuery(&task))
-	task.PublicSummary = nil
-	require.Equal(t, "private query", publicTaskSummary(&task))
-	task.Visibility = taskVisibilityPrivate
-	require.Equal(t, "private query", workResponseQuery(&task))
-	require.Equal(t, taskVisibilityPrivate, normalizedTaskVisibility(""))
-	require.Equal(t, taskVisibilityPublic, normalizedTaskVisibility(taskVisibilityPublic))
 
 	svc := &Service{allSkills: []db.Skill{{ID: "content/summarization", Category: "content", Name: "摘要"}}}
 	tmpl, err := svc.taskTemplateByID(context.Background(), "support-review")
@@ -222,90 +161,40 @@ func TestTaskDTOHelpers(t *testing.T) {
 	created := time.Date(2026, 6, 20, 10, 0, 0, 0, time.FixedZone("CST", 8*60*60))
 	later := created.Add(30 * time.Minute)
 	taskID := uuid.New()
-	owner := uuid.New()
 	agentID := uuid.New()
-	worker := uuid.New()
-	runID := uuid.New()
-	summary := "done"
-	revision := "please adjust"
-	publicSummary := "public task"
-	artifact := []byte(`{"answer":42}`)
 
 	tq := db.TaskQuery{
 		ID:                  taskID,
-		UserID:              owner,
 		Query:               "private task",
 		ParsedSkills:        []string{"data/sql", "missing"},
 		MCPTools:            []string{"run_agent"},
 		RecommendedAgentIDs: []uuid.UUID{agentID},
 		ChosenAgentID:       &agentID,
 		ChosenAt:            &later,
-		ClaimedAgentID:      &agentID,
-		ClaimedByUserID:     &worker,
-		ClaimedAt:           &later,
-		CompletedAt:         &later,
-		CompletionSummary:   &summary,
-		CompletionRunID:     &runID,
-		DeliveryStatus:      "revision_requested",
-		DeliveryVisibility:  "shared",
-		DeliveryArtifact:    artifact,
-		RevisionRequestedAt: &later,
-		RevisionNote:        &revision,
-		Visibility:          taskVisibilityPublic,
-		PublicSummary:       &publicSummary,
-		PublishedAt:         &later,
 		CreatedAt:           created,
 	}
 
-	require.Equal(t, "revision_requested", taskStatus(&tq))
-	require.Equal(t, "private", normalizeDeliveryVisibility(""))
-	require.Equal(t, "shared", normalizeDeliveryVisibility(" shared "))
-	require.Equal(t, "public_example", normalizeDeliveryVisibility("public_example"))
+	require.Equal(t, "matched", taskStatus(&tq))
 	require.Equal(t, []string{"run_agent"}, taskRunUsedMCPTools([]string{"search_agents", "run_agent", "run_agent"}))
 	require.Empty(t, taskRunUsedMCPTools([]string{" search_agents ", " get_run "}))
-	require.Nil(t, deliveryArtifact(nil))
-	require.Nil(t, deliveryArtifact([]byte(`not-json`)))
-	require.Equal(t, DeliveryArtifact{"answer": float64(42)}, deliveryArtifact(artifact))
 
 	history := toHistoryItem(&tq)
 	require.Equal(t, taskID.String(), history.ID)
-	require.Equal(t, "revision_requested", history.Status)
+	require.Equal(t, "matched", history.Status)
+	require.Equal(t, "private", history.Visibility)
 	require.Equal(t, []string{agentID.String()}, history.RecommendedAgentIDs)
 	require.Equal(t, "2026-06-20T02:00:00Z", history.CreatedAt)
 	require.Equal(t, "2026-06-20T02:30:00Z", *history.ChosenAt)
-	require.Equal(t, "shared", history.DeliveryVisibility)
-	require.Equal(t, &revision, history.RevisionNote)
 
-	publicItem := toPublicTaskItem(&tq, skillCatalogByID([]db.Skill{{ID: "data/sql", Category: "data", Name: "SQL", Description: "query"}}))
-	require.Equal(t, "public task", publicItem.Query)
-	require.Equal(t, "public task", publicItem.PublicSummary)
-	require.Equal(t, 1, publicItem.RecommendedAgentCount)
-	require.Equal(t, "SQL", publicItem.ParsedSkillRefs[0].Name)
-	require.Equal(t, "revision_requested", publicItem.Status)
-
-	work := toWorkResponse(&tq, agentID)
-	require.Equal(t, taskID.String(), work.TaskID)
-	require.Equal(t, "public task", work.Query)
-	require.Equal(t, agentID.String(), work.AgentID)
-	require.Equal(t, runID.String(), *work.CompletionRunID)
-	require.Equal(t, "shared", work.DeliveryVisibility)
-
-	require.Equal(t, "accepted", taskStatus(&db.TaskQuery{DeliveryStatus: "accepted"}))
-	require.Equal(t, "completed", taskStatus(&db.TaskQuery{CompletedAt: &later}))
-	require.Equal(t, "in_progress", taskStatus(&db.TaskQuery{ClaimedAgentID: &agentID}))
 	require.Equal(t, "matched", taskStatus(&db.TaskQuery{ChosenAgentID: &agentID}))
 	require.Equal(t, "needs_agent", taskStatus(&db.TaskQuery{}))
 	require.Equal(t, "open", taskStatus(&db.TaskQuery{RecommendedAgentIDs: []uuid.UUID{agentID}}))
 
-	action := nextActionForNeedsAgent(taskID, "no_public_agent", "no agent")
-	require.Equal(t, "publish_task", action.Type)
+	action := nextActionForNeedsAgent("  audit   the data  ", []string{"data/sql", "ops/audit"}, "no_public_agent", "no agent")
+	require.Equal(t, "connect_agent", action.Type)
 	require.Equal(t, "no_public_agent", action.ReasonCode)
-	require.Contains(t, action.Href, taskID.String())
-
-	ptr := copyStringPtr(&summary)
-	require.NotSame(t, &summary, ptr)
-	require.Equal(t, summary, *ptr)
-	require.Nil(t, copyStringPtr(nil))
+	require.Equal(t, "/publish?q=audit+the+data&skill_ids=data%2Fsql%2Cops%2Faudit", action.Href)
+	require.NotContains(t, action.Hint, "公开摘要")
 
 	agent := toAgentSummary(&db.GetAgentsByIDsRow{
 		Agent: db.Agent{
@@ -426,13 +315,8 @@ func TestTaskHandlersValidateBeforeServiceDispatch(t *testing.T) {
 		{name: "choose invalid task id", call: (*Handler).Choose, method: http.MethodPost, path: "/api/v1/tasks/bad/choose", body: `{"agent_id":"` + validAgent + `"}`, userID: validUser, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 		{name: "choose invalid body", call: (*Handler).Choose, method: http.MethodPost, path: "/api/v1/tasks/" + validID + "/choose", body: `{`, userID: validUser, paramID: validID, wantHTTP: http.StatusBadRequest, wantError: "请求体格式错误"},
 		{name: "choose validation", call: (*Handler).Choose, method: http.MethodPost, path: "/api/v1/tasks/" + validID + "/choose", body: `{}`, userID: validUser, paramID: validID, wantHTTP: http.StatusUnprocessableEntity, wantError: "AgentID"},
-		{name: "publish invalid id", call: (*Handler).Publish, method: http.MethodPost, path: "/api/v1/tasks/bad/publish", body: `{}`, userID: validUser, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
-		{name: "claim validation", call: (*Handler).Claim, method: http.MethodPost, path: "/api/v1/tasks/" + validID + "/claim", body: `{}`, userID: validUser, paramID: validID, wantHTTP: http.StatusUnprocessableEntity, wantError: "AgentID"},
-		{name: "complete validation", call: (*Handler).Complete, method: http.MethodPost, path: "/api/v1/tasks/" + validID + "/complete", body: `{}`, userID: validUser, paramID: validID, wantHTTP: http.StatusUnprocessableEntity, wantError: "AgentID"},
 		{name: "run validation", call: (*Handler).Run, method: http.MethodPost, path: "/api/v1/tasks/" + validID + "/run", body: `{}`, userID: validUser, paramID: validID, wantHTTP: http.StatusUnprocessableEntity, wantError: "AgentID"},
-		{name: "accept invalid id", call: (*Handler).Accept, method: http.MethodPost, path: "/api/v1/tasks/bad/accept", userID: validUser, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
-		{name: "revision validation", call: (*Handler).RequestRevision, method: http.MethodPost, path: "/api/v1/tasks/" + validID + "/revision", body: `{}`, userID: validUser, paramID: validID, wantHTTP: http.StatusUnprocessableEntity, wantError: "Note"},
-		{name: "get by id invalid id", call: (*Handler).GetByID, method: http.MethodGet, path: "/api/v1/tasks/bad", userID: validUser, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
+		{name: "get by id invalid id", call: (*Handler).GetByID, method: http.MethodGet, path: "/api/v1/tasks/bad", userID: validUser, paramID: "bad", wantHTTP: http.StatusNotFound, wantError: "任务不存在"},
 		{name: "list mine missing user", call: (*Handler).ListMine, method: http.MethodGet, path: "/api/v1/tasks/me?limit=100", wantHTTP: http.StatusUnauthorized, wantError: "认证失败"},
 	}
 
@@ -470,20 +354,25 @@ func TestTaskHandlerRoutesAndTemplates(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, key := range []string{
-		http.MethodGet + " /api/v1/tasks/board",
 		http.MethodGet + " /api/v1/task-templates",
 		http.MethodPost + " /api/v1/tasks/recommend",
 		http.MethodPost + " /api/v1/tasks/:id/choose",
-		http.MethodPost + " /api/v1/tasks/:id/publish",
-		http.MethodPost + " /api/v1/tasks/:id/claim",
 		http.MethodPost + " /api/v1/tasks/:id/run",
-		http.MethodPost + " /api/v1/tasks/:id/complete",
-		http.MethodPost + " /api/v1/tasks/:id/accept",
-		http.MethodPost + " /api/v1/tasks/:id/revision",
 		http.MethodGet + " /api/v1/tasks/me",
 		http.MethodGet + " /api/v1/tasks/:id",
 	} {
 		require.True(t, routes[key], key)
+	}
+	for _, key := range []string{
+		http.MethodGet + " /api/v1/tasks/board",
+		http.MethodPost + " /api/v1/tasks/:id/publish",
+		http.MethodPost + " /api/v1/tasks/:id/unpublish",
+		http.MethodPost + " /api/v1/tasks/:id/claim",
+		http.MethodPost + " /api/v1/tasks/:id/complete",
+		http.MethodPost + " /api/v1/tasks/:id/accept",
+		http.MethodPost + " /api/v1/tasks/:id/revision",
+	} {
+		require.False(t, routes[key], key)
 	}
 
 	rec := httptest.NewRecorder()

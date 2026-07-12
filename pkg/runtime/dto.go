@@ -391,12 +391,6 @@ type AgentEvent struct {
 	Payload   map[string]interface{} `json:"payload"`
 }
 
-// ReportRunEventRequest Agent endpoint -> OpenLinker 的运行中事件上报请求体。
-type ReportRunEventRequest struct {
-	EventType string                 `json:"event_type"`
-	Payload   map[string]interface{} `json:"payload,omitempty"`
-}
-
 // AgentError 创作者侧错误（业务级 4xx 等场景）。
 type AgentError struct {
 	Code    string `json:"code"`

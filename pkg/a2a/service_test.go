@@ -153,8 +153,8 @@ func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
 		`UPDATE agents
-		    SET connection_mode='runtime_pull',
-		        endpoint_url='openlinker-runtime-pull://' || slug
+		    SET connection_mode='agent_node',
+		        endpoint_url='openlinker-agent-node://' || slug
 		  WHERE id=$1`,
 		agentID)
 	require.NoError(t, err)
@@ -171,11 +171,11 @@ func TestRuntimeWorkbenchShowsV2SessionAndBacklog(t *testing.T) {
 	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, agentID.String(), workbench.Agent.ID)
-	assert.Equal(t, "runtime_pull", workbench.Agent.ConnectionMode)
+	assert.Equal(t, "agent_node", workbench.Agent.ConnectionMode)
 	assert.True(t, workbench.Agent.ReadinessCallable)
 	assert.Equal(t, "ws_primary_pull_v2_fallback", workbench.Runtime.TransportPolicy)
-	assert.Equal(t, "runtime_ws", workbench.Runtime.PrimaryTransport)
-	assert.Equal(t, "runtime_pull_v2", workbench.Runtime.FallbackTransport)
+	assert.Equal(t, "websocket", workbench.Runtime.PrimaryTransport)
+	assert.Equal(t, "pull_v2", workbench.Runtime.FallbackTransport)
 	assert.Equal(t, "online", workbench.Runtime.ConnectionStatus)
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveNodeCount)
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveSessionCount)

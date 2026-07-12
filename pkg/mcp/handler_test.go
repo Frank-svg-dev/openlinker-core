@@ -331,7 +331,7 @@ func TestPostRPCToolCallValidatesParamsBeforeServiceDispatch(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := newRPCContext(body, rec)
 			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
-			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:write"})
+			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:create"})
 			c.Set(string(httpx.CtxKeyUserID), "8582c7a4-0f02-4895-8570-7c7cce357e5f")
 
 			require.NoError(t, NewHandler(nil).PostRPC(c))
@@ -447,7 +447,7 @@ func TestRESTHandlersValidateAuthBodiesAndUserContextBeforeServiceDispatch(t *te
 			name: "create task validation",
 			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
 				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/create_task", `{"query":"abc"}`), rec)
-				setAPIKeyScopes(c, "tasks:write")
+				setAPIKeyScopes(c, "tasks:create")
 				c.Set(string(httpx.CtxKeyUserID), "8582c7a4-0f02-4895-8570-7c7cce357e5f")
 				return c
 			},
@@ -548,7 +548,7 @@ func TestRESTHandlersDispatchToService(t *testing.T) {
 			name: "create task",
 			build: func(e *echo.Echo, rec *httptest.ResponseRecorder) echo.Context {
 				c := e.NewContext(newJSONRequest(http.MethodPost, "/api/v1/mcp/create_task", `{"query":"summarize a long document","skill_ids":["summary"],"mcp_tools":["search_agents"]}`), rec)
-				setAPIKeyScopes(c, "tasks:write")
+				setAPIKeyScopes(c, "tasks:create")
 				c.Set(string(httpx.CtxKeyUserID), userID.String())
 				return c
 			},
@@ -631,7 +631,7 @@ func TestPostRPCToolCallDispatchesAllTools(t *testing.T) {
 			rec := httptest.NewRecorder()
 			c := newRPCContext(`{"jsonrpc":"2.0","id":"ok","method":"tools/call","params":`+tt.params+`}`, rec)
 			c.Set(string(httpx.CtxKeyAuthMethod), "user_token")
-			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:write"})
+			c.Set(string(httpx.CtxKeyAuthScopes), []string{"agents:read", "agents:run", "runs:read", "tasks:create"})
 			c.Set(string(httpx.CtxKeyUserID), userID.String())
 
 			require.NoError(t, NewHandler(svc).PostRPC(c))

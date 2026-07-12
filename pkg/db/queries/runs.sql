@@ -2,8 +2,8 @@
 --
 -- 模块 4（调用执行）+ 模块 6（双面板）共用的 runs 表查询。
 -- 文件分工约定：
---   模块 4（runtime，写）由 subagent-4a 维护：
---     CreateRun / MarkRunSuccess / MarkRunFailed / GetRunByID
+--   模块 4（runtime，写）由 Runtime v2 的事务协调器维护：
+--     CreateRun / GetRunByID；终态只能由 ResultFinalizer 写入
 --   模块 6（dashboard，读）由 subagent-6a 维护：
 --     ListRunsByUser / CountRunsByUserThisMonth
 --     SumSpentByUserThisMonth / SumEarningsByCreatorThisMonth
@@ -63,44 +63,6 @@ WHERE r.id = $1
   AND r.dispatch_state = 'dead_letter'
 FOR UPDATE OF r;
 
--- name: MarkRunSuccess :exec
--- 调用成功：写 output, status=success, duration_ms, finished_at
-UPDATE runs
-SET status = 'success',
-    output = $2,
-    duration_ms = $3,
-    finished_at = NOW()
-WHERE runs.id = $1 AND runs.status = 'running';
-
--- name: MarkRunFailed :exec
--- 调用失败：写 status, error_code, error_message, duration_ms
-UPDATE runs
-SET status = $2,
-    error_code = $3,
-    error_message = $4,
-    duration_ms = $5,
-    finished_at = NOW()
-WHERE runs.id = $1 AND runs.status = 'running';
-
--- name: CancelRun :one
--- 用户取消 running run。仅 owner 可取消，终态 run 不被覆盖。
-UPDATE runs
-SET status = 'canceled',
-    error_code = 'CANCELED',
-    error_message = $3,
-    duration_ms = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000))::int,
-    finished_at = NOW()
-WHERE runs.id = $1 AND runs.user_id = $2 AND runs.status = 'running'
-RETURNING runs.id, runs.user_id, runs.agent_id, runs.input, runs.output,
-          runs.status, runs.error_code, runs.error_message, runs.cost_cents,
-          runs.platform_fee_cents, runs.creator_revenue_cents, runs.duration_ms,
-          runs.started_at, runs.finished_at, runs.source,
-          runs.runtime_contract_id, runs.dispatch_state, runs.attempt_count,
-          runs.max_attempts, runs.next_attempt_at, runs.latest_attempt_id,
-          runs.active_attempt_id, runs.cancel_state, runs.cancel_requested_at,
-          runs.cancel_acknowledged_at, runs.cancel_reason,
-          runs.dead_lettered_at, runs.replay_of_run_id;
-
 -- name: GetRunByID :one
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,
@@ -113,11 +75,6 @@ SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
 FROM runs r
 WHERE r.id = $1;
 
--- name: GetRunRuntimeContractID :one
-SELECT runtime_contract_id
-FROM runs
-WHERE id = $1;
-
 -- name: GetRunReplayPayload :one
 -- Owner/state/DLQ authorization is performed before this narrow payload read.
 -- Keeping it separate prevents request metadata from leaking into ordinary Run
@@ -125,27 +82,6 @@ WHERE id = $1;
 SELECT input, request_metadata
 FROM runs
 WHERE id = $1;
-
--- name: ListStaleEndpointRuns :many
--- direct_http / mcp_server 由 core API 进程主动调用 endpoint。若进程在创建
--- running run 后崩溃、重启或 DB 暂时不可写，普通执行协程可能来不及把 run
--- 收敛到终态；该查询只扫描非队列型 endpoint run。队列型 run
--- 由 runtime v2 lease/deadline reconciler 处理。
-SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
-       COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')::text AS connection_mode,
-       'ENDPOINT_RUN_TIMEOUT'::text AS error_code,
-       CASE COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')
-           WHEN 'mcp_server' THEN 'Agent MCP server 调用超时，已标记为 timeout。请检查 MCP endpoint/tool 的响应时间；长任务请使用 Agent Node 的 runtime v2 队列执行。'
-           ELSE 'Agent endpoint 调用超时，已标记为 timeout。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的 runtime v2 队列执行。'
-       END::text AS error_message
-FROM runs r
-JOIN agents a ON a.id = r.agent_id
-WHERE r.status = 'running'
-  AND COALESCE(NULLIF(a.connection_mode, ''), 'direct_http') IN ('direct_http', 'mcp_server')
-  AND r.started_at < $1
-ORDER BY r.started_at ASC
-LIMIT $2
-FOR UPDATE SKIP LOCKED;
 
 -- name: LockRunForResultFinalization :one
 -- Result 事务的首把锁。所有 deadline 判断使用同一行返回的数据库时钟，

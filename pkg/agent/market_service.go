@@ -475,7 +475,7 @@ func (s *MarketService) getAgentCardBySlug(ctx context.Context, slug string, ext
 func agentCardRuntimeExt(connectionMode string) AgentCardRuntimeExt {
 	onlineSignal := "direct_endpoint_probe_and_run_result"
 	switch connectionMode {
-	case ConnectionModeRuntimePull, ConnectionModeRuntimeWS:
+	case ConnectionModeAgentNode:
 		onlineSignal = "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"
 	case "mcp_server":
 		onlineSignal = "mcp_tool_call_and_run_result"
@@ -584,7 +584,7 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 }
 
 func isQueuedRuntimeConnectionMode(mode string) bool {
-	return mode == ConnectionModeRuntimePull || mode == ConnectionModeRuntimeWS
+	return mode == ConnectionModeAgentNode
 }
 
 func stringPtrFromUUID(id *uuid.UUID) *string {

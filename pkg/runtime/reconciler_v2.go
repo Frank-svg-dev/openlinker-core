@@ -24,11 +24,12 @@ var (
 // bounded by the requested limit; candidates skipped because another worker
 // held a SKIP LOCKED row are not counted as reconciled.
 type RuntimeV2ReconcileBatchResult struct {
-	Scanned      int `json:"scanned"`
-	Reconciled   int `json:"reconciled"`
-	Requeued     int `json:"requeued"`
-	TimedOut     int `json:"timed_out"`
-	DeadLettered int `json:"dead_lettered"`
+	Scanned       int `json:"scanned"`
+	Reconciled    int `json:"reconciled"`
+	Requeued      int `json:"requeued"`
+	TimedOut      int `json:"timed_out"`
+	DeadLettered  int `json:"dead_lettered"`
+	ResultUnknown int `json:"result_unknown"`
 }
 
 // RuntimeV2DeadlineReconciler is a standalone worker boundary. It is not
@@ -57,6 +58,7 @@ const (
 	runtimeV2ReconcileRequeued
 	runtimeV2ReconcileTimedOut
 	runtimeV2ReconcileDeadLettered
+	runtimeV2ReconcileResultUnknown
 )
 
 // ReconcileBatch discovers at most limit due Runs with PostgreSQL's clock and
@@ -92,6 +94,8 @@ func (r *RuntimeV2DeadlineReconciler) ReconcileBatch(
 			result.TimedOut++
 		case runtimeV2ReconcileDeadLettered:
 			result.DeadLettered++
+		case runtimeV2ReconcileResultUnknown:
+			result.ResultUnknown++
 		default:
 			return result, errors.New("runtime v2 reconciler returned an unknown disposition")
 		}
@@ -273,6 +277,18 @@ func (r *RuntimeV2DeadlineReconciler) reconcileExpiredExecution(
 	outcome := "lease_expired"
 	attemptErrorCode := "LEASE_EXPIRED"
 	var retryDelay time.Duration
+	coreResultUnknown := (attempt.ExecutorType == "core_http" || attempt.ExecutorType == "core_mcp") &&
+		(locked.EndpointIdempotencySnapshot == nil || !*locked.EndpointIdempotencySnapshot)
+	if coreResultUnknown {
+		terminal = &runtimeV2ReconcileTerminal{
+			status: string(RuntimeRunFailed), dispatchState: string(RuntimeDispatchTerminal),
+			classification: RuntimeResultClassificationNonRetryable,
+			errorCode:      "ENDPOINT_RESULT_UNKNOWN",
+			errorMessage:   "Endpoint execution outcome could not be confirmed",
+		}
+		outcome = "result_unknown"
+		attemptErrorCode = terminal.errorCode
+	}
 	if terminal != nil && terminal.errorCode == "RUN_DEADLINE_EXCEEDED" {
 		outcome = "timeout"
 		attemptErrorCode = terminal.errorCode
@@ -303,6 +319,9 @@ func (r *RuntimeV2DeadlineReconciler) reconcileExpiredExecution(
 		}
 		if terminal.dispatchState == string(RuntimeDispatchDeadLetter) {
 			return runtimeV2ReconcileDeadLettered, nil
+		}
+		if coreResultUnknown {
+			return runtimeV2ReconcileResultUnknown, nil
 		}
 		return runtimeV2ReconcileTimedOut, nil
 	}

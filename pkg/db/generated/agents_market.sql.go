@@ -113,7 +113,7 @@ WHERE a.visibility = 'public'
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     )
@@ -128,14 +128,14 @@ ORDER BY CASE
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     ) THEN 0
     ELSE 1
 END ASC,
 CASE
-    WHEN a.connection_mode IN ('runtime_pull', 'runtime_ws')
+    WHEN a.connection_mode = 'agent_node'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       THEN 3
     ELSE CASE COALESCE(av.availability_status, 'unknown')
@@ -294,7 +294,7 @@ WHERE a.visibility = 'public'
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     )

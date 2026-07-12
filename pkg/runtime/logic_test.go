@@ -66,6 +66,12 @@ func TestRuntimeAuthScopeAndParsingHelpers(t *testing.T) {
 	_, err = runtimeBearerToken("Basic abc")
 	require.True(t, errors.As(err, &httpErr))
 	require.Equal(t, http.StatusUnauthorized, httpErr.Status)
+	require.Equal(t, "缺少 Agent Token", httpErr.Message)
+
+	_, err = (&Service{}).ValidateRuntimeToken(context.Background(), "not-an-agent-token", "agent:pull")
+	require.True(t, errors.As(err, &httpErr))
+	require.Equal(t, http.StatusUnauthorized, httpErr.Status)
+	require.Equal(t, "Agent Token 无效或已撤销", httpErr.Message)
 
 	n, err := parseOptionalInt32("")
 	require.NoError(t, err)
@@ -136,10 +142,10 @@ func TestRunStartedEventPayloadIncludesConnectionDetails(t *testing.T) {
 			name: "runtime ws",
 			agent: db.Agent{
 				ID:             uuid.New(),
-				ConnectionMode: connectionModeRuntimeWS,
+				ConnectionMode: connectionModeAgentNode,
 			},
-			wantMode:      connectionModeRuntimeWS,
-			wantTransport: "runtime_ws",
+			wantMode:      connectionModeAgentNode,
+			wantTransport: "agent_node",
 		},
 	}
 
@@ -161,14 +167,7 @@ func TestRunStartedEventPayloadIncludesConnectionDetails(t *testing.T) {
 	}
 }
 
-func TestEndpointTimeoutOptionHelpers(t *testing.T) {
-	endpointCfg := normalizeEndpointRunTimeoutConfig(EndpointRunTimeoutConfig{})
-	require.Equal(t, defaultEndpointRunTimeout, endpointCfg.StaleAfter)
-	require.Equal(t, int32(defaultEndpointRunBatchSize), endpointCfg.BatchSize)
-	endpointCfg = normalizeEndpointRunTimeoutConfig(EndpointRunTimeoutConfig{StaleAfter: time.Hour, BatchSize: 3})
-	require.Equal(t, time.Hour, endpointCfg.StaleAfter)
-	require.Equal(t, int32(3), endpointCfg.BatchSize)
-
+func TestRuntimeScopeHelpers(t *testing.T) {
 	require.True(t, hasRuntimeScope([]string{"agent:pull"}, "agent:pull"))
 	require.False(t, hasRuntimeScope([]string{"agent:call"}, "agent:pull"))
 	require.True(t, hasAnyRuntimeScope([]string{"agent:call"}, "agent:pull", "agent:call"))
@@ -241,17 +240,17 @@ func TestRuntimeCallAgentDispatchAndDryRun(t *testing.T) {
 	require.Nil(t, dryOutput)
 	require.Equal(t, "UPSTREAM_BAD: upstream refused", dryErr)
 
-	agent.ConnectionMode = connectionModeRuntimePull
+	agent.ConnectionMode = connectionModeAgentNode
 	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
 	require.Error(t, callErr)
 	require.Nil(t, agentErr)
-	require.Contains(t, callErr.Error(), "runtime_pull")
+	require.Contains(t, callErr.Error(), "agent_node")
 
-	agent.ConnectionMode = connectionModeRuntimeWS
+	agent.ConnectionMode = connectionModeAgentNode
 	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
 	require.Error(t, callErr)
 	require.Nil(t, agentErr)
-	require.Contains(t, callErr.Error(), "runtime_ws")
+	require.Contains(t, callErr.Error(), "agent_node")
 
 	agent.ConnectionMode = "unsupported"
 	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
@@ -386,19 +385,14 @@ func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
 	require.Equal(t, "partial", coverageStatus([]string{"a", "b"}, nil, []string{"a"}, []string{"b"}, nil, nil))
 	require.Equal(t, "missing_requirements", coverageStatus([]string{"a"}, nil, nil, []string{"a"}, nil, nil))
 
-	claimedBy := userID
-	claimedAgent := agentID
 	chosenAgent := agentID
-	task := db.TaskQuery{UserID: userID, ClaimedByUserID: &claimedBy, ClaimedAgentID: &claimedAgent}
+	task := db.TaskQuery{UserID: userID, ChosenAgentID: &chosenAgent}
 	require.NoError(t, requireTaskRunAssociation(task, userID, agentID))
-	task.ClaimedAgentID = &chosenAgent
 	require.Error(t, requireTaskRunAssociation(task, uuid.New(), agentID))
 	otherAgent := uuid.New()
 	require.Error(t, requireTaskRunAssociation(task, userID, otherAgent))
-	task = db.TaskQuery{UserID: userID, ChosenAgentID: &chosenAgent}
-	require.NoError(t, requireTaskRunAssociation(task, userID, agentID))
 	task = db.TaskQuery{UserID: userID, RecommendedAgentIDs: []uuid.UUID{agentID}}
-	require.NoError(t, requireTaskRunAssociation(task, userID, agentID))
+	require.Error(t, requireTaskRunAssociation(task, userID, agentID))
 	require.True(t, uuidInList(agentID, []uuid.UUID{agentID}))
 	require.False(t, uuidInList(agentID, []uuid.UUID{otherAgent}))
 
@@ -442,7 +436,7 @@ func TestA2AContextAndRequirementEvidenceHelpers(t *testing.T) {
 	require.Equal(t, []string{"data/sql"}, evidence.RequiredSkillIDs)
 }
 
-func TestRuntimeA2AAndDeliveryQueryErrorEdges(t *testing.T) {
+func TestRuntimeA2AQueryErrorEdge(t *testing.T) {
 	ctx := context.Background()
 	runID := uuid.New()
 
@@ -451,9 +445,6 @@ func TestRuntimeA2AAndDeliveryQueryErrorEdges(t *testing.T) {
 	require.Equal(t, runID.String(), a2a.CurrentRunID)
 	require.Empty(t, a2a.ParentRunID)
 	require.Empty(t, a2a.CallerAgentID)
-
-	svc = &Service{queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{{err: errors.New("delegation store down")}}})}
-	require.True(t, svc.shouldTriggerExternalDelivery(ctx, runID))
 }
 
 func TestRuntimeRequirementSnapshotQueries(t *testing.T) {
@@ -465,6 +456,7 @@ func TestRuntimeRequirementSnapshotQueries(t *testing.T) {
 		task: db.TaskQuery{
 			ID:                  taskID,
 			UserID:              userID,
+			ChosenAgentID:       &agentID,
 			ParsedSkills:        []string{"data/sql", "content/summary", "data/sql"},
 			MCPTools:            []string{"run_agent", "files/export", "run_agent"},
 			RecommendedAgentIDs: []uuid.UUID{agentID},
@@ -555,16 +547,10 @@ func TestRuntimeAttachRequirementEvidenceFromQueries(t *testing.T) {
 
 func TestRuntimeServiceDependencySettersAndTaskCallbackTrigger(t *testing.T) {
 	svc := &Service{}
-	webhook := &fakeRuntimeWebhookEnqueuer{}
 	taskCallback := &recordingTaskCallbackEnqueuer{events: make(chan db.RunEvent, 1)}
-	delivery := &fakeRuntimeDeliveryEnqueuer{}
 
-	svc.SetWebhookEnqueuer(webhook)
 	svc.SetTaskCallbackEnqueuer(taskCallback)
-	svc.SetDeliveryEnqueuer(delivery)
-	require.Equal(t, webhook, svc.webhookSvc)
 	require.Equal(t, taskCallback, svc.taskCallbackSvc)
-	require.Equal(t, delivery, svc.deliverySvc)
 
 	svc.triggerTaskCallbackEvent(nil)
 	event := &db.RunEvent{ID: uuid.New(), RunID: uuid.New(), EventType: "run.message.delta"}
@@ -790,7 +776,6 @@ func TestRuntimePersistenceHelperEdges(t *testing.T) {
 	seq := int32(5)
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	messageID := uuid.New()
-	eventID := uuid.New()
 
 	dbtx := &runtimeFakeDBTX{rows: []runtimeFakeRow{{
 		values: []any{messageID, runID, &seq, "agent", "trimmed", []byte(`{}`), now},
@@ -812,19 +797,6 @@ func TestRuntimePersistenceHelperEdges(t *testing.T) {
 	svc := &Service{queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{{err: errors.New("event insert failed")}}})}
 	require.Nil(t, svc.recordRunEventBestEffort(ctx, runID, "run.completed", map[string]interface{}{"status": "success"}))
 	svc.recordRunMessageBestEffort(ctx, runID, nil, "", "", map[string]interface{}{"bad": func() {}})
-
-	eventPayload := []byte(`{"text":"hello"}`)
-	agentDBTX := &runtimeFakeDBTX{rows: []runtimeFakeRow{
-		{values: []any{eventID, runID, (*uuid.UUID)(nil), seq, "run.message.delta", eventPayload, now}},
-		{values: []any{messageID, runID, &seq, "agent", "hello", eventPayload, now}},
-	}}
-	(&Service{queries: db.New(agentDBTX)}).recordAgentEventsBestEffort(ctx, runID, []AgentEvent{
-		{EventType: "run.unsupported", Payload: map[string]interface{}{"text": "skip"}},
-		{EventType: "run.message.delta", Payload: nil},
-	})
-	require.Len(t, agentDBTX.queryRowArgs, 2)
-	require.Equal(t, "run.message.delta", agentDBTX.queryRowArgs[0][2])
-	require.Equal(t, "agent", agentDBTX.queryRowArgs[1][2])
 }
 
 func TestRuntimeReadServiceQueryErrorEdges(t *testing.T) {
@@ -880,126 +852,6 @@ func TestRuntimeReadServiceQueryErrorEdges(t *testing.T) {
 			svc := &Service{queries: db.New(dbtx)}
 			requireRuntimeHTTPStatus(t, call(svc), http.StatusInternalServerError)
 			require.Equal(t, 1, dbtx.queryCalls)
-		})
-	}
-}
-
-func TestRuntimeAsyncTriggerErrorEdges(t *testing.T) {
-	runID := uuid.New()
-	userID := uuid.New()
-	agentID := uuid.New()
-	creatorID := uuid.New()
-	runRow := runtimeRunRowValues(runID, userID, agentID, "success")
-	agentRow := runtimeAgentRowValues(agentID, creatorID, "agent-slug")
-
-	webhook := &signalingRuntimeWebhookEnqueuer{done: make(chan struct{}, 1), err: errors.New("webhook down")}
-	(&Service{
-		queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{
-			{values: []any{legacyRuntimeContractID}}, {values: runRow}, {values: agentRow},
-		}}),
-		webhookSvc: webhook,
-	}).triggerWebhook(runID, agentID, map[string]interface{}{"ok": true})
-	requireRuntimeSignal(t, webhook.done)
-
-	webhookByRun := &signalingRuntimeWebhookEnqueuer{done: make(chan struct{}, 1), err: errors.New("webhook down")}
-	(&Service{
-		queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{
-			{values: []any{legacyRuntimeContractID}}, {values: runRow}, {values: agentRow},
-		}}),
-		webhookSvc: webhookByRun,
-	}).triggerWebhookByRun(runID)
-	requireRuntimeSignal(t, webhookByRun.done)
-
-	taskCallback := &signalingTaskCallbackEnqueuer{done: make(chan struct{}, 1), err: errors.New("task callback down")}
-	event := db.RunEvent{ID: uuid.New(), RunID: runID, EventType: "run.completed"}
-	(&Service{
-		queries:         db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{{values: []any{legacyRuntimeContractID}}}}),
-		taskCallbackSvc: taskCallback,
-	}).triggerTaskCallbackEvent(&event)
-	requireRuntimeSignal(t, taskCallback.done)
-
-	delivery := &signalingRuntimeDeliveryEnqueuer{done: make(chan struct{}, 1), err: errors.New("delivery down")}
-	(&Service{
-		queries: db.New(&runtimeFakeDBTX{rows: []runtimeFakeRow{
-			{values: []any{legacyRuntimeContractID}}, {values: runRow},
-		}}),
-		deliverySvc: delivery,
-	}).triggerDelivery(runID)
-	requireRuntimeSignal(t, delivery.done)
-}
-
-func TestRuntimeV2TerminalSideEffectsFailClosed(t *testing.T) {
-	runID := uuid.New()
-	userID := uuid.New()
-	agentID := uuid.New()
-	creatorID := uuid.New()
-	parentRunID := uuid.New()
-	callerAgentID := uuid.New()
-
-	tests := []struct {
-		name        string
-		contractID  string
-		contractErr error
-	}{
-		{name: "runtime v2", contractID: RuntimeContractID},
-		{name: "contract lookup failure", contractErr: errors.New("contract store down")},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			newDB := func() *runtimeTerminalGateDBTX {
-				return &runtimeTerminalGateDBTX{
-					contractID: tt.contractID, contractErr: tt.contractErr,
-					runRow:   runtimeRunRowValues(runID, userID, agentID, "success"),
-					agentRow: runtimeAgentRowValues(agentID, creatorID, "agent-slug"),
-					delegationRow: []any{
-						runID, parentRunID, callerAgentID, "delegate", time.Now(),
-					},
-					contractRead: make(chan struct{}, 1),
-					downstream:   make(chan struct{}, 1),
-				}
-			}
-
-			webhookDB := newDB()
-			webhook := &signalingRuntimeWebhookEnqueuer{done: make(chan struct{}, 1)}
-			(&Service{queries: db.New(webhookDB), webhookSvc: webhook}).
-				triggerWebhook(runID, agentID, map[string]interface{}{"ok": true})
-			requireRuntimeSignal(t, webhookDB.contractRead)
-			requireRuntimeNoSignal(t, webhook.done)
-			requireRuntimeNoSignal(t, webhookDB.downstream)
-
-			deliveryDB := newDB()
-			delivery := &signalingRuntimeDeliveryEnqueuer{done: make(chan struct{}, 1)}
-			(&Service{queries: db.New(deliveryDB), deliverySvc: delivery}).triggerDelivery(runID)
-			requireRuntimeSignal(t, deliveryDB.contractRead)
-			requireRuntimeNoSignal(t, delivery.done)
-			requireRuntimeNoSignal(t, deliveryDB.downstream)
-
-			callbackDB := newDB()
-			callback := &signalingTaskCallbackEnqueuer{done: make(chan struct{}, 1)}
-			(&Service{queries: db.New(callbackDB), taskCallbackSvc: callback}).
-				triggerTaskCallbackEvent(&db.RunEvent{
-					ID: uuid.New(), RunID: runID, EventType: "run.completed",
-				})
-			requireRuntimeSignal(t, callbackDB.contractRead)
-			requireRuntimeNoSignal(t, callback.done)
-
-			eventDB := newDB()
-			eventSvc := &Service{queries: db.New(eventDB)}
-			require.Nil(t, eventSvc.recordRunEventBestEffort(
-				context.Background(), runID, "run.completed", map[string]interface{}{"status": "success"},
-			))
-			requireRuntimeSignal(t, eventDB.contractRead)
-			requireRuntimeNoSignal(t, eventDB.downstream)
-
-			parentDB := newDB()
-			parentSvc := &Service{queries: db.New(parentDB)}
-			resp := &RunResponse{Status: "success"}
-			parentSvc.decorateDelegationCompletion(context.Background(), runID, agentID, resp)
-			require.Equal(t, parentRunID.String(), resp.ParentRunID)
-			require.Equal(t, callerAgentID.String(), resp.CallerAgentID)
-			requireRuntimeSignal(t, parentDB.contractRead)
-			requireRuntimeNoSignal(t, parentDB.downstream)
 		})
 	}
 }
@@ -1226,7 +1078,6 @@ func TestRuntimeSSEAndHandlerValidation(t *testing.T) {
 		{name: "artifacts invalid id", call: (*Handler).GetRunArtifacts, method: http.MethodGet, path: "/api/v1/runs/bad/artifacts", userID: validUser, auth: "jwt", paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 		{name: "messages invalid id", call: (*Handler).GetRunMessages, method: http.MethodGet, path: "/api/v1/runs/bad/messages", userID: validUser, auth: "jwt", paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 		{name: "stream invalid last event", call: (*Handler).StreamRunEvents, method: http.MethodGet, path: "/api/v1/runs/" + validRun + "/stream", userID: validUser, auth: "jwt", paramID: validRun, query: "after_sequence=bad", wantHTTP: http.StatusBadRequest, wantError: "Last-Event-ID"},
-		{name: "report event invalid id", call: (*Handler).PostRunEvent, method: http.MethodPost, path: "/api/v1/runs/bad/events", body: `{"event_type":"run.message.delta"}`, paramID: "bad", wantHTTP: http.StatusBadRequest, wantError: "id 不是合法 uuid"},
 	}
 
 	for _, tt := range tests {
@@ -1286,7 +1137,6 @@ func TestRuntimeRoutes(t *testing.T) {
 		http.MethodGet + " /api/v1/runs/:id/stream",
 		http.MethodPost + " /api/v1/runs/:id/cancel",
 		http.MethodPost + " /api/v1/runs/:id/replay",
-		http.MethodPost + " /api/v1/runs/:id/events",
 		http.MethodGet + " /api/v1/admin/runtime/dead-letters",
 		http.MethodGet + " /api/v1/admin/runtime/nodes",
 		http.MethodPost + " /api/v1/admin/runtime/nodes/:id/drain",
@@ -1295,6 +1145,7 @@ func TestRuntimeRoutes(t *testing.T) {
 		require.True(t, routes[key], key)
 	}
 	for _, key := range []string{
+		http.MethodPost + " /api/v1/runs/:id/events",
 		http.MethodPost + " /api/v1/agent-runtime/heartbeat",
 		http.MethodGet + " /api/v1/agent-runtime/runs/claim",
 		http.MethodPost + " /api/v1/agent-runtime/runs/:id/result",
@@ -1524,7 +1375,7 @@ func runtimeRunRowValues(runID, userID, agentID uuid.UUID, status string) []any 
 		started,
 		(*time.Time)(nil),
 		"api",
-		legacyRuntimeContractID,
+		RuntimeContractID,
 		"terminal",
 		int32(0),
 		int32(1),
@@ -1540,110 +1391,6 @@ func runtimeRunRowValues(runID, userID, agentID uuid.UUID, status string) []any 
 	}
 }
 
-func runtimeAgentRowValues(agentID, creatorID uuid.UUID, slug string) []any {
-	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
-	return []any{
-		agentID,
-		creatorID,
-		slug,
-		"Agent",
-		"desc",
-		"https://example.com/agent",
-		(*string)(nil),
-		int32(0),
-		[]string{},
-		"active",
-		"public",
-		"unreviewed",
-		(*string)(nil),
-		(*time.Time)(nil),
-		int32(0),
-		int64(0),
-		(*string)(nil),
-		connectionModeDirectHTTP,
-		(*string)(nil),
-		now,
-		now,
-	}
-}
-
-func requireRuntimeSignal(t *testing.T, ch <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-ch:
-	case <-time.After(time.Second):
-		t.Fatal("runtime async trigger did not run")
-	}
-}
-
-func requireRuntimeNoSignal(t *testing.T, ch <-chan struct{}) {
-	t.Helper()
-	select {
-	case <-ch:
-		t.Fatal("unexpected runtime legacy side effect")
-	case <-time.After(50 * time.Millisecond):
-	}
-}
-
-type runtimeTerminalGateDBTX struct {
-	contractID    string
-	contractErr   error
-	runRow        []any
-	agentRow      []any
-	delegationRow []any
-	contractRead  chan struct{}
-	downstream    chan struct{}
-}
-
-func (f *runtimeTerminalGateDBTX) Exec(context.Context, string, ...interface{}) (pgconn.CommandTag, error) {
-	return pgconn.NewCommandTag("INSERT 1"), nil
-}
-
-func (f *runtimeTerminalGateDBTX) Query(context.Context, string, ...interface{}) (pgx.Rows, error) {
-	return nil, errors.New("unexpected query")
-}
-
-func (f *runtimeTerminalGateDBTX) QueryRow(_ context.Context, sql string, _ ...interface{}) pgx.Row {
-	switch {
-	case strings.Contains(sql, "-- name: GetRunRuntimeContractID"):
-		f.contractRead <- struct{}{}
-		if f.contractErr != nil {
-			return runtimeFakeRow{err: f.contractErr}
-		}
-		return runtimeFakeRow{values: []any{f.contractID}}
-	case strings.Contains(sql, "-- name: GetRunDelegationByChild"):
-		return runtimeFakeRow{values: f.delegationRow}
-	case strings.Contains(sql, "-- name: GetRunByID"):
-		f.downstream <- struct{}{}
-		return runtimeFakeRow{values: f.runRow}
-	case strings.Contains(sql, "-- name: GetAgentByID"):
-		f.downstream <- struct{}{}
-		return runtimeFakeRow{values: f.agentRow}
-	case strings.Contains(sql, "-- name: CreateRunEvent"):
-		f.downstream <- struct{}{}
-		return runtimeFakeRow{err: errors.New("legacy terminal event must not be created")}
-	default:
-		f.downstream <- struct{}{}
-		return runtimeFakeRow{err: errors.New("unexpected query row")}
-	}
-}
-
-type fakeRuntimeWebhookEnqueuer struct{}
-
-func (f *fakeRuntimeWebhookEnqueuer) EnqueueDelivery(context.Context, *db.Run, string, map[string]interface{}) error {
-	return nil
-}
-
-type signalingRuntimeWebhookEnqueuer struct {
-	done chan struct{}
-	err  error
-}
-
-func (s *signalingRuntimeWebhookEnqueuer) EnqueueDelivery(context.Context, *db.Run, string, map[string]interface{}) error {
-	s.done <- struct{}{}
-	return s.err
-}
-
 type recordingTaskCallbackEnqueuer struct {
 	events chan db.RunEvent
 }
@@ -1651,32 +1398,6 @@ type recordingTaskCallbackEnqueuer struct {
 func (r *recordingTaskCallbackEnqueuer) EnqueueRunEvent(_ context.Context, event db.RunEvent) error {
 	r.events <- event
 	return nil
-}
-
-type signalingTaskCallbackEnqueuer struct {
-	done chan struct{}
-	err  error
-}
-
-func (s *signalingTaskCallbackEnqueuer) EnqueueRunEvent(context.Context, db.RunEvent) error {
-	s.done <- struct{}{}
-	return s.err
-}
-
-type fakeRuntimeDeliveryEnqueuer struct{}
-
-func (f *fakeRuntimeDeliveryEnqueuer) EnqueueIfDefault(context.Context, *db.Run) error {
-	return nil
-}
-
-type signalingRuntimeDeliveryEnqueuer struct {
-	done chan struct{}
-	err  error
-}
-
-func (s *signalingRuntimeDeliveryEnqueuer) EnqueueIfDefault(context.Context, *db.Run) error {
-	s.done <- struct{}{}
-	return s.err
 }
 
 type fakeTimeoutErr struct {

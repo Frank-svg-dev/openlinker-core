@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 )
 
 const runsCount = `-- name: RunsCount :one
@@ -163,94 +162,6 @@ func (q *Queries) LockReplaySourceForCreate(ctx context.Context, arg LockReplayS
 	return result, err
 }
 
-const markRunSuccess = `-- name: MarkRunSuccess :exec
-UPDATE runs
-SET status = 'success',
-    output = $2,
-    duration_ms = $3,
-    finished_at = NOW()
-WHERE id = $1 AND status = 'running'`
-
-// MarkRunSuccessParams 入参。
-type MarkRunSuccessParams struct {
-	ID         uuid.UUID `db:"id" json:"id"`
-	Output     []byte    `db:"output" json:"output"`
-	DurationMs int32     `db:"duration_ms" json:"duration_ms"`
-}
-
-// MarkRunSuccess 调用成功：写 output 与耗时。
-// status='running' 守卫保证幂等（重放无副作用）。
-func (q *Queries) MarkRunSuccess(ctx context.Context, arg MarkRunSuccessParams) error {
-	tag, err := q.db.Exec(ctx, markRunSuccess, arg.ID, arg.Output, arg.DurationMs)
-	if err == nil && tag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return err
-}
-
-const markRunFailed = `-- name: MarkRunFailed :exec
-UPDATE runs
-SET status = $2,
-    error_code = $3,
-    error_message = $4,
-    duration_ms = $5,
-    finished_at = NOW()
-WHERE id = $1 AND status = 'running'`
-
-// MarkRunFailedParams 入参。Status 取值 'failed'、'timeout' 或 'canceled'。
-type MarkRunFailedParams struct {
-	ID           uuid.UUID `db:"id" json:"id"`
-	Status       string    `db:"status" json:"status"`
-	ErrorCode    *string   `db:"error_code" json:"error_code"`
-	ErrorMessage *string   `db:"error_message" json:"error_message"`
-	DurationMs   int32     `db:"duration_ms" json:"duration_ms"`
-}
-
-// MarkRunFailed 调用失败：写错误信息与耗时。
-func (q *Queries) MarkRunFailed(ctx context.Context, arg MarkRunFailedParams) error {
-	tag, err := q.db.Exec(ctx, markRunFailed,
-		arg.ID,
-		arg.Status,
-		arg.ErrorCode,
-		arg.ErrorMessage,
-		arg.DurationMs,
-	)
-	if err == nil && tag.RowsAffected() == 0 {
-		return pgx.ErrNoRows
-	}
-	return err
-}
-
-const cancelRun = `-- name: CancelRun :one
-UPDATE runs
-SET status = 'canceled',
-    error_code = 'CANCELED',
-    error_message = $3,
-    duration_ms = GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000))::int,
-    finished_at = NOW()
-WHERE id = $1 AND user_id = $2 AND status = 'running'
-RETURNING id, user_id, agent_id, input, output, status, error_code, error_message,
-          cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
-          started_at, finished_at, source,
-          runtime_contract_id, dispatch_state, attempt_count, max_attempts,
-          next_attempt_at, latest_attempt_id, active_attempt_id, cancel_state,
-          cancel_requested_at, cancel_acknowledged_at, cancel_reason,
-          dead_lettered_at, replay_of_run_id`
-
-type CancelRunParams struct {
-	ID           uuid.UUID `db:"id" json:"id"`
-	UserID       uuid.UUID `db:"user_id" json:"user_id"`
-	ErrorMessage string    `db:"error_message" json:"error_message"`
-}
-
-// CancelRun marks an owner-readable running run as canceled and returns the final row.
-func (q *Queries) CancelRun(ctx context.Context, arg CancelRunParams) (Run, error) {
-	row := q.db.QueryRow(ctx, cancelRun, arg.ID, arg.UserID, arg.ErrorMessage)
-	var r Run
-	err := scanRun(row, &r)
-	return r, err
-}
-
 const getRunByID = `-- name: GetRunByID :one
 SELECT id, user_id, agent_id, input, output, status, error_code, error_message,
        cost_cents, platform_fee_cents, creator_revenue_cents, duration_ms,
@@ -285,81 +196,6 @@ func (q *Queries) GetRunReplayPayload(ctx context.Context, id uuid.UUID) (GetRun
 	var payload GetRunReplayPayloadRow
 	err := row.Scan(&payload.Input, &payload.RequestMetadata)
 	return payload, err
-}
-
-const getRunRuntimeContractID = `-- name: GetRunRuntimeContractID :one
-SELECT runtime_contract_id
-FROM runs
-WHERE id = $1`
-
-func (q *Queries) GetRunRuntimeContractID(ctx context.Context, id uuid.UUID) (string, error) {
-	row := q.db.QueryRow(ctx, getRunRuntimeContractID, id)
-	var runtimeContractID string
-	err := row.Scan(&runtimeContractID)
-	return runtimeContractID, err
-}
-
-const listStaleEndpointRuns = `-- name: ListStaleEndpointRuns :many
-SELECT r.id, r.user_id, r.agent_id, r.cost_cents, r.started_at,
-       COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')::text AS connection_mode,
-       'ENDPOINT_RUN_TIMEOUT'::text AS error_code,
-       CASE COALESCE(NULLIF(a.connection_mode, ''), 'direct_http')
-           WHEN 'mcp_server' THEN 'Agent MCP server 调用超时，已标记为 timeout。请检查 MCP endpoint/tool 的响应时间；长任务请使用 Agent Node 的 runtime v2 队列执行。'
-           ELSE 'Agent endpoint 调用超时，已标记为 timeout。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的 runtime v2 队列执行。'
-       END::text AS error_message
-FROM runs r
-JOIN agents a ON a.id = r.agent_id
-WHERE r.status = 'running'
-  AND COALESCE(NULLIF(a.connection_mode, ''), 'direct_http') IN ('direct_http', 'mcp_server')
-  AND r.started_at < $1
-ORDER BY r.started_at ASC
-LIMIT $2
-FOR UPDATE SKIP LOCKED`
-
-type ListStaleEndpointRunsParams struct {
-	StaleBefore time.Time `db:"stale_before" json:"stale_before"`
-	Limit       int32     `db:"limit" json:"limit"`
-}
-
-type ListStaleEndpointRunsRow struct {
-	ID             uuid.UUID `db:"id" json:"id"`
-	UserID         uuid.UUID `db:"user_id" json:"user_id"`
-	AgentID        uuid.UUID `db:"agent_id" json:"agent_id"`
-	CostCents      int32     `db:"cost_cents" json:"cost_cents"`
-	StartedAt      time.Time `db:"started_at" json:"started_at"`
-	ConnectionMode string    `db:"connection_mode" json:"connection_mode"`
-	ErrorCode      string    `db:"error_code" json:"error_code"`
-	ErrorMessage   string    `db:"error_message" json:"error_message"`
-}
-
-func (q *Queries) ListStaleEndpointRuns(ctx context.Context, arg ListStaleEndpointRunsParams) ([]ListStaleEndpointRunsRow, error) {
-	rows, err := q.db.Query(ctx, listStaleEndpointRuns, arg.StaleBefore, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var items []ListStaleEndpointRunsRow
-	for rows.Next() {
-		var item ListStaleEndpointRunsRow
-		if err := rows.Scan(
-			&item.ID,
-			&item.UserID,
-			&item.AgentID,
-			&item.CostCents,
-			&item.StartedAt,
-			&item.ConnectionMode,
-			&item.ErrorCode,
-			&item.ErrorMessage,
-		); err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const lockRunForResultFinalization = `-- name: LockRunForResultFinalization :one

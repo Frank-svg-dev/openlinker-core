@@ -1009,6 +1009,7 @@ func mirrorOfferParams(principal RuntimeSessionPrincipal, attempt db.RunAttempt)
 	return db.MirrorRunAgentNodeOfferParams{
 		RunID: attempt.RunID, AttemptID: attempt.ID, LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 		RuntimeSessionID: &sessionID, NodeID: &nodeID, CredentialID: &credentialID, WorkerID: &workerID,
+		CoreInstanceID: principal.CoreInstanceID,
 	}
 }
 

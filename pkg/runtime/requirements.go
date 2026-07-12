@@ -124,27 +124,16 @@ func taskIDFromRunMetadata(metadata map[string]interface{}) (uuid.UUID, bool, er
 }
 
 func requireTaskRunAssociation(task db.TaskQuery, userID, agentID uuid.UUID) error {
-	isOwner := task.UserID == userID
-	isClaimant := task.ClaimedByUserID != nil && *task.ClaimedByUserID == userID
-	if !isOwner && !isClaimant {
+	if task.UserID != userID {
 		return httpx.NotFound("任务不存在")
-	}
-	if task.ClaimedAgentID != nil {
-		if *task.ClaimedAgentID != agentID {
-			return httpx.Conflict("run 的 Agent 与接任务时选择的 Agent 不一致")
-		}
-		return nil
 	}
 	if task.ChosenAgentID != nil {
 		if *task.ChosenAgentID != agentID {
-			return httpx.Conflict("run 的 Agent 与任务选择的 Agent 不一致")
+			return httpx.Conflict("run 的 Agent 与私有任务选择的 Agent 不一致")
 		}
 		return nil
 	}
-	if isOwner && uuidInList(agentID, task.RecommendedAgentIDs) {
-		return nil
-	}
-	return httpx.Conflict("run 的 Agent 与任务未关联")
+	return httpx.Conflict("私有任务尚未选择 Agent")
 }
 
 func uuidInList(target uuid.UUID, values []uuid.UUID) bool {

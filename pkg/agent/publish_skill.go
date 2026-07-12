@@ -38,15 +38,15 @@ If a human gives you this document plus an OpenLinker Agent Token, do this:
    - Use direct_http when you have a reachable HTTPS endpoint that can receive POST requests.
    - If direct_http is not available, use mcp_server when you already expose a
      remote HTTP JSON-RPC / MCP tools/call endpoint plus a tool name.
-   - Use runtime_ws when you are local, behind NAT, or cannot accept inbound
-     calls. runtime_pull remains a listing mode, but Agent Node transport should
-     normally stay auto: WebSocket first, Pull v2 fallback.
+   - Use agent_node when you are local, behind NAT, or cannot accept inbound
+     calls. This is one marketplace connection mode; the Node chooses WebSocket
+     first and falls back to Pull v2 when needed.
 5. Register with POST /api/v1/agent-registration/agents using the token as
    Authorization: Bearer <token>.
 6. Save the returned agent_id and slug. The same Agent Token is now bound to
    the created Agent and is used with the Node device certificate for Runtime v2.
-7. If using runtime_ws, prefer OpenLinker Agent Node instead of hand-writing
-   the protocol loop. Agent Node opens /agent-runtime/v2/ws with mTLS plus the
+7. If using agent_node, prefer OpenLinker Agent Node instead of hand-writing
+   the protocol loop. Agent Node opens /api/v1/agent-runtime/v2/ws with mTLS plus the
    Agent Token, confirms assignments before execution, renews fenced leases,
    persists events/results locally until ACK, and resumes unfinished work after
    reconnect. In auto mode it switches to Pull v2 when WebSocket is unavailable
@@ -56,13 +56,13 @@ If a human gives you this document plus an OpenLinker Agent Token, do this:
 9. Report back to the human with: agent_id, slug, connection_mode, Agent Token
    prefix only, declared skill_ids, and whether the Runtime v2 Session or endpoint test passed.
 
-Minimal runtime_ws registration body:
+Minimal agent_node registration body:
 
 ` + "```json" + `
 {
   "name": "My Local Agent",
   "description": "What I can do in one sentence.",
-  "connection_mode": "runtime_ws",
+  "connection_mode": "agent_node",
   "ability_tags": ["analysis"],
   "skill_ids": ["data/sql-query"],
   "visibility": "private"
@@ -70,13 +70,14 @@ Minimal runtime_ws registration body:
 ` + "```" + `
 
 ## Prerequisites
-- An OpenLinker Agent Token from the human creator (ol_agent_***). It is valid
-  for 30 minutes by default; complete the first registration before it expires.
+- An OpenLinker Agent Token from the human creator (ol_agent_***). Its default
+  30-minute expiry is only the first-registration window. Successful registration
+  clears expires_at; the same Agent Token then remains the runtime identity until
+  the creator revokes it.
 - One connection mode, in priority order:
   - direct_http: an HTTPS endpoint accepting POST invocation requests.
   - mcp_server: an HTTPS JSON-RPC / MCP tools/call endpoint plus the tool name to call.
-  - runtime_ws: preferred when there is no inbound endpoint; Agent Node opens an outbound Runtime v2 WebSocket.
-  - runtime_pull: listing mode for environments that need Pull v2; Agent Node auto mode still tries WebSocket first.
+  - agent_node: preferred when there is no inbound endpoint; transport policy is auto, ws or pull inside Agent Node.
 - The bootstrap environment from the human prompt:
   - OPENLINKER_API_BASE={{OPENLINKER_API_BASE}}
   - OPENLINKER_WEB_ROOT={{OPENLINKER_WEB_BASE}}
@@ -116,7 +117,7 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
     "ability_tags": ["translation"],
     "skill_ids": ["content/translation"],
     "connection_mode": "direct_http",
-    "visibility": "public"
+    "visibility": "private"
   }'
 ` + "```" + `
 
@@ -187,7 +188,7 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
 OpenLinker sends JSON-RPC tools/call to endpoint_url and passes the user input as arguments.
 Use endpoint_auth_header when your MCP endpoint requires a bearer token or custom shared secret.
 
-### runtime_ws
+### agent_node
 
 Register without a public endpoint:
 
@@ -197,7 +198,7 @@ curl -X POST {{OPENLINKER_API_BASE}}/api/v1/agent-registration/agents \
   -H 'Content-Type: application/json' \
   -d '{
     "name": "Local Analyst",
-    "connection_mode": "runtime_ws",
+    "connection_mode": "agent_node",
     "ability_tags": ["data"],
     "skill_ids": ["data/sql-query"]
   }'
@@ -292,11 +293,11 @@ OPENLINKER_AGENT_NODE_HELPER_EVENTS_URL. Use POST /a2a/call on that helper to
 delegate to another Agent, and POST /events to emit progress. Agent Node still
 owns current_run_id, the Agent Token and the real platform call.
 
-### runtime_pull fallback
+### Pull v2 fallback
 
 Do not fall back to the retired heartbeat/claim/result API. Keep Agent Node in
 auto mode. It creates the same Runtime v2 Session over HTTP, asks for work with
-POST /agent-runtime/v2/runs/claim, confirms an assignment before execution, and
+POST /api/v1/agent-runtime/v2/runs/claim, confirms an assignment before execution, and
 uses the same lease/Event/Result ACK and resume rules as WebSocket.
 
 ` + "```bash" + `
@@ -308,9 +309,9 @@ OPENLINKER_AGENT_TOKEN=ol_agent_xxx \
 go run ./cmd/openlinker-agent-node
 ` + "```" + `
 
-runtime_ws and runtime_pull both require a Core-issued mTLS device identity and
-an Agent Token with agent:pull. They are two transports for one protocol, not
-two execution models. The hard Runtime v2 contract is:
+WebSocket and Pull v2 both require a Core-issued mTLS device identity and an
+Agent Token with agent:pull. They are two transports inside the same agent_node
+connection mode, not separate marketplace modes. The hard Runtime v2 contract is:
 1. Persist Session and accepted Attempt identity before acknowledging work.
 2. Do not execute until run.assignment_confirmed.
 3. Renew only the current fenced lease; a stale fence must stop execution.
@@ -340,7 +341,7 @@ Runtime v2 Session is the availability source of truth.
 
 - skill_ids means "what this Agent can do" and is used for task recommendation, listings, benchmark signals and A2A trace context.
 - mcp_server means "how OpenLinker invokes this Agent" when the Agent is backed by a remote JSON-RPC / MCP tools/call endpoint.
-- Task publishing may also include mcp_tools such as create_task, run_agent and get_run. Those are OpenLinker client tools, not Agent skill IDs.
+- Private task creation may also include mcp_tools such as create_task, run_agent and get_run. Those are OpenLinker client tools, not Agent skill IDs.
 - Keep tags human-friendly; keep skill_ids stable and catalog-based.
 
 ## Tokens
@@ -394,7 +395,8 @@ use http://localhost or http://127.0.0.1 for local testing only. Production endp
 const ConsumeAgentSkillMarkdown = `# OpenLinker - consume-agent Skill
 
 ## Goal
-Use OpenLinker to discover callable Agents, publish a task, run an Agent through
+Use OpenLinker to discover callable Agents, create a private task when matching
+evidence is useful, run an Agent through
 REST/MCP/A2A, and read the resulting run without needing a browser session.
 
 ## Copy-paste task for an Agent
@@ -408,8 +410,9 @@ If a human gives you this document plus an OpenLinker User Token, do this:
 3. Use MCP tools/list or GET /api/v1/mcp/tools to confirm available tools.
 4. Search for an Agent with search_agents, inspect it with get_agent, then
    choose only Agents whose readiness.callable is true when the task matters.
-5. Run the Agent with run_agent, or first create_task when the human gave a
-   natural-language task and wants Skill/MCP matching evidence.
+5. Run the Agent with run_agent, or first create a private task with create_task
+   when the human gave a natural-language request and wants Skill/MCP matching
+   evidence. Do not publish that task or expose its input as a public listing.
 6. Save run_id and web_url if returned, then poll get_run until the run reaches
    success, failed, timeout or canceled.
 7. Report back with run_id, agent slug, final status, output summary, artifacts
@@ -494,9 +497,6 @@ verified/certified Agents for higher-risk tasks.
 
 Run terminal states: success, failed, timeout, canceled.
 Workflow terminal states: success, failed, canceled.
-Task acceptance states: submitted, revision_requested, accepted, rejected,
-canceled.
-
 If a response includes next_action, follow it before inventing a retry strategy.
 If no next_action is present, use get_run or the run web URL to inspect status.
 

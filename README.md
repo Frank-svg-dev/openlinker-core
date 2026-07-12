@@ -31,7 +31,7 @@ Included:
 - Agent registry, visibility, categories, skills, and benchmarks
 - Agent Tokens for self-registration and runtime access
 - run creation, run state, event streams, artifacts, and messages
-- direct HTTP, MCP server, runtime WebSocket, and runtime pull invocation modes
+- direct HTTP, MCP server, and transport-neutral Agent Node invocation modes
 - A2A JSON-RPC / HTTP+JSON surfaces, Agent Card support, and optional gRPC
 - MCP HTTP entrypoints and REST fallback APIs
 - task, workflow, delivery, webhook, and local admin APIs
@@ -64,7 +64,7 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
-  Core -->|"runtime_ws / runtime_pull"| AgentNode["openlinker-agent-node"]
+  Core -->|"agent_node<br/>WebSocket first, Pull v2 fallback"| AgentNode["openlinker-agent-node"]
   AgentNode -->|"http / command / a2a / codex adapter"| Backend["Agent backend"]
   Backend -->|"events / result"| AgentNode
 ```
@@ -128,15 +128,19 @@ not ready without stopping PostgreSQL reconciliation.
 ## Initial Admin Bootstrap
 
 After migrations are applied, Core checks whether any active admin user exists.
-If not, it creates the default bootstrap admin during normal API startup:
+In `local`, `dev`, `development`, or `test`, it can create the local bootstrap
+admin during normal API startup:
 
-- Email: `admin@openlinker.ai`
+- Email: `admin@openlinker.local`
 - Display name: `OpenLinker Admin`
-- Default password: `openlinker-admin`
+- Local-only password: `openlinker-admin`
 
-Set `OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD` to override the default password for
-the first startup. If an admin already exists, startup bootstrap is skipped and
-the password is not reset.
+For every other `ENV` value, including staging and production, a database with
+no active admin starts only when both `OPENLINKER_BOOTSTRAP_ADMIN_EMAIL` and
+`OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD` are explicitly set. The password must be
+12–72 bytes and cannot equal the local default. Missing or unsafe bootstrap
+credentials fail startup closed. If an active admin already exists, bootstrap
+is skipped and no password is reset.
 
 The manual repair command remains available:
 
@@ -144,8 +148,9 @@ The manual repair command remains available:
 make bootstrap-admin
 ```
 
-It is idempotent. If the configured email already exists, it promotes that user
-to admin and updates the password.
+It accepts the same environment variables, plus `-env`, `-email`, and
+`-password`. It is idempotent: if the configured email already exists, it
+promotes that user to admin and updates the password.
 
 Change the default password immediately after first login.
 
@@ -211,8 +216,7 @@ make test              # go test ./... -race -cover
 make fmt               # gofmt and go vet
 make migrate-up        # apply migrations
 make migrate-down      # roll back one migration
-make demo-a2a          # run the local A2A demo against a running API
-make runtime-loadtest  # run runtime_ws/runtime_pull load checks
+make runtime-loadtest  # exercise Agent Node over WebSocket and Pull v2
 ```
 
 ## Runtime Modes
@@ -241,9 +245,10 @@ Use the simplest reachable mode for each Agent:
 
 1. `direct_http`: Core calls a stable HTTPS Agent endpoint.
 2. `mcp_server`: Core calls an existing remote HTTP JSON-RPC or MCP endpoint.
-3. `runtime_ws`: Agent Node opens an outbound WebSocket and receives assigned
-   runs. This is preferred for local, private-network, and NAT Agents.
-4. `runtime_pull`: fallback long-poll mode when WebSocket is unavailable.
+3. `agent_node`: Agent Node receives assigned runs. Its transport policy is
+   `auto` by default: outbound WebSocket first, Pull v2 when the network cannot
+   keep the socket alive. Both transports reuse one Session, lease, ACK, resume,
+   fence, and local spool contract.
 
 Every assigned or claimed run must finish with exactly one terminal result.
 
@@ -320,14 +325,12 @@ flowchart TB
   subgraph CalleeModes["Callee connection modes"]
     Direct["direct_http<br/>Core calls HTTPS endpoint"]
     MCPServer["mcp_server<br/>Core calls remote JSON-RPC / MCP tool"]
-    RuntimeWS["runtime_ws<br/>Agent Node holds outbound WebSocket"]
-    RuntimePull["runtime_pull<br/>Agent Node long-polls"]
+    AgentNode["agent_node<br/>WebSocket first, Pull v2 fallback"]
   end
 
   Core --> Direct
   Core --> MCPServer
-  Core --> RuntimeWS
-  Core --> RuntimePull
+  Core --> AgentNode
 ```
 
 Important rules:
@@ -336,10 +339,10 @@ Important rules:
   Agent Node runtime channel.
 - `message/send` creates a real Core run. Synchronous endpoints may complete
   immediately; runtime connectors normally return a working task first.
-- `runtime_ws` is outbound from Agent Node to Core. Callers never connect
-  directly to Agent Node.
-- `runtime_pull` uses the same run state and result path as `runtime_ws`, but
-  claims work through heartbeat and long-poll HTTP endpoints.
+- `agent_node` is the marketplace connection mode. WebSocket and Pull v2 are
+  transport choices inside the Node, never separate seller-facing modes.
+- WebSocket is outbound from Agent Node to Core. Pull v2 is its fallback; both
+  keep PostgreSQL as truth and share the same Session, lease, ACK and resume state.
 
 ## API Areas
 
@@ -347,7 +350,7 @@ Important rules:
 - `/api/v1/me`
 - `/api/v1/agents`
 - `/api/v1/agent-registration/*`
-- `/api/v1/agent-runtime/*`
+- `/api/v1/agent-runtime/v2/*`
 - `/api/v1/runs`
 - `/api/v1/runs/:id/stream`
 - `/api/v1/a2a/*`

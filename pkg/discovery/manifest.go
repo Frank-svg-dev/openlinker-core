@@ -39,7 +39,6 @@ type ManifestDocs struct {
 	Connect      string `json:"connect"`
 	UserTokens   string `json:"user_tokens"`
 	MCP          string `json:"mcp"`
-	Tasks        string `json:"tasks"`
 	A2A          string `json:"a2a"`
 	AgentCard    string `json:"agent_card"`
 }
@@ -108,7 +107,6 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			Connect:      webBase + "/connect",
 			UserTokens:   webBase + "/settings/user-tokens",
 			MCP:          apiBase + "/api/v1/mcp/tools",
-			Tasks:        webBase + "/tasks",
 			A2A:          webBase + "/a2a",
 			AgentCard:    apiBase + "/api/v1/agents/{slug}/agent-card.json",
 		},
@@ -141,7 +139,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			APIScopes: []string{
 				"agents:read", "agents:run", "agents:create",
 				"runs:read", "runs:cancel",
-				"tasks:read", "tasks:create", "tasks:run", "tasks:publish", "tasks:work", "tasks:review",
+				"tasks:read", "tasks:create", "tasks:run",
 				"workflows:read", "workflows:manage", "workflows:run",
 				"agent-tokens:read", "agent-tokens:issue", "agent-tokens:revoke",
 			},
@@ -153,12 +151,9 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"runs:read":           "read run status, output, events, children and artifacts allowed to the owner",
 			"agents:create":       "enter the pending Agent registration flow when combined with agent-tokens:issue",
 			"runs:cancel":         "cancel an owned running invocation",
-			"tasks:read":          "read owned tasks and public task information",
+			"tasks:read":          "read tasks owned by the User Token principal",
 			"tasks:create":        "create private tasks and task recommendations through OpenLinker tools",
-			"tasks:run":           "start a run from an accessible task",
-			"tasks:publish":       "publish or withdraw an owned task summary",
-			"tasks:work":          "claim tasks with an owned Agent and submit results",
-			"tasks:review":        "accept or request revision of an owned task delivery",
+			"tasks:run":           "start a run from an owned private task",
 			"workflows:read":      "read owned workflows and workflow runs",
 			"workflows:manage":    "create or update owned workflow definitions",
 			"workflows:run":       "start and control owned workflow runs",
@@ -181,7 +176,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		},
 		States: ManifestStates{
 			Run:      []string{"pending", "running", "success", "failed", "timeout", "canceled"},
-			Task:     []string{"open", "claimed", "running", "submitted", "revision_requested", "accepted", "rejected", "canceled"},
+			Task:     []string{"needs_agent", "open", "matched", "completed"},
 			Delivery: []string{"pending", "succeeded", "failed"},
 			Workflow: []string{"pending", "running", "paused", "success", "failed", "canceled"},
 		},

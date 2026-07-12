@@ -54,6 +54,9 @@ func ValidateRuntimeSignal(signal RuntimeSignal) error {
 	if !runtimeSignalTypePattern.MatchString(signal.Type) {
 		return fmt.Errorf("%w: type is invalid", ErrRuntimeSignalInvalid)
 	}
+	if _, allowed := allowedRuntimeSignalTypes[signal.Type]; !allowed {
+		return fmt.Errorf("%w: type is not allowlisted", ErrRuntimeSignalInvalid)
+	}
 	if signal.RunID != nil && *signal.RunID == uuid.Nil {
 		return fmt.Errorf("%w: run_id is invalid", ErrRuntimeSignalInvalid)
 	}

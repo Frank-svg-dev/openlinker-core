@@ -3,6 +3,7 @@ package runtime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,6 +42,13 @@ type RuntimePresenceStore interface {
 	Refresh(context.Context, RuntimePresence, time.Duration) error
 	ListByAgent(context.Context, uuid.UUID) ([]RuntimePresence, error)
 	Remove(context.Context, RuntimePresence) error
+}
+
+// RuntimePresenceStoreProvider lets Core reuse the Redis client owned by its
+// signal bus without widening RuntimeSignalBus or making PostgreSQL logic
+// depend on Redis.
+type RuntimePresenceStoreProvider interface {
+	RuntimePresenceStore() (RuntimePresenceStore, error)
 }
 
 type RedisRuntimePresenceStore struct {
@@ -180,12 +188,14 @@ func (s *RedisRuntimePresenceStore) Remove(ctx context.Context, presence Runtime
 }
 
 func (s *RedisRuntimePresenceStore) presenceKey(presence RuntimePresence) string {
+	connectionDigest := sha256.Sum256([]byte(presence.ConnectionID))
 	return fmt.Sprintf(
-		"%s:presence:{%s}:%s:%s",
+		"%s:presence:{%s}:%s:%s:%x",
 		s.prefix,
 		presence.AgentID,
 		presence.RuntimeSessionID,
 		presence.CoreInstanceID,
+		connectionDigest[:16],
 	)
 }
 

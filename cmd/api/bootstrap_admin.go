@@ -19,13 +19,14 @@ import (
 )
 
 const (
-	defaultBootstrapAdminEmail       = "admin@openlinker.ai"
-	defaultBootstrapAdminPassword    = "openlinker-admin"
+	localBootstrapAdminEmail         = "admin@openlinker.local"
+	localBootstrapAdminPassword      = "openlinker-admin"
 	defaultBootstrapAdminDisplayName = "OpenLinker Admin"
 	bootstrapAdminBcryptCost         = 12
 )
 
 type bootstrapAdminConfig struct {
+	Environment string
 	DatabaseURL string
 	Email       string
 	Password    string
@@ -45,15 +46,16 @@ func runBootstrapAdmin(args []string) {
 }
 
 func parseBootstrapAdminConfig(args []string, getenv func(string) string) (bootstrapAdminConfig, error) {
-	password, _ := bootstrapAdminPassword(getenv)
 	cfg := bootstrapAdminConfig{
+		Environment: strings.TrimSpace(getenv("ENV")),
 		DatabaseURL: strings.TrimSpace(getenv("DATABASE_URL")),
-		Email:       envOrDefault(getenv, "OPENLINKER_BOOTSTRAP_ADMIN_EMAIL", defaultBootstrapAdminEmail),
-		Password:    password,
+		Email:       strings.TrimSpace(getenv("OPENLINKER_BOOTSTRAP_ADMIN_EMAIL")),
+		Password:    strings.TrimSpace(getenv("OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD")),
 		DisplayName: envOrDefault(getenv, "OPENLINKER_BOOTSTRAP_ADMIN_DISPLAY_NAME", defaultBootstrapAdminDisplayName),
 	}
 
 	fs := flag.NewFlagSet("bootstrap-admin", flag.ContinueOnError)
+	fs.StringVar(&cfg.Environment, "env", cfg.Environment, "environment; defaults to ENV")
 	fs.StringVar(&cfg.DatabaseURL, "database-url", cfg.DatabaseURL, "Postgres URL; defaults to DATABASE_URL")
 	fs.StringVar(&cfg.Email, "email", cfg.Email, "admin email")
 	fs.StringVar(&cfg.Password, "password", cfg.Password, "admin password; prefer OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD")
@@ -62,10 +64,37 @@ func parseBootstrapAdminConfig(args []string, getenv func(string) string) (boots
 		return bootstrapAdminConfig{}, err
 	}
 
-	return normalizeBootstrapAdminConfig(cfg, true)
+	return resolveBootstrapAdminConfig(cfg, true)
+}
+
+func resolveBootstrapAdminConfig(cfg bootstrapAdminConfig, requireDatabaseURL bool) (bootstrapAdminConfig, error) {
+	cfg.Environment = strings.ToLower(strings.TrimSpace(cfg.Environment))
+	if cfg.Environment == "" {
+		cfg.Environment = "development"
+	}
+	if isLocalBootstrapEnvironment(cfg.Environment) {
+		if strings.TrimSpace(cfg.Email) == "" {
+			cfg.Email = localBootstrapAdminEmail
+		}
+		if strings.TrimSpace(cfg.Password) == "" {
+			cfg.Password = localBootstrapAdminPassword
+		}
+	} else {
+		if strings.TrimSpace(cfg.Email) == "" {
+			return bootstrapAdminConfig{}, errors.New("OPENLINKER_BOOTSTRAP_ADMIN_EMAIL is required outside local/development/test")
+		}
+		if strings.TrimSpace(cfg.Password) == "" {
+			return bootstrapAdminConfig{}, errors.New("OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD is required outside local/development/test")
+		}
+		if strings.TrimSpace(cfg.Password) == localBootstrapAdminPassword {
+			return bootstrapAdminConfig{}, errors.New("OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD must not use the local development default")
+		}
+	}
+	return normalizeBootstrapAdminConfig(cfg, requireDatabaseURL)
 }
 
 func normalizeBootstrapAdminConfig(cfg bootstrapAdminConfig, requireDatabaseURL bool) (bootstrapAdminConfig, error) {
+	cfg.Environment = strings.ToLower(strings.TrimSpace(cfg.Environment))
 	cfg.DatabaseURL = strings.TrimSpace(cfg.DatabaseURL)
 	cfg.Email = strings.ToLower(strings.TrimSpace(cfg.Email))
 	cfg.Password = strings.TrimSpace(cfg.Password)
@@ -83,17 +112,23 @@ func normalizeBootstrapAdminConfig(cfg bootstrapAdminConfig, requireDatabaseURL 
 	if parsedEmail.Address != cfg.Email {
 		return bootstrapAdminConfig{}, errors.New("admin email must be a plain email address")
 	}
-	if len(cfg.Password) < 8 || len(cfg.Password) > 72 {
-		return bootstrapAdminConfig{}, errors.New("admin password length must be 8-72 characters")
+	minimumPasswordLength := 12
+	if isLocalBootstrapEnvironment(cfg.Environment) {
+		minimumPasswordLength = 8
+	}
+	if len(cfg.Password) < minimumPasswordLength || len(cfg.Password) > 72 {
+		return bootstrapAdminConfig{}, fmt.Errorf("admin password length must be %d-72 bytes", minimumPasswordLength)
 	}
 	return cfg, nil
 }
 
-func bootstrapAdminPassword(getenv func(string) string) (string, bool) {
-	if v := strings.TrimSpace(getenv("OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD")); v != "" {
-		return v, false
+func isLocalBootstrapEnvironment(environment string) bool {
+	switch strings.ToLower(strings.TrimSpace(environment)) {
+	case "", "local", "dev", "development", "test":
+		return true
+	default:
+		return false
 	}
-	return defaultBootstrapAdminPassword, true
 }
 
 func envOrDefault(getenv func(string) string, key, fallback string) string {
@@ -131,7 +166,7 @@ type bootstrapAdminDB interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }
 
-func autoBootstrapAdminIfNeeded(ctx context.Context, dbtx bootstrapAdminDB) error {
+func autoBootstrapAdminIfNeeded(ctx context.Context, dbtx bootstrapAdminDB, environment string) error {
 	hasAdmin, err := hasBootstrapAdmin(ctx, dbtx)
 	if err != nil {
 		return err
@@ -141,10 +176,10 @@ func autoBootstrapAdminIfNeeded(ctx context.Context, dbtx bootstrapAdminDB) erro
 		return nil
 	}
 
-	password, usingDefaultPassword := bootstrapAdminPassword(os.Getenv)
-	cfg, err := normalizeBootstrapAdminConfig(bootstrapAdminConfig{
-		Email:       envOrDefault(os.Getenv, "OPENLINKER_BOOTSTRAP_ADMIN_EMAIL", defaultBootstrapAdminEmail),
-		Password:    password,
+	cfg, err := resolveBootstrapAdminConfig(bootstrapAdminConfig{
+		Environment: environment,
+		Email:       strings.TrimSpace(os.Getenv("OPENLINKER_BOOTSTRAP_ADMIN_EMAIL")),
+		Password:    strings.TrimSpace(os.Getenv("OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD")),
 		DisplayName: envOrDefault(os.Getenv, "OPENLINKER_BOOTSTRAP_ADMIN_DISPLAY_NAME", defaultBootstrapAdminDisplayName),
 	}, false)
 	if err != nil {
@@ -159,16 +194,12 @@ func autoBootstrapAdminIfNeeded(ctx context.Context, dbtx bootstrapAdminDB) erro
 	if err != nil {
 		return err
 	}
-	event := log.Info()
-	if usingDefaultPassword {
-		event = log.Warn()
-	}
-	event.
+	log.Info().
 		Str("email", cfg.Email).
 		Str("user_id", userID.String()).
 		Bool("created", created).
-		Bool("default_password_used", usingDefaultPassword).
-		Msg("bootstrap admin ready; change the password after first login")
+		Str("environment", cfg.Environment).
+		Msg("bootstrap admin ready")
 	return nil
 }
 

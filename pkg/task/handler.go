@@ -31,30 +31,16 @@ func NewHandler(svc *Service) *Handler {
 //
 //	POST /tasks/recommend       自然语言 → 推荐 Top3 Agent
 //	POST /tasks/:id/choose      用户选定推荐里某个 Agent
-//	POST /tasks/:id/publish     为私有任务发布一段公开摘要
-//	POST /tasks/:id/unpublish   撤回公开任务，保留为私有历史
-//	POST /tasks/:id/claim       Agent 所有者用自己的 Agent 接下任务广场中的任务
 //	POST /tasks/:id/run         从任务直接启动一次 Agent 运行
-//	POST /tasks/:id/complete    把成功 run 写回任务结果
-//	POST /tasks/:id/accept      任务发布者验收结果
-//	POST /tasks/:id/revision    任务发布者要求修订
-//	GET  /tasks/board           任务广场公开列表
 //	GET  /tasks/me              我的任务历史（最多 20 条）
 //	GET  /tasks/:id             单个任务详情（含推荐卡回填）
 func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
-	api.GET("/tasks/board", h.ListBoard)
 	api.GET("/task-templates", h.ListTaskTemplates)
 
 	g := api.Group("/tasks", jwtMiddleware)
 	g.POST("/recommend", h.Recommend)
 	g.POST("/:id/choose", h.Choose)
-	g.POST("/:id/publish", h.Publish)
-	g.POST("/:id/unpublish", h.Unpublish)
-	g.POST("/:id/claim", h.Claim)
 	g.POST("/:id/run", h.Run)
-	g.POST("/:id/complete", h.Complete)
-	g.POST("/:id/accept", h.Accept)
-	g.POST("/:id/revision", h.RequestRevision)
 	g.GET("/me", h.ListMine)
 	g.GET("/:id", h.GetByID)
 }
@@ -117,107 +103,6 @@ func (h *Handler) Choose(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// Publish POST /tasks/:id/publish
-func (h *Handler) Publish(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	taskID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	if err := auth.RequirePermission(c, "tasks:publish", "task", &taskID); err != nil {
-		return err
-	}
-	var req PublishRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.Publish(c.Request().Context(), taskID, uid, &req)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// Unpublish POST /tasks/:id/unpublish
-func (h *Handler) Unpublish(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	taskID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	if err := auth.RequirePermission(c, "tasks:publish", "task", &taskID); err != nil {
-		return err
-	}
-	resp, err := h.svc.Unpublish(c.Request().Context(), taskID, uid)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// Claim POST /tasks/:id/claim
-func (h *Handler) Claim(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	taskID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	if err := auth.RequirePermission(c, "tasks:work", "task", &taskID); err != nil {
-		return err
-	}
-	var req ClaimRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.Claim(c.Request().Context(), taskID, uid, req.AgentID)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// Complete POST /tasks/:id/complete
-func (h *Handler) Complete(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	taskID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	if err := auth.RequirePermission(c, "tasks:work", "task", &taskID); err != nil {
-		return err
-	}
-	var req CompleteRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.Complete(c.Request().Context(), taskID, uid, &req)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
 // Run POST /tasks/:id/run
 func (h *Handler) Run(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
@@ -258,54 +143,7 @@ func (h *Handler) Run(c echo.Context) error {
 	return c.JSON(status, resp)
 }
 
-// Accept POST /tasks/:id/accept
-func (h *Handler) Accept(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	taskID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	if err := auth.RequirePermission(c, "tasks:review", "task", &taskID); err != nil {
-		return err
-	}
-	resp, err := h.svc.AcceptDelivery(c.Request().Context(), taskID, uid)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// RequestRevision POST /tasks/:id/revision
-func (h *Handler) RequestRevision(c echo.Context) error {
-	uid, err := userIDFromCtx(c)
-	if err != nil {
-		return err
-	}
-	taskID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	if err := auth.RequirePermission(c, "tasks:review", "task", &taskID); err != nil {
-		return err
-	}
-	var req RevisionRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	if err := h.validator.Struct(&req); err != nil {
-		return httpx.Unprocessable(err.Error())
-	}
-	resp, err := h.svc.RequestRevision(c.Request().Context(), taskID, uid, &req)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
-// ListMine GET /tasks/me?q=&status=&visibility=&sort=created_desc&page=1&size=20
+// ListMine GET /tasks/me?q=&status=&sort=created_desc&page=1&size=20
 func (h *Handler) ListMine(c echo.Context) error {
 	if err := auth.RequirePermission(c, "tasks:read", "task", nil); err != nil {
 		return err
@@ -333,7 +171,6 @@ func (h *Handler) ListMine(c echo.Context) error {
 		c.Request().Context(),
 		uid,
 		c.QueryParam("q"),
-		c.QueryParam("visibility"),
 		c.QueryParam("status"),
 		c.QueryParam("sort"),
 		page,
@@ -354,39 +191,6 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// ListBoard GET /tasks/board?q=&status=&skill=&skill_ids=&mcp=&sort=published_desc&page=1&size=20
-func (h *Handler) ListBoard(c echo.Context) error {
-	page := int32(1)
-	if v := c.QueryParam("page"); v != "" {
-		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
-			page = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range.
-		}
-	}
-	size := int32(20)
-	if v := firstNonEmpty(c.QueryParam("size"), c.QueryParam("limit")); v != "" {
-		if n, perr := strconv.ParseInt(v, 10, 32); perr == nil && n > 0 {
-			if n > 50 {
-				n = 50
-			}
-			size = int32(n) // #nosec G115 -- ParseInt bitSize=32 guarantees range, then size is capped.
-		}
-	}
-	resp, err := h.svc.ListBoardPage(
-		c.Request().Context(),
-		c.QueryParam("q"),
-		c.QueryParam("status"),
-		strings.Join([]string{c.QueryParam("skill"), c.QueryParam("skill_ids")}, ","),
-		c.QueryParam("mcp"),
-		c.QueryParam("sort"),
-		page,
-		size,
-	)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusOK, resp)
-}
-
 // GetByID GET /tasks/:id
 func (h *Handler) GetByID(c echo.Context) error {
 	uid, err := userIDFromCtx(c)
@@ -395,7 +199,10 @@ func (h *Handler) GetByID(c echo.Context) error {
 	}
 	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
+		// Unknown static paths such as the removed /tasks/board endpoint are
+		// captured by Echo's /tasks/:id route. Treat them as absent resources so
+		// removed Task-market routes do not leak a misleading validation error.
+		return httpx.NotFound("任务不存在")
 	}
 	if err := auth.RequirePermission(c, "tasks:read", "task", &taskID); err != nil {
 		return err

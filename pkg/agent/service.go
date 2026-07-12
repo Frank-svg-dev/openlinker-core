@@ -1146,7 +1146,7 @@ func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
 	}
 	hints := []string{}
 	switch agent.ConnectionMode {
-	case ConnectionModeRuntimeWS, ConnectionModeRuntimePull:
+	case ConnectionModeAgentNode:
 		hints = append(hints,
 			"确认 Agent Node 使用 mTLS 设备证书和含 agent:pull scope 的 Agent Token 建立 Runtime v2 Session。",
 			"建议设置 OPENLINKER_AGENT_NODE_TRANSPORT=auto：优先连接 /api/v1/agent-runtime/v2/ws，网络不适合时自动切到 Pull v2，并沿用同一 Session、lease、ACK、resume 与本地 spool。",

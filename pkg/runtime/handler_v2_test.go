@@ -47,6 +47,44 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	}
 }
 
+func TestRuntimeV2PullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
+	agentID := uuid.New()
+	principal := RuntimeSessionPrincipal{AgentID: agentID}
+	wakeHub := NewRuntimeWakeHub()
+	firstPoll := make(chan struct{})
+	assignment := &RunAssignedPayload{}
+	var calls int
+	leases := &runtimeV2LeaseServiceFake{
+		claim: func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
+			calls++
+			if calls == 1 {
+				close(firstPoll)
+				return nil, nil
+			}
+			return assignment, nil
+		},
+	}
+	controller := NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{
+		Leases: leases, WakeHub: wakeHub,
+	})
+	type result struct {
+		assignment *RunAssignedPayload
+		err        error
+	}
+	done := make(chan result, 1)
+	go func() {
+		got, err := controller.claimWithWait(context.Background(), principal, time.Second)
+		done <- result{assignment: got, err: err}
+	}()
+	<-firstPoll
+	started := time.Now()
+	wakeHub.Wake(agentID)
+	got := <-done
+	require.NoError(t, got.err)
+	require.Same(t, assignment, got.assignment)
+	require.Less(t, time.Since(started), 190*time.Millisecond)
+}
+
 func TestRuntimeV2CreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	fixture := newRuntimeV2HandlerFixture()
 	var created RuntimeSessionRequest
@@ -589,7 +627,7 @@ func (f *runtimeV2HandlerFixture) controller() *RuntimeV2HTTPController {
 		DeviceAuthenticator: f.devices,
 		Sessions:            f.sessions,
 		Leases:              f.leases,
-		EventStore:          f.events,
+		EventProjector:      f.events,
 		Finalizer:           f.finalizer,
 		Resume:              f.resume,
 		Delegation:          f.delegation,
@@ -749,6 +787,7 @@ func (f *runtimeV2SessionServiceFake) ResolveWorkerSessionPrincipal(_ context.Co
 }
 
 type runtimeV2LeaseServiceFake struct {
+	claim          func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error)
 	claimResponse  *RunAssignedPayload
 	claimErr       error
 	ackResponse    RunAssignmentConfirmedPayload
@@ -764,9 +803,12 @@ type runtimeV2LeaseServiceFake struct {
 	lastPrincipal  RuntimeSessionPrincipal
 }
 
-func (f *runtimeV2LeaseServiceFake) ClaimOffer(_ context.Context, principal RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
+func (f *runtimeV2LeaseServiceFake) ClaimOffer(ctx context.Context, principal RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
 	f.claimCalls++
 	f.lastPrincipal = principal
+	if f.claim != nil {
+		return f.claim(ctx, principal)
+	}
 	return f.claimResponse, f.claimErr
 }
 
@@ -801,7 +843,7 @@ type runtimeV2EventStoreFake struct {
 	request   RuntimeEventRequest
 }
 
-func (f *runtimeV2EventStoreFake) Append(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
+func (f *runtimeV2EventStoreFake) AppendRuntimeEvent(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
 	f.principal = principal
 	f.identity = identity
 	f.request = request
@@ -904,7 +946,7 @@ var (
 	_ RuntimeV2DeviceAuthenticator = (*runtimeV2DeviceAuthenticatorFake)(nil)
 	_ RuntimeV2SessionService      = (*runtimeV2SessionServiceFake)(nil)
 	_ RuntimeV2LeaseService        = (*runtimeV2LeaseServiceFake)(nil)
-	_ RuntimeV2EventStore          = (*runtimeV2EventStoreFake)(nil)
+	_ RuntimeV2EventProjector      = (*runtimeV2EventStoreFake)(nil)
 	_ RuntimeV2ResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
 	_ RuntimeV2ResumeService       = (*runtimeV2ResumeServiceFake)(nil)
 	_ RuntimeV2DelegationAPI       = (*runtimeV2DelegationServiceFake)(nil)

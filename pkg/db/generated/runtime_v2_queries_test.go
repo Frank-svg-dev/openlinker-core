@@ -96,7 +96,7 @@ func TestResultFinalizationQueries(t *testing.T) {
 	resultID, terminalEventID := uuid.New(), uuid.New()
 	attemptNo, finalSequence := int32(1), int64(4)
 	fence, durationMs := int64(7), int32(1234)
-	executorType, connectionMode := "agent_node", "runtime_ws"
+	executorType, connectionMode := "agent_node", "agent_node"
 	workerID, classification, outcome := "worker-a", "success", "success"
 	fingerprint := []byte("0123456789abcdef0123456789abcdef")
 	acceptedAt, finishedAt := now.Add(-time.Minute), now

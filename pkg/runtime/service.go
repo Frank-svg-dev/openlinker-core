@@ -45,10 +45,9 @@ const maxConversationHistoryRuns int32 = 50
 const maxConversationHistoryMessages = 120
 
 const (
-	connectionModeDirectHTTP  = "direct_http"
-	connectionModeMCPServer   = "mcp_server"
-	connectionModeRuntimePull = "runtime_pull"
-	connectionModeRuntimeWS   = "runtime_ws"
+	connectionModeDirectHTTP = "direct_http"
+	connectionModeMCPServer  = "mcp_server"
+	connectionModeAgentNode  = "agent_node"
 
 	runtimeTokenPrefixLen = credential.PrefixLen
 )
@@ -59,49 +58,27 @@ var allowedAgentResponseEventTypes = map[string]struct{}{
 	"run.artifact.delta": {},
 }
 
-// WebhookEnqueuer 触发 run 完成后向创作者推送 webhook。
-//
-// 用接口注入避免 runtime → webhook 的硬依赖（webhook 本身依赖 db.Run）。
-// 实现见 internal/webhook.Service.EnqueueDelivery。
-type WebhookEnqueuer interface {
-	EnqueueDelivery(ctx context.Context, run *db.Run, agentSlug string, output map[string]interface{}) error
-}
-
 // TaskCallbackEnqueuer 触发 task callback，payload 来自 run_events。
 type TaskCallbackEnqueuer interface {
 	EnqueueRunEvent(ctx context.Context, event db.RunEvent) error
 }
 
-// DeliveryEnqueuer 触发 run 完成后向用户的默认投递目标发送。
-//
-// 同 WebhookEnqueuer 用接口注入避免 runtime → delivery 硬依赖。
-// 实现见 internal/delivery.Service.EnqueueIfDefault。
-type DeliveryEnqueuer interface {
-	EnqueueIfDefault(ctx context.Context, run *db.Run) error
-}
-
-// Service 调用 Agent，并维护 core-owned run state, events, artifacts and availability.
-//
-// 关键时序约束（见 docs/13 模块 4 / docs/10 章四）：
-//  1. 事务 A：INSERT runs(status=running)
-//  2. 事务外：HTTP POST 创作者 endpoint（60s 超时）
-//  3. 事务 B：成功 → MarkRunSuccess；失败 → MarkRunFailed
-//     成功统计、availability、artifact 和事件写入不得把已完成的 run 回滚。
-//  4. 事务外：异步触发 webhook 投递（不阻塞响应）
-//
-// HTTP 调用必须在事务外，否则会长时间占用数据库事务。
+// Service invokes Agents and maintains the Runtime v2 Run/Attempt state.
+// Core-owned HTTP/MCP calls create and confirm a fenced Attempt before any
+// network I/O. Progress is written through EventStore and terminal facts only
+// through ResultFinalizer (or the database deadline reconciler after a crash).
 type Service struct {
 	queries         *db.Queries
 	requirements    runRequirementQueries
 	pool            *pgxpool.Pool
 	cfg             *config.Config
 	httpClient      *http.Client
-	webhookSvc      WebhookEnqueuer
 	taskCallbackSvc TaskCallbackEnqueuer
-	deliverySvc     DeliveryEnqueuer
 	eventStore      *EventStore
 	resultFinalizer *ResultFinalizer
 	cancellationV2  *RuntimeCancellationCoordinator
+	coreInstanceID  uuid.UUID
+	coreExecutions  *coreAttemptRegistry
 	effectWorker    *RunEffectWorker
 	bestEffortDBSem chan struct{}
 }
@@ -143,31 +120,9 @@ type Delegation struct {
 	Reason        string
 }
 
-const legacyRuntimeContractID = "legacy.pre-v2"
-
-// EndpointRunTimeoutConfig controls how long direct_http / mcp_server runs may
-// stay running before the platform converts them to terminal timeout.
-type EndpointRunTimeoutConfig struct {
-	StaleAfter time.Duration
-	BatchSize  int32
-}
-
-// SetWebhookEnqueuer 注入 webhook 触发器（main.go 启动时调用）。
-//
-// 用 setter 而非 NewService 参数，避免 runtime ↔ webhook 循环依赖
-// （webhook 内部要 import runtime 也不行；用接口隔离）。
-func (s *Service) SetWebhookEnqueuer(w WebhookEnqueuer) {
-	s.webhookSvc = w
-}
-
 // SetTaskCallbackEnqueuer 注入 task callback 触发器。
 func (s *Service) SetTaskCallbackEnqueuer(w TaskCallbackEnqueuer) {
 	s.taskCallbackSvc = w
-}
-
-// SetDeliveryEnqueuer 注入用户侧投递触发器（main.go 启动时调用）。
-func (s *Service) SetDeliveryEnqueuer(d DeliveryEnqueuer) {
-	s.deliverySvc = d
 }
 
 // SetRunEffectHandlers wires the durable terminal-effect dispatchers. It does
@@ -208,8 +163,18 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
 	svc.cancellationV2 = NewRuntimeCancellationCoordinator(pool)
+	svc.coreExecutions = newCoreAttemptRegistry(queries, defaultCoreCancellationPollInterval)
 	svc.effectWorker = NewRunEffectWorker(queries, nil, nil)
 	return svc
+}
+
+// ConfigureCoreRuntime binds Core-owned Attempts to the process identity used
+// by cluster membership. It must be called during startup before serving Runs.
+func (s *Service) ConfigureCoreRuntime(coreInstanceID uuid.UUID) {
+	if s == nil || coreInstanceID == uuid.Nil {
+		return
+	}
+	s.coreInstanceID = coreInstanceID
 }
 
 // FinalizeRuntimeResult is the transport-neutral runtime v2 Result entrypoint.
@@ -785,7 +750,7 @@ func (s *Service) isQueuedRuntime(invocation *runInvocation) bool {
 }
 
 func isQueuedRuntimeMode(mode string) bool {
-	return mode == connectionModeRuntimePull || mode == connectionModeRuntimeWS
+	return mode == connectionModeAgentNode
 }
 
 func (s *Service) createRunningRun(
@@ -856,10 +821,10 @@ func (s *Service) createRunningRun(
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 		}
 	} else {
-		available, checkErr := s.queries.HasRecentRuntimePullToken(ctx, agent.ID)
+		available, checkErr := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agent.ID)
 		if checkErr != nil {
-			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasRecentRuntimePullToken")
-			return nil, nil, httpx.Internal("检查 Agent runtime 状态失败")
+			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeV2SessionForAgent")
+			return nil, nil, httpx.Internal("检查 Agent Runtime v2 Session 状态失败")
 		}
 		if !available && !opts.allowOfflineQueuedRuntime {
 			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
@@ -1207,10 +1172,8 @@ func runStartedEventPayload(agent db.Agent, userID uuid.UUID) map[string]interfa
 		if agent.MCPToolName != nil && strings.TrimSpace(*agent.MCPToolName) != "" {
 			payload["mcp_tool_name"] = strings.TrimSpace(*agent.MCPToolName)
 		}
-	case connectionModeRuntimePull:
-		payload["transport"] = "runtime_pull"
-	case connectionModeRuntimeWS:
-		payload["transport"] = "runtime_ws"
+	case connectionModeAgentNode:
+		payload["transport"] = "agent_node"
 	default:
 		payload["transport"] = "http_endpoint"
 		if host := endpointHost(agent.EndpointURL); host != "" {
@@ -1398,46 +1361,11 @@ func (s *Service) asyncRunTimeout() time.Duration {
 }
 
 func (s *Service) executeRun(ctx context.Context, invocation *runInvocation) *RunResponse {
-	// HTTP 调用（事务外，最长 cfg.RunTimeoutSeconds）
-	started := time.Now()
-	output, agentEvents, agentErr, callErr := s.callAgent(
-		ctx,
-		&invocation.agent,
-		invocation.runID,
-		invocation.userID,
-		invocation.req,
-		invocation.delegation,
-	)
-	duration := clampDurationMillisToInt32(time.Since(started))
-
-	// 处理结果
-	var resp *RunResponse
-	triggerExternalDelivery := invocation.delegation == nil
-	if callErr != nil || agentErr != nil {
-		resp = s.handleFailure(ctx, invocation.runID, invocation.agent.ID, duration, callErr, agentErr, triggerExternalDelivery)
-	} else {
-		resp = s.handleSuccess(
-			ctx,
-			invocation.runID,
-			invocation.agent.ID,
-			output,
-			agentEvents,
-			duration,
-			triggerExternalDelivery,
-		)
-	}
+	resp := s.executeCoreAttempt(ctx, invocation)
 	if invocation.delegation != nil {
 		resp.ParentRunID = invocation.delegation.ParentRunID.String()
 		resp.CallerAgentID = invocation.delegation.CallerAgentID.String()
 		resp.BillingMode = "free_delegation"
-		if s.runUsesLegacyTerminalPipeline(ctx, invocation.runID) {
-			s.recordRunEventBestEffort(ctx, invocation.delegation.ParentRunID, "run.child.completed", map[string]interface{}{
-				"child_run_id":    invocation.runID.String(),
-				"caller_agent_id": invocation.delegation.CallerAgentID.String(),
-				"target_agent_id": invocation.agent.ID.String(),
-				"status":          resp.Status,
-			})
-		}
 		decorateNextAction(resp)
 	}
 	if invocation.taskCallback != nil {
@@ -1455,10 +1383,8 @@ func (s *Service) callAgent(
 		return s.callAgentEndpoint(ctx, agent, runID, userID, req, delegation)
 	case connectionModeMCPServer:
 		return s.callMCPServer(ctx, agent, runID, userID, req, delegation)
-	case connectionModeRuntimePull:
-		return nil, nil, nil, errors.New("runtime_pull run must be assigned through runtime v2")
-	case connectionModeRuntimeWS:
-		return nil, nil, nil, errors.New("runtime_ws run must be assigned through runtime v2")
+	case connectionModeAgentNode:
+		return nil, nil, nil, errors.New("agent_node run must be assigned through Runtime v2")
 	default:
 		return nil, nil, &AgentError{Code: "UNSUPPORTED_CONNECTION_MODE", Message: "Agent connection_mode 不支持"}, nil
 	}
@@ -1573,26 +1499,9 @@ func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID,
 	resp.EvidenceSummary = summary
 }
 
-// CancelRun cancels a running Run owned by the requester. Runtime v2 uses the
-// durable cancellation coordinator; only pre-v2 rows use the legacy pipeline.
+// CancelRun cancels an owned Runtime v2 Run through the durable coordinator.
 func (s *Service) CancelRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
-	contractID, err := s.queries.GetRunRuntimeContractID(ctx, runID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("调用记录不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.CancelRun: GetRunRuntimeContractID")
-		return nil, httpx.Internal("查询调用记录失败")
-	}
-	if contractID == RuntimeContractID {
-		return s.cancelRuntimeV2(ctx, userID, runID)
-	}
-	if contractID != legacyRuntimeContractID {
-		log.Error().Str("run_id", runID.String()).Str("runtime_contract_id", contractID).
-			Msg("runtime.CancelRun: unsupported runtime contract")
-		return nil, httpx.Conflict("run 的运行时协议不受当前 Core 支持")
-	}
-	return s.cancelLegacyRun(ctx, userID, runID)
+	return s.cancelRuntimeV2(ctx, userID, runID)
 }
 
 func (s *Service) cancelRuntimeV2(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
@@ -1617,63 +1526,6 @@ func (s *Service) cancelRuntimeV2(ctx context.Context, userID, runID uuid.UUID) 
 		}
 	}
 	resp := runToResponse(&result.Run)
-	s.attachRunRequirementEvidence(ctx, runID, resp)
-	return resp, nil
-}
-
-func (s *Service) cancelLegacyRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
-	const canceledMessage = "run canceled by user"
-	var canceled db.Run
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		row, cancelErr := q.CancelRun(ctx, db.CancelRunParams{
-			ID:           runID,
-			UserID:       userID,
-			ErrorMessage: canceledMessage,
-		})
-		if cancelErr != nil {
-			return cancelErr
-		}
-		canceled = row
-		return nil
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		existing, lookupErr := s.queries.GetRunByID(ctx, runID)
-		if errors.Is(lookupErr, pgx.ErrNoRows) || (lookupErr == nil && existing.UserID != userID) {
-			return nil, httpx.NotFound("调用记录不存在")
-		}
-		if lookupErr != nil {
-			log.Error().Err(lookupErr).Str("run_id", runID.String()).Msg("runtime.CancelRun: GetRunByID")
-			return nil, httpx.Internal("查询调用记录失败")
-		}
-		if existing.Status == "canceled" {
-			resp := runToResponse(&existing)
-			s.attachRunRequirementEvidence(ctx, runID, resp)
-			return resp, nil
-		}
-		return nil, httpx.Conflict("run 已结束，不能取消")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Str("user_id", userID.String()).Msg("runtime.CancelRun")
-		return nil, httpx.Internal("取消调用失败")
-	}
-
-	duration := int32(0)
-	if canceled.DurationMs != nil {
-		duration = *canceled.DurationMs
-	}
-	s.recordRunEventBestEffort(ctx, runID, "run.canceled", map[string]interface{}{
-		"status":        "canceled",
-		"error_code":    "CANCELED",
-		"error_message": canceledMessage,
-		"duration_ms":   duration,
-	})
-	if s.shouldTriggerExternalDelivery(ctx, runID) {
-		s.triggerWebhookByRun(runID)
-		s.triggerDelivery(runID)
-	}
-
-	resp := runToResponse(&canceled)
 	s.attachRunRequirementEvidence(ctx, runID, resp)
 	return resp, nil
 }
@@ -1768,175 +1620,6 @@ func (s *Service) ListRunMessages(ctx context.Context, userID, runID uuid.UUID) 
 	return resp, nil
 }
 
-// ReportRunEvent 允许 Agent endpoint 用 endpoint token 上报当前 run 的中间事件。
-func (s *Service) ReportRunEvent(ctx context.Context, runID uuid.UUID, token string, req *ReportRunEventRequest) (*RunEventResponse, error) {
-	if req == nil {
-		return nil, httpx.BadRequest("请求体不能为空")
-	}
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return nil, httpx.Unauthorized("缺少 X-OpenLinker-Token")
-	}
-
-	r, err := s.queries.GetRunByID(ctx, runID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("调用记录不存在")
-		}
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.ReportRunEvent: GetRunByID")
-		return nil, httpx.Internal("查询调用记录失败")
-	}
-
-	agent, err := s.queries.GetAgentByID(ctx, r.AgentID)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, httpx.NotFound("Agent 不存在")
-		}
-		log.Error().Err(err).Str("agent_id", r.AgentID.String()).Msg("runtime.ReportRunEvent: GetAgentByID")
-		return nil, httpx.Internal("查询 Agent 失败")
-	}
-	if agent.EndpointAuthHeader == nil || !constantTimeEqual(*agent.EndpointAuthHeader, token) {
-		return nil, httpx.Unauthorized("Agent 事件上报 token 无效")
-	}
-	if r.Status != "running" {
-		return nil, httpx.Conflict("run 已结束，不能继续上报事件")
-	}
-
-	eventType := strings.TrimSpace(req.EventType)
-	if _, ok := allowedAgentResponseEventTypes[eventType]; !ok {
-		return nil, httpx.Unprocessable("event_type 不支持")
-	}
-
-	payload := req.Payload
-	if payload == nil {
-		payload = map[string]interface{}{}
-	}
-	payloadJSON, err := json.Marshal(payload)
-	if err != nil {
-		return nil, httpx.BadRequest("payload 不是合法 JSON")
-	}
-	event, err := s.queries.CreateRunEvent(ctx, db.CreateRunEventParams{
-		RunID:     runID,
-		EventType: eventType,
-		Payload:   payloadJSON,
-	})
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Str("event_type", eventType).
-			Msg("runtime.ReportRunEvent: CreateRunEvent")
-		return nil, httpx.Internal("记录运行事件失败")
-	}
-	s.triggerTaskCallbackEvent(&event)
-	resp := runEventToResponse(event)
-	if eventType == "run.message.delta" {
-		s.recordRunMessageBestEffort(ctx, runID, &resp.Sequence, "agent", messageContentFromMap(payload), payload)
-	}
-	if eventType == "run.artifact.delta" {
-		s.recordArtifactDeltaBestEffort(ctx, runID, &resp.Sequence, payload)
-	}
-	return &resp, nil
-}
-
-// TimeoutStaleEndpointRuns converts abandoned direct_http / mcp_server runs
-// into timeout terminal states. Normal endpoint calls are completed by the
-// in-process goroutine; this worker is only a crash / restart / DB outage
-// recovery net for runs that have exceeded the configured stale window.
-func (s *Service) TimeoutStaleEndpointRuns(ctx context.Context, cfg EndpointRunTimeoutConfig) (int32, error) {
-	cfg = normalizeEndpointRunTimeoutConfig(cfg)
-	now := time.Now()
-	var staleRuns []db.ListStaleEndpointRunsRow
-
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		rows, err := q.ListStaleEndpointRuns(ctx, db.ListStaleEndpointRunsParams{
-			StaleBefore: now.Add(-cfg.StaleAfter),
-			Limit:       cfg.BatchSize,
-		})
-		if err != nil {
-			return err
-		}
-		staleRuns = rows
-		for _, run := range rows {
-			code := run.ErrorCode
-			message := run.ErrorMessage
-			duration := clampDurationMillisToInt32(now.Sub(run.StartedAt))
-			if err := q.MarkRunFailed(ctx, db.MarkRunFailedParams{
-				ID:           run.ID,
-				Status:       "timeout",
-				ErrorCode:    &code,
-				ErrorMessage: &message,
-				DurationMs:   duration,
-			}); err != nil {
-				return err
-			}
-			if _, err := q.MarkAgentAvailabilityFailure(ctx, run.AgentID); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("runtime.TimeoutStaleEndpointRuns")
-		return 0, err
-	}
-
-	for _, run := range staleRuns {
-		duration := clampDurationMillisToInt32(now.Sub(run.StartedAt))
-		s.recordRunEventBestEffort(ctx, run.ID, "run.failed", map[string]interface{}{
-			"status":          "timeout",
-			"error_code":      run.ErrorCode,
-			"error_message":   run.ErrorMessage,
-			"duration_ms":     duration,
-			"connection_mode": run.ConnectionMode,
-		})
-		resp := &RunResponse{
-			RunID:      run.ID.String(),
-			Status:     "timeout",
-			ErrorCode:  run.ErrorCode,
-			ErrorMsg:   run.ErrorMessage,
-			DurationMs: duration,
-		}
-		s.decorateDelegationCompletion(ctx, run.ID, run.AgentID, resp)
-		if s.shouldTriggerExternalDelivery(ctx, run.ID) {
-			s.triggerWebhookByRun(run.ID)
-			s.triggerDelivery(run.ID)
-		}
-	}
-	return clampLenToInt32(len(staleRuns)), nil
-}
-
-func normalizeEndpointRunTimeoutConfig(cfg EndpointRunTimeoutConfig) EndpointRunTimeoutConfig {
-	if cfg.StaleAfter <= 0 {
-		cfg.StaleAfter = defaultEndpointRunTimeout
-	}
-	if cfg.BatchSize <= 0 {
-		cfg.BatchSize = defaultEndpointRunBatchSize
-	}
-	return cfg
-}
-
-func (s *Service) decorateDelegationCompletion(ctx context.Context, runID, targetAgentID uuid.UUID, resp *RunResponse) {
-	delegation, err := s.queries.GetRunDelegationByChild(ctx, runID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return
-	}
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.decorateDelegationCompletion")
-		return
-	}
-	resp.ParentRunID = delegation.ParentRunID.String()
-	resp.CallerAgentID = delegation.CallerAgentID.String()
-	resp.BillingMode = "free_delegation"
-	if s.runUsesLegacyTerminalPipeline(ctx, runID) {
-		s.recordRunEventBestEffort(ctx, delegation.ParentRunID, "run.child.completed", map[string]interface{}{
-			"child_run_id":    runID.String(),
-			"caller_agent_id": delegation.CallerAgentID.String(),
-			"target_agent_id": targetAgentID.String(),
-			"status":          resp.Status,
-		})
-	}
-	decorateNextAction(resp)
-}
-
 func (s *Service) verifyRuntimeToken(ctx context.Context, plaintext, requiredScope string) (db.AgentRuntimeToken, error) {
 	return s.verifyRuntimeTokenAny(ctx, plaintext, requiredScope)
 }
@@ -1949,21 +1632,21 @@ func (s *Service) verifyRuntimeTokenAny(ctx context.Context, plaintext string, a
 	plaintext = strings.TrimSpace(plaintext)
 	if !credential.HasAnyPrefix(plaintext, credential.AgentTokenPrefix) ||
 		!credential.ValidLengthForPrefix(plaintext, credential.AgentTokenPrefix) {
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
 	}
 	tokens, err := s.queries.ListActiveAgentRuntimeTokensByPrefix(ctx, plaintext[:runtimeTokenPrefixLen])
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return db.AgentRuntimeToken{}, ctxErr
 		}
-		return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
+		return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
 	}
 	for _, token := range tokens {
 		if credential.VerifyTokenHash(token.TokenHash, plaintext) && hasAnyRuntimeScope(token.Scopes, acceptedScopes...) {
 			return token, nil
 		}
 	}
-	return db.AgentRuntimeToken{}, httpx.Unauthorized("访问令牌无效或已撤销")
+	return db.AgentRuntimeToken{}, httpx.Unauthorized("Agent Token 无效或已撤销")
 }
 
 func hasAnyRuntimeScope(scopes []string, accepted ...string) bool {
@@ -2335,143 +2018,6 @@ func (s *Service) DryRun(
 		return nil, agentErr.Code + ": " + agentErr.Message
 	}
 	return output, ""
-}
-
-// handleSuccess 成功路径优先保证用户可见 run 状态落库。统计、
-// availability 和 artifact 均不得把已完成的 run 回滚回 running。
-func (s *Service) handleSuccess(
-	ctx context.Context,
-	runID, agentID uuid.UUID,
-	output map[string]interface{},
-	agentEvents []AgentEvent,
-	duration int32,
-	triggerExternalDelivery bool,
-) *RunResponse {
-	outputJSON, err := json.Marshal(output)
-	if err != nil {
-		// output 不可序列化属于极端情况；仍返回结果（DB 里 output 留空）。
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.handleSuccess: marshal output")
-		outputJSON = []byte("null")
-	}
-
-	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		return q.MarkRunSuccess(ctx, db.MarkRunSuccessParams{
-			ID:         runID,
-			Output:     outputJSON,
-			DurationMs: duration,
-		})
-	})
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).
-			Msg("runtime.handleSuccess: mark success failed")
-	} else {
-		if artifactErr := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-			return s.createRunArtifacts(ctx, s.queries.WithTx(tx), runID, output)
-		}); artifactErr != nil {
-			log.Error().Err(artifactErr).Str("run_id", runID.String()).Msg("runtime.handleSuccess: create artifacts failed")
-		}
-		s.recordRunSuccessStatsBestEffort(ctx, runID, agentID, 0)
-		s.recordAgentEventsBestEffort(ctx, runID, agentEvents)
-		s.recordRunEventBestEffort(ctx, runID, "run.completed", map[string]interface{}{
-			"status":      "success",
-			"duration_ms": duration,
-			"output":      output,
-		})
-	}
-
-	if triggerExternalDelivery {
-		// 委派子 run 不自动外发；最终交付由父 run 决定。
-		s.triggerWebhook(runID, agentID, output)
-		s.triggerDelivery(runID)
-	}
-
-	return &RunResponse{
-		RunID:      runID.String(),
-		Status:     "success",
-		Output:     output,
-		CostCents:  0,
-		DurationMs: duration,
-		NextAction: nextActionForSuccess(output, "", ""),
-	}
-}
-
-// handleFailure 失败路径：MarkRunFailed + availability failure（一个事务）。
-//
-// 错误分类：
-//   - context.DeadlineExceeded → 'timeout' / TIMEOUT
-//   - 其他网络层错误 → 'failed' / CONNECTION_ERROR
-//   - 创作者业务错误 → 'failed' / 透传 agentErr.Code
-func (s *Service) handleFailure(
-	ctx context.Context,
-	runID, agentID uuid.UUID,
-	duration int32,
-	callErr error,
-	agentErr *AgentError,
-	triggerExternalDelivery bool,
-) *RunResponse {
-	errCode := "INTERNAL_ERROR"
-	errMsg := "调用失败"
-	runStatus := "failed"
-
-	switch {
-	case callErr != nil && (errors.Is(callErr, context.DeadlineExceeded) || isTimeoutErr(callErr)):
-		errCode = "TIMEOUT"
-		errMsg = "Agent endpoint 超时"
-		runStatus = "timeout"
-	case callErr != nil:
-		errCode = "CONNECTION_ERROR"
-		errMsg = truncate(callErr.Error(), errMsgMaxLen)
-	case agentErr != nil:
-		errCode = agentErr.Code
-		errMsg = truncate(agentErr.Message, errMsgMaxLen)
-		if strings.EqualFold(errCode, "TIMEOUT") {
-			runStatus = "timeout"
-		}
-	}
-
-	codePtr := errCode
-	msgPtr := errMsg
-	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		if e := q.MarkRunFailed(ctx, db.MarkRunFailedParams{
-			ID:           runID,
-			Status:       runStatus,
-			ErrorCode:    &codePtr,
-			ErrorMessage: &msgPtr,
-			DurationMs:   duration,
-		}); e != nil {
-			return e
-		}
-		_, e := q.MarkAgentAvailabilityFailure(ctx, agentID)
-		return e
-	})
-	if err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.handleFailure: mark failed tx")
-	} else {
-		s.recordRunEventBestEffort(ctx, runID, "run.failed", map[string]interface{}{
-			"status":        runStatus,
-			"error_code":    errCode,
-			"error_message": errMsg,
-			"duration_ms":   duration,
-		})
-	}
-
-	if triggerExternalDelivery {
-		// 失败也触发 webhook / delivery，让外部系统能感知失败。
-		s.triggerWebhookByRun(runID)
-		s.triggerDelivery(runID)
-	}
-
-	return &RunResponse{
-		RunID:      runID.String(),
-		Status:     runStatus,
-		ErrorCode:  errCode,
-		ErrorMsg:   errMsg,
-		CostCents:  0,
-		DurationMs: duration,
-		NextAction: nextActionForFailure(runStatus, errCode, errMsg),
-	}
 }
 
 type runArtifactDraft struct {
@@ -3069,76 +2615,8 @@ func validArtifactVisibility(v string) bool {
 	}
 }
 
-// triggerWebhook 已知 agentID + output 的快路径（成功路径用）。
-//
-// 不阻塞调用响应：起独立 goroutine + 独立 ctx（避免被请求 ctx 取消）。
-// 拿到的 run 必须是 finished 之后再读，否则 status / finished_at 都不准。
-func (s *Service) triggerWebhook(runID, agentID uuid.UUID, output map[string]interface{}) {
-	if s.webhookSvc == nil {
-		return
-	}
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if !s.runUsesLegacyTerminalPipeline(bgCtx, runID) {
-			return
-		}
-		run, err := s.queries.GetRunByID(bgCtx, runID)
-		if err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).
-				Msg("runtime.triggerWebhook: GetRunByID")
-			return
-		}
-		agent, err := s.queries.GetAgentByID(bgCtx, agentID)
-		if err != nil {
-			log.Error().Err(err).Str("agent_id", agentID.String()).
-				Msg("runtime.triggerWebhook: GetAgentByID")
-			return
-		}
-		if err := s.webhookSvc.EnqueueDelivery(bgCtx, &run, agent.Slug, output); err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).
-				Msg("runtime.triggerWebhook: EnqueueDelivery")
-		}
-	}()
-}
-
-// triggerWebhookByRun 失败路径用：output 不存在，agentID 由 run 中带出。
-func (s *Service) triggerWebhookByRun(runID uuid.UUID) {
-	if s.webhookSvc == nil {
-		return
-	}
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if !s.runUsesLegacyTerminalPipeline(bgCtx, runID) {
-			return
-		}
-		run, err := s.queries.GetRunByID(bgCtx, runID)
-		if err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).
-				Msg("runtime.triggerWebhookByRun: GetRunByID")
-			return
-		}
-		agent, err := s.queries.GetAgentByID(bgCtx, run.AgentID)
-		if err != nil {
-			log.Error().Err(err).Str("agent_id", run.AgentID.String()).
-				Msg("runtime.triggerWebhookByRun: GetAgentByID")
-			return
-		}
-		// 失败 / 超时：output = nil
-		if err := s.webhookSvc.EnqueueDelivery(bgCtx, &run, agent.Slug, nil); err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).
-				Msg("runtime.triggerWebhookByRun: EnqueueDelivery")
-		}
-	}()
-}
-
 func (s *Service) triggerTaskCallbackEvent(event *db.RunEvent) {
 	if s.taskCallbackSvc == nil || event == nil {
-		return
-	}
-	if isLegacyTerminalEventType(event.EventType) &&
-		!s.runUsesLegacyTerminalPipeline(context.Background(), event.RunID) {
 		return
 	}
 	go func(e db.RunEvent) {
@@ -3149,45 +2627,6 @@ func (s *Service) triggerTaskCallbackEvent(event *db.RunEvent) {
 				Msg("runtime.triggerTaskCallbackEvent: EnqueueRunEvent")
 		}
 	}(*event)
-}
-
-// triggerDelivery 触发用户侧默认投递（无默认 target 时静默跳过）。
-//
-// 与 webhook 解耦：用户没配 webhook 但配了 delivery 时也能投。
-// 仅在 run 已落库为终态后调用。
-func (s *Service) triggerDelivery(runID uuid.UUID) {
-	if s.deliverySvc == nil {
-		return
-	}
-	go func() {
-		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if !s.runUsesLegacyTerminalPipeline(bgCtx, runID) {
-			return
-		}
-		run, err := s.queries.GetRunByID(bgCtx, runID)
-		if err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).
-				Msg("runtime.triggerDelivery: GetRunByID")
-			return
-		}
-		if err := s.deliverySvc.EnqueueIfDefault(bgCtx, &run); err != nil {
-			log.Error().Err(err).Str("run_id", runID.String()).
-				Msg("runtime.triggerDelivery: EnqueueIfDefault")
-		}
-	}()
-}
-
-func (s *Service) shouldTriggerExternalDelivery(ctx context.Context, runID uuid.UUID) bool {
-	_, err := s.queries.GetRunDelegationByChild(ctx, runID)
-	if err == nil {
-		return false
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		log.Warn().Err(err).Str("run_id", runID.String()).
-			Msg("runtime.shouldTriggerExternalDelivery: GetRunDelegationByChild")
-	}
-	return true
 }
 
 // runToResponse 把 db.Run 转成 RunResponse（GetRun 用）。
@@ -3327,7 +2766,7 @@ func queuedRuntimeWaitingNextAction(runID string, agentID uuid.UUID) *RunNextAct
 	return &RunNextAction{
 		Type:          "start_runtime_worker",
 		Label:         "启动 Agent runtime",
-		Hint:          "运行已进入 Agent runtime 队列，但当前没有在线 worker。请启动本地 worker 并保持 WebSocket，必要时降级到 heartbeat/claim 循环。",
+		Hint:          "运行已进入 Agent Runtime 队列，但当前没有在线 Node。请启动 Agent Node；它会优先连接 Runtime v2 WebSocket，网络受限时自动切换到 Pull v2，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
 		Href:          "/hub/agents/" + agentID.String() + "/onboarding",
 		ResourceType:  "run",
 		ResourceID:    runID,
@@ -3521,7 +2960,9 @@ func createRunMessage(ctx context.Context, q *db.Queries, runID uuid.UUID, event
 }
 
 func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) *db.RunEvent {
-	if isLegacyTerminalEventType(eventType) && !s.runUsesLegacyTerminalPipeline(ctx, runID) {
+	if _, terminal := coreOwnedRuntimeEventTypes[eventType]; terminal {
+		log.Error().Str("run_id", runID.String()).Str("event_type", eventType).
+			Msg("runtime: terminal Event rejected outside Runtime v2 finalizer")
 		return nil
 	}
 	event, err := createRunEventRecord(ctx, s.queries, runID, nil, eventType, payload)
@@ -3532,53 +2973,6 @@ func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID,
 	}
 	s.triggerTaskCallbackEvent(&event)
 	return &event
-}
-
-func isLegacyTerminalEventType(eventType string) bool {
-	switch eventType {
-	case "run.completed", "run.failed", "run.canceled":
-		return true
-	default:
-		return false
-	}
-}
-
-// Runtime v2 terminal state, accounting, terminal Events and outbound Effects
-// are committed together by ResultFinalizer. The old best-effort pipeline is
-// allowed only for rows migrated from before runtime v2.
-func (s *Service) runUsesLegacyTerminalPipeline(ctx context.Context, runID uuid.UUID) bool {
-	if s == nil || s.queries == nil || runID == uuid.Nil {
-		return false
-	}
-	contractID, err := s.queries.GetRunRuntimeContractID(ctx, runID)
-	if err != nil {
-		log.Warn().Err(err).Str("run_id", runID.String()).
-			Msg("runtime: cannot determine terminal pipeline; suppressing legacy side effects")
-		return false
-	}
-	return contractID == legacyRuntimeContractID
-}
-
-func (s *Service) recordRunSuccessStatsBestEffort(ctx context.Context, runID, agentID uuid.UUID, revenue int32) {
-	if !s.runUsesLegacyTerminalPipeline(ctx, runID) {
-		return
-	}
-	statsCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), runtimeBestEffortWriteTimeout)
-	defer cancel()
-	if err := pgx.BeginFunc(statsCtx, s.pool, func(tx pgx.Tx) error {
-		q := s.queries.WithTx(tx)
-		if e := q.IncrementAgentStats(statsCtx, db.IncrementAgentStatsParams{
-			ID:           agentID,
-			RevenueCents: int64(revenue),
-		}); e != nil {
-			return e
-		}
-		_, e := q.MarkAgentAvailabilitySuccess(statsCtx, agentID)
-		return e
-	}); err != nil {
-		log.Error().Err(err).Str("run_id", runID.String()).Str("agent_id", agentID.String()).
-			Msg("runtime.recordRunSuccessStatsBestEffort")
-	}
 }
 
 func (s *Service) runBestEffortDBAsync(ctx context.Context, timeout time.Duration, fn func(context.Context)) {
@@ -3597,35 +2991,6 @@ func (s *Service) runBestEffortDBAsync(ctx context.Context, timeout time.Duratio
 func (s *Service) recordRunMessageBestEffort(ctx context.Context, runID uuid.UUID, eventSequence *int32, role, content string, payload map[string]interface{}) {
 	if err := createRunMessage(ctx, s.queries, runID, eventSequence, role, content, payload); err != nil {
 		log.Error().Err(err).Str("run_id", runID.String()).Msg("runtime.recordRunMessageBestEffort")
-	}
-}
-
-func (s *Service) recordAgentEventsBestEffort(ctx context.Context, runID uuid.UUID, events []AgentEvent) {
-	if len(events) > maxAgentResponseEvents {
-		events = events[:maxAgentResponseEvents]
-	}
-	for _, event := range events {
-		eventType := strings.TrimSpace(event.EventType)
-		if _, ok := allowedAgentResponseEventTypes[eventType]; !ok {
-			log.Warn().Str("run_id", runID.String()).Str("event_type", event.EventType).
-				Msg("runtime.recordAgentEventsBestEffort: unsupported event type")
-			continue
-		}
-		payload := event.Payload
-		if payload == nil {
-			payload = map[string]interface{}{}
-		}
-		event := s.recordRunEventBestEffort(ctx, runID, eventType, payload)
-		var eventSequence *int32
-		if event != nil {
-			eventSequence = &event.Sequence
-		}
-		if eventType == "run.message.delta" {
-			s.recordRunMessageBestEffort(ctx, runID, eventSequence, "agent", messageContentFromMap(payload), payload)
-		}
-		if eventType == "run.artifact.delta" {
-			s.recordArtifactDeltaBestEffort(ctx, runID, eventSequence, payload)
-		}
 	}
 }
 

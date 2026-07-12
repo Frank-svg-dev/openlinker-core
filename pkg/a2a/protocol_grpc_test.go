@@ -25,6 +25,34 @@ type fakeGRPCUserStatusChecker struct {
 	userID uuid.UUID
 }
 
+type rejectingGRPCUserTokenVerifier struct{}
+
+func (rejectingGRPCUserTokenVerifier) Verify(context.Context, string) (uuid.UUID, []string, error) {
+	return uuid.Nil, nil, errors.New("revoked")
+}
+
+func TestBearerGRPCAuthenticatorNamesUserTokenFailures(t *testing.T) {
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.Pairs(
+		"authorization", "Bearer ol_user_invalid",
+	))
+
+	for _, tc := range []struct {
+		name     string
+		verifier auth.ApiKeyVerifier
+		want     string
+	}{
+		{name: "verifier missing", want: "User Token 鉴权未启用"},
+		{name: "verifier rejects", verifier: rejectingGRPCUserTokenVerifier{}, want: "User Token 无效或已撤销"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewBearerGRPCAuthenticator("unused", tc.verifier).AuthenticateA2AGRPC(ctx)
+			var httpErr *httpx.HTTPError
+			require.True(t, errors.As(err, &httpErr))
+			require.Equal(t, tc.want, httpErr.Message)
+		})
+	}
+}
+
 func (c *fakeGRPCUserStatusChecker) EnsureUserEnabled(_ context.Context, userID uuid.UUID) error {
 	c.userID = userID
 	return c.err

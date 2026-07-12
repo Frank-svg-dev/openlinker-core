@@ -87,7 +87,7 @@ func insertRuntimeNodeAdminFixture(t *testing.T, pool *pgxpool.Pool) runtimeNode
 	agentID := insertAgent(t, pool, creatorID, "https://example.com/runtime", 0, "approved")
 	_, err := pool.Exec(context.Background(), `
 UPDATE agents
-SET connection_mode = 'runtime_ws', endpoint_url = 'openlinker-runtime-ws://admin-test'
+SET connection_mode = 'agent_node', endpoint_url = 'openlinker-agent-node://admin-test'
 WHERE id = $1`, agentID)
 	require.NoError(t, err)
 

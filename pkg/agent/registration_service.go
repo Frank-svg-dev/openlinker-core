@@ -275,7 +275,7 @@ func (s *RegistrationService) RegisterAgentViaToken(ctx context.Context, req *Re
 	authHeader := normalizeAuthHeader(req.EndpointAuthHeader)
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {
-		visibility = "public"
+		visibility = "private"
 	}
 	created, err := q.CreateAgent(ctx, db.CreateAgentParams{
 		CreatorID:          matched.CreatorUserID,
@@ -423,7 +423,7 @@ func normalizeAgentTokenScopes(scopes []string, agent *db.Agent) ([]string, erro
 
 func runtimeScopesForConnection(connectionMode string) []string {
 	scopes := []string{"agent:call"}
-	if connectionMode == "runtime_pull" || connectionMode == "runtime_ws" {
+	if connectionMode == ConnectionModeAgentNode {
 		scopes = append(scopes, "agent:pull")
 	}
 	return scopes

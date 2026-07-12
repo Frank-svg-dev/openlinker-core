@@ -58,12 +58,27 @@ func TestRequirePermissionReturnsStableResourceDetails(t *testing.T) {
 	}
 }
 
+func TestRequirePermissionRejectsRemovedTaskWriteScope(t *testing.T) {
+	e := echo.New()
+	c := e.NewContext(httptest.NewRequest(http.MethodPost, "/tasks", nil), httptest.NewRecorder())
+	c.Set(string(httpx.CtxKeyAuthMethod), AuthMethodUserToken)
+	c.Set(string(httpx.CtxKeyAuthScopes), []string{"tasks:write"})
+
+	err := RequirePermission(c, "tasks:create", "task", nil)
+	var httpErr *httpx.HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("error = %T %v", err, err)
+	}
+	if httpErr.Code != httpx.CodePermissionDenied {
+		t.Fatalf("code = %s", httpErr.Code)
+	}
+}
+
 func TestCorePermissionCatalogHasAllowAndDenyCoverage(t *testing.T) {
 	catalog := map[string]string{
 		"agents:read": "agent", "agents:run": "agent", "agents:create": "agent",
 		"runs:read": "run", "runs:cancel": "run",
 		"tasks:read": "task", "tasks:create": "task", "tasks:run": "task",
-		"tasks:publish": "task", "tasks:work": "task", "tasks:review": "task",
 		"workflows:read": "workflow", "workflows:manage": "workflow", "workflows:run": "workflow",
 		"agent-tokens:read": "agent", "agent-tokens:issue": "agent", "agent-tokens:revoke": "agent",
 	}

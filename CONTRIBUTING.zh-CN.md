@@ -14,7 +14,7 @@ make migrate-up
 make test
 ```
 
-本地示例只能使用占位密钥。不要提交真实 `.env`、runtime token、OAuth secret、客户
+本地示例只能使用占位密钥。不要提交真实 `.env`、Agent Token、OAuth secret、客户
 payload 或私有 endpoint。
 
 ## 范围边界

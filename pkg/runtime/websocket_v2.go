@@ -50,7 +50,7 @@ func (h *RuntimeV2HTTPController) WebSocket(c echo.Context) error {
 		return writeRuntimeV2Error(c, transportErr)
 	}
 	if h == nil || h.dependencies.Sessions == nil || h.dependencies.Leases == nil ||
-		h.dependencies.EventStore == nil || h.dependencies.Finalizer == nil ||
+		h.dependencies.EventProjector == nil || h.dependencies.Finalizer == nil ||
 		h.dependencies.Cancellations == nil {
 		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
 	}
@@ -90,6 +90,7 @@ type runtimeV2WSConnection struct {
 	sessionPrincipal   RuntimeSessionPrincipal
 	attached           bool
 	maintenanceStarted bool
+	connectionID       string
 
 	operationMu   sync.Mutex
 	correlationMu sync.Mutex
@@ -132,6 +133,7 @@ func newRuntimeV2WSConnection(
 		maintenanceDone: make(chan struct{}),
 		assignments:     make(map[uuid.UUID]runtimeV2WSAssignmentCorrelation),
 		cancellations:   make(map[uuid.UUID]runtimeV2WSCancellationCorrelation),
+		connectionID:    "ws:" + uuid.NewString(),
 	}
 }
 
@@ -172,6 +174,7 @@ func (c *runtimeV2WSConnection) run() {
 		return
 	}
 	c.attached = true
+	c.controller.refreshPresence(c.ctx, state, c.connectionID)
 	principal, err := c.controller.dependencies.Sessions.ResolveSessionPrincipal(
 		c.ctx, c.authenticated, hello.RuntimeSessionID,
 	)
@@ -361,7 +364,7 @@ func (c *runtimeV2WSConnection) handleRunEvent(envelope RuntimeEnvelope) error {
 	if err != nil {
 		return err
 	}
-	ack, err := c.controller.dependencies.EventStore.Append(
+	ack, err := c.controller.dependencies.EventProjector.AppendRuntimeEvent(
 		c.ctx,
 		c.sessionPrincipal.EventPrincipal(),
 		payload.AttemptIdentity.RuntimeIdentity(),
@@ -464,19 +467,28 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 	c.commandAndSend()
 	c.claimAndSend()
 	for {
+		var wake <-chan struct{}
+		if c.controller.dependencies.WakeHub != nil {
+			wake = c.controller.dependencies.WakeHub.Wait(c.sessionPrincipal.AgentID)
+		}
 		select {
 		case <-c.ctx.Done():
 			return
 		case <-claimTicker.C:
 			c.commandAndSend()
 			c.claimAndSend()
+		case <-wake:
+			c.commandAndSend()
+			c.claimAndSend()
 		case <-heartbeatTicker.C:
-			if _, err := c.controller.dependencies.Sessions.HeartbeatSession(
+			state, err := c.controller.dependencies.Sessions.HeartbeatSession(
 				c.ctx, c.authenticated, c.sessionRequest,
-			); err != nil {
+			)
+			if err != nil {
 				c.closeForError(mapRuntimeV2HTTPError(err))
 				return
 			}
+			c.controller.refreshPresence(c.ctx, state, c.connectionID)
 		}
 	}
 }
@@ -810,7 +822,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 		}
 		if c.attached {
 			closeCtx, closeCancel := context.WithTimeout(context.Background(), runtimeV2WSCleanupTimeout)
-			_, closeErr := c.controller.dependencies.Sessions.CloseSession(
+			state, closeErr := c.controller.dependencies.Sessions.CloseSession(
 				closeCtx,
 				c.authenticated,
 				RuntimeSessionCloseRequest{
@@ -819,10 +831,12 @@ func (c *runtimeV2WSConnection) cleanup() {
 					Reason:                 "websocket disconnected",
 				},
 			)
-			closeCancel()
 			if closeErr != nil {
 				log.Warn().Err(closeErr).Msg("runtime v2 websocket close Session")
+			} else {
+				c.controller.removePresence(closeCtx, state, c.connectionID)
 			}
+			closeCancel()
 			// This call is deliberately after durable detach/offline evidence.
 			// Lease implementations must use the exact offline cleanup path: only
 			// an unaccepted offer may be released; executing Attempts are untouched.

@@ -19,7 +19,7 @@ backports unless maintainers explicitly announce support for a release line.
 ## Security-Sensitive Areas
 
 - JWT/session authentication
-- user access tokens and Agent runtime tokens
+- User Tokens and Agent Tokens
 - Agent registration and runtime assignment
 - A2A/MCP request handling
 - webhook and delivery signatures

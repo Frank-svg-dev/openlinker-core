@@ -39,7 +39,6 @@ type runtimeService interface {
 	ListRunEventsPage(context.Context, uuid.UUID, uuid.UUID, int32, int32) (*RunEventPageResponse, error)
 	ListRunArtifacts(context.Context, uuid.UUID, uuid.UUID) ([]RunArtifactResponse, error)
 	ListRunMessages(context.Context, uuid.UUID, uuid.UUID) ([]RunMessageResponse, error)
-	ReportRunEvent(context.Context, uuid.UUID, string, *ReportRunEventRequest) (*RunEventResponse, error)
 	ValidateRuntimeToken(context.Context, string, ...string) (db.AgentRuntimeToken, error)
 }
 
@@ -58,8 +57,8 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
 //
-//	POST /run            同步调用 Agent   —— runMw（JWT + 访问令牌混合）
-//	POST /runs           异步启动调用     —— runMw（JWT + 访问令牌混合）
+//	POST /run            同步调用 Agent   —— runMw（JWT + User Token 混合）
+//	POST /runs           异步启动调用     —— runMw（JWT + User Token 混合）
 //	GET  /runs/:id       单条调用详情     —— queryMw（可按部署选择 JWT-only 或 hybrid）
 //	GET  /runs/:id/events 调用事件流      —— queryMw（轮询）
 //	GET  /runs/:id/artifacts 运行产物      —— queryMw
@@ -67,7 +66,6 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 //	GET  /runs/:id/stream 调用事件 SSE    —— queryMw
 //	POST /runs/:id/cancel 取消运行         —— queryMw
 //	POST /runs/:id/replay 回放死信运行      —— runMw
-//	POST /runs/:id/events Agent 上报事件  —— X-OpenLinker-Token（不使用用户 JWT）
 //
 // GET /runs 列表由 dashboard 模块（subagent-6a）提供，本模块不挂。
 //
@@ -82,7 +80,6 @@ func (h *Handler) RegisterProtected(api *echo.Group, runMw, queryMw echo.Middlew
 	api.GET("/runs/:id/stream", h.StreamRunEvents, queryMw)
 	api.POST("/runs/:id/cancel", h.CancelRun, queryMw)
 	api.POST("/runs/:id/replay", h.ReplayRun, runMw)
-	api.POST("/runs/:id/events", h.PostRunEvent)
 }
 
 // RegisterAdmin mounts read-only runtime operational inventory. Core API owns
@@ -603,31 +600,6 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 	}
 }
 
-// PostRunEvent 允许 Agent endpoint 在执行中上报 run event。
-//
-// 鉴权使用 Agent 注册时的 endpoint_auth_header；平台调用 Agent 时也会把同一 secret
-// 放进 X-OpenLinker-Token，Agent 可用它回调本接口。
-func (h *Handler) PostRunEvent(c echo.Context) error {
-	runID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		return httpx.BadRequest("id 不是合法 uuid")
-	}
-	var req ReportRunEventRequest
-	if err := c.Bind(&req); err != nil {
-		return httpx.BadRequest("请求体格式错误")
-	}
-	event, err := h.svc.ReportRunEvent(
-		c.Request().Context(),
-		runID,
-		c.Request().Header.Get("X-OpenLinker-Token"),
-		&req,
-	)
-	if err != nil {
-		return err
-	}
-	return c.JSON(http.StatusCreated, event)
-}
-
 // userIDFromCtx 从 echo.Context 取出当前登录用户 uuid。
 // JWT 中间件已写入 c.Get(httpx.CtxKeyUserID)。
 func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
@@ -643,7 +615,7 @@ func userIDFromCtx(c echo.Context) (uuid.UUID, error) {
 }
 
 // sourceFromCtx 把鉴权方式映射到 runs.source。
-// jwt → 'web'（浏览器 / 仪表盘）；user_token → 'api'（访问令牌 / SDK）；
+// jwt → 'web'（浏览器 / 仪表盘）；user_token → 'api'（User Token / SDK）；
 // MCP 路径的 handler 会显式传 "mcp"，绕过本函数。
 func sourceFromCtx(c echo.Context) string {
 	switch httpx.AuthMethodFrom(c) {
@@ -671,7 +643,7 @@ func requireAPIKeyScope(c echo.Context, permission string, resourceIDs ...*uuid.
 func runtimeBearerToken(header string) (string, error) {
 	parts := strings.SplitN(strings.TrimSpace(header), " ", 2)
 	if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.TrimSpace(parts[1]) == "" {
-		return "", httpx.Unauthorized("缺少访问令牌")
+		return "", httpx.Unauthorized("缺少 Agent Token")
 	}
 	return strings.TrimSpace(parts[1]), nil
 }

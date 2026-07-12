@@ -19,7 +19,7 @@ English documentation: [SUPPORT.md](./SUPPORT.md)
 - 在最新 `main` 或指定 release 上确认问题。
 - 提供操作系统、Go 版本、数据库版本和 commit SHA。
 - 提供复现步骤、期望行为、实际行为和脱敏日志。
-- 删除 JWT、runtime token、OAuth secret、私有 URL、客户数据和本地 `.env` 值。
+- 删除 JWT、Agent Token、OAuth secret、私有 URL、客户数据和本地 `.env` 值。
 
 ## 不在这里处理
 

@@ -75,6 +75,43 @@ func TestRedisRuntimePresenceRemoveAndValidation(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestRedisRuntimePresenceOldConnectionCannotRemoveReplacement(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { require.NoError(t, client.Close()) })
+	store, err := NewRedisRuntimePresenceStore(client, "test:runtime")
+	require.NoError(t, err)
+
+	oldConnection := validTestRuntimePresence()
+	oldConnection.ConnectionID = "ws:old"
+	replacement := oldConnection
+	replacement.ConnectionID = "ws:new"
+	require.NoError(t, store.Refresh(context.Background(), oldConnection, time.Minute))
+	require.NoError(t, store.Refresh(context.Background(), replacement, time.Minute))
+	require.NoError(t, store.Remove(context.Background(), oldConnection))
+
+	listed, err := store.ListByAgent(context.Background(), replacement.AgentID)
+	require.NoError(t, err)
+	require.Equal(t, []RuntimePresence{replacement}, listed)
+}
+
+func TestRedisRuntimePresenceLossIsAdvisory(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{
+		Addr: server.Addr(), DialTimeout: 50 * time.Millisecond,
+		ReadTimeout: 50 * time.Millisecond, WriteTimeout: 50 * time.Millisecond,
+		MaxRetries: -1,
+	})
+	t.Cleanup(func() { _ = client.Close() })
+	store, err := NewRedisRuntimePresenceStore(client, "test:runtime")
+	require.NoError(t, err)
+	server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.Error(t, store.Refresh(ctx, validTestRuntimePresence(), time.Minute))
+}
+
 func TestRedisRuntimePresenceRejectsCorruptHintWithoutTrustingIt(t *testing.T) {
 	server := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})

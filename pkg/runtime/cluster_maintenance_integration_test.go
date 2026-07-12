@@ -19,8 +19,8 @@ func TestRuntimeClusterMaintenanceAllowsCommittedReplayButRejectsNewRun(t *testi
 	agentID := insertAgent(t, pool, creatorID, "https://runtime.invalid/queued", 0, "approved")
 	_, err := pool.Exec(context.Background(), `
 UPDATE agents
-SET connection_mode = 'runtime_pull',
-    endpoint_url = 'openlinker-runtime-pull://' || id::text
+SET connection_mode = 'agent_node',
+    endpoint_url = 'openlinker-agent-node://' || id::text
 WHERE id = $1`, agentID)
 	require.NoError(t, err)
 

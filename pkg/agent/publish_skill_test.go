@@ -64,17 +64,32 @@ func TestServePublishAgentSkillIncludesCanonicalRuntimeV2Onboarding(t *testing.T
 	assertContains(t, body, "Map your own internal skills or tools to at most 5 existing OpenLinker skill_ids")
 	assertContains(t, body, "Do not invent new skill_ids")
 	assertContains(t, body, "OPENLINKER_AGENT_NODE_TRANSPORT=auto")
+	assertContains(t, body, "30-minute expiry is only the first-registration window")
+	assertContains(t, body, "clears expires_at")
+	assertContains(t, body, "the creator revokes it.")
 	assertContains(t, body, "https://api.stage.example/api/v1/agent-runtime/v2/ws")
+	assertContains(t, body, "POST /api/v1/agent-runtime/v2/runs/claim")
 	assertContains(t, body, "Runtime v2 Session")
 	assertContains(t, body, "run.assignment_confirmed")
 	assertContains(t, body, "matching ACK")
-	assertContains(t, body, "WebSocket first, Pull v2 fallback")
+	assertContains(t, body, "WebSocket and Pull v2")
+	assertContains(t, body, `"connection_mode": "agent_node"`)
 	assertContains(t, body, "mTLS")
 	assertContains(t, body, "Keep the worker process alive under a supervisor")
 	assertContains(t, body, "OPENLINKER_API_BASE")
 	assertNotContains(t, body, "/api/v1/agent-runtime/heartbeat")
 	assertNotContains(t, body, "/api/v1/agent-runtime/runs/claim")
 	assertNotContains(t, body, "/api/v1/agent-runtime/runs/RUN_ID/result")
+	assertNotContains(t, body, "POST /agent-runtime/v2/runs/claim")
+}
+
+func TestConsumeAgentSkillKeepsTasksPrivate(t *testing.T) {
+	body := ConsumeAgentSkillMarkdown
+
+	assertContains(t, body, "create a private task with create_task")
+	assertContains(t, body, "Do not publish that task")
+	assertNotContains(t, body, "publish a task")
+	assertNotContains(t, body, "Task acceptance states")
 }
 
 func TestPublicAgentSkillDocsUseCurrentCredentialNamesWithoutRoadmapCopy(t *testing.T) {

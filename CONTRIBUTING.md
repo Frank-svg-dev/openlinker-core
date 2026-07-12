@@ -16,7 +16,7 @@ make test
 ```
 
 Use placeholder secrets in local examples. Never commit a real `.env` file,
-runtime token, OAuth secret, customer payload, or private endpoint.
+Agent Token, OAuth secret, customer payload, or private endpoint.
 
 ## Scope Boundaries
 

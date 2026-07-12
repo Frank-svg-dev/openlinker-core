@@ -10,23 +10,30 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-func TestNormalizeGrantsAllowsZeroAndMapsLegacyTaskScopeNarrowly(t *testing.T) {
+func TestNormalizeGrantsAllowsZeroAndRejectsRemovedTaskScopes(t *testing.T) {
 	grants, err := normalizeGrantRequests(nil)
 	if err != nil || len(grants) != 0 {
 		t.Fatalf("zero grants = %#v, %v", grants, err)
 	}
-	grants, err = grantsFromLegacyScopes([]string{"tasks:write", "agents:run"})
+	grants, err = grantsFromLegacyScopes([]string{"tasks:create", "agents:run"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	permissions := permissionsFromGrants(grants)
 	if len(permissions) != 2 || permissions[0] != "agents:run" || permissions[1] != "tasks:create" {
-		t.Fatalf("legacy permissions = %#v", permissions)
+		t.Fatalf("permissions = %#v", permissions)
 	}
-	for _, permission := range permissions {
-		if permission == "tasks:publish" || permission == "tasks:run" || permission == "tasks:work" || permission == "tasks:review" {
-			t.Fatalf("tasks:write must not expand to %s", permission)
-		}
+	if _, err := grantsFromLegacyScopes([]string{"tasks:write"}); err == nil {
+		t.Fatal("removed task write permission must be rejected")
+	}
+	if _, err := normalizeGrantRequests([]GrantRequest{{Permission: "tasks:publish"}}); err == nil {
+		t.Fatal("removed public task marketplace permission must be rejected")
+	}
+	if _, err := normalizeGrantRequests([]GrantRequest{{Permission: "tasks:work"}}); err == nil {
+		t.Fatal("removed task worker permission must be rejected")
+	}
+	if _, err := normalizeGrantRequests([]GrantRequest{{Permission: "tasks:review"}}); err == nil {
+		t.Fatal("removed task review permission must be rejected")
 	}
 }
 

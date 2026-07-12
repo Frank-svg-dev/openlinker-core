@@ -2,9 +2,9 @@ package task
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -21,15 +21,11 @@ import (
 )
 
 const (
-	maxTaskSkillRefs        = 5
-	maxTaskMCPTools         = 5
-	maxTaskAgentRefs        = 5
-	maxTaskResultSummaryLen = 2000
-	maxTaskRevisionNoteLen  = 2000
-	maxTaskPublicSummaryLen = 240
-	skillCatalogTTL         = 5 * time.Minute
-	taskVisibilityPrivate   = "private"
-	taskVisibilityPublic    = "public"
+	maxTaskSkillRefs      = 5
+	maxTaskMCPTools       = 5
+	maxTaskAgentRefs      = 5
+	skillCatalogTTL       = 5 * time.Minute
+	taskVisibilityPrivate = "private"
 )
 
 var explicitSkillIDPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(?:[/_-][a-z0-9]+)*$`)
@@ -210,7 +206,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			return nil, err
 		}
 		resp.TaskID = taskID
-		resp.NextAction = nextActionForNeedsAgent(taskID, "skill_not_identified", "暂未识别到明确的 Skill，任务已保存且仅自己可见")
+		resp.NextAction = nextActionForNeedsAgent(query, parsed, "skill_not_identified", "暂未识别到明确的 Skill，任务已保存且仅自己可见")
 		return resp, nil
 	}
 
@@ -233,7 +229,7 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 			return nil, err
 		}
 		resp.TaskID = taskID
-		resp.NextAction = nextActionForNeedsAgent(taskID, "no_public_agent", "已识别 Skill，但当前没有可推荐的公开 Agent")
+		resp.NextAction = nextActionForNeedsAgent(query, parsed, "no_public_agent", "已识别 Skill，但当前市场没有可直接调用的匹配 Agent")
 		return resp, nil
 	}
 
@@ -303,77 +299,9 @@ func (s *Service) Recommend(ctx context.Context, userID uuid.UUID, req *Recommen
 	resp.TaskID = taskID
 	resp.Recommendations = recs
 	if len(recs) == 0 {
-		resp.NextAction = nextActionForNeedsAgent(taskID, "candidates_unavailable", "候选 Agent 当前不可公开推荐或已不可用")
+		resp.NextAction = nextActionForNeedsAgent(query, parsed, "candidates_unavailable", "候选 Agent 当前不可调用或已不可用")
 	}
 	return resp, nil
-}
-
-// Publish 为私有任务发布一段公开摘要；公开列表只展示 public_summary。
-func (s *Service) Publish(ctx context.Context, taskID, userID uuid.UUID, req *PublishRequest) (*DetailResponse, error) {
-	t, err := s.queries.GetTaskQuery(ctx, taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("任务不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Publish: GetTaskQuery")
-		return nil, httpx.Internal("查询任务失败")
-	}
-	if t.UserID != userID {
-		return nil, httpx.NotFound("任务不存在")
-	}
-	if t.Visibility == taskVisibilityPublic {
-		return s.GetByID(ctx, taskID, userID)
-	}
-	if t.CompletedAt != nil {
-		return nil, httpx.Conflict("任务已完成，不能发布到任务广场")
-	}
-	summary, err := normalizePublicSummary(req, t.Query)
-	if err != nil {
-		return nil, err
-	}
-	published, err := s.queries.PublishTaskQuery(ctx, db.PublishTaskQueryParams{
-		ID:            taskID,
-		UserID:        userID,
-		PublicSummary: summary,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Conflict("任务状态已变化，请刷新后重试")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Publish: PublishTaskQuery")
-		return nil, httpx.Internal("公开任务摘要失败")
-	}
-	return s.detailFromTask(ctx, &published)
-}
-
-// Unpublish 撤下公开摘要，让任务恢复为仅创建者可见。任务内容、交付和验收记录不变。
-func (s *Service) Unpublish(ctx context.Context, taskID, userID uuid.UUID) (*DetailResponse, error) {
-	t, err := s.queries.GetTaskQuery(ctx, taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("任务不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Unpublish: GetTaskQuery")
-		return nil, httpx.Internal("查询任务失败")
-	}
-	if t.UserID != userID {
-		return nil, httpx.NotFound("任务不存在")
-	}
-	if t.Visibility != taskVisibilityPublic {
-		return s.GetByID(ctx, taskID, userID)
-	}
-	unpublished, err := s.queries.UnpublishTaskQuery(ctx, db.UnpublishTaskQueryParams{
-		ID:     taskID,
-		UserID: userID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Conflict("任务状态已变化，请刷新后重试")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Unpublish: UnpublishTaskQuery")
-		return nil, httpx.Internal("撤回公开任务失败")
-	}
-	return s.detailFromTask(ctx, &unpublished)
 }
 
 // Choose 用户在推荐里选定一个 Agent。校验：
@@ -418,209 +346,8 @@ func (s *Service) Choose(ctx context.Context, taskID, userID, agentID uuid.UUID)
 	return nil
 }
 
-// Claim 让创作者用自己的 Agent 接入公开任务。它只登记任务工作关系；
-// 实际运行仍走 /runs，成功后再调用 Complete 写回结果。
-func (s *Service) Claim(ctx context.Context, taskID, userID, agentID uuid.UUID) (*WorkResponse, error) {
-	if agentID == uuid.Nil {
-		return nil, httpx.Unprocessable("agent_id 不能为空")
-	}
-	agent, err := s.queries.GetAgentByIDForOwner(ctx, db.GetAgentByIDForOwnerParams{
-		ID:        agentID,
-		CreatorID: userID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("Agent 不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("task.Claim: GetAgentByIDForOwner")
-		return nil, httpx.Internal("查询 Agent 失败")
-	}
-	if agent.LifecycleStatus != "active" || agent.Visibility == "private" {
-		return nil, httpx.Conflict("Agent 当前不可用于接任务")
-	}
-
-	t, err := s.queries.GetTaskQuery(ctx, taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("任务不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Claim: GetTaskQuery")
-		return nil, httpx.Internal("查询任务失败")
-	}
-	if t.CompletedAt != nil {
-		return nil, httpx.Conflict("任务已完成，不能重复接入")
-	}
-	if t.Visibility != taskVisibilityPublic {
-		return nil, httpx.Conflict("任务当前仅创建者可见，需先发布公开摘要后才能接入")
-	}
-	if t.ClaimedAgentID != nil {
-		return nil, httpx.Conflict("任务已经有 Agent 接入")
-	}
-	if t.ChosenAgentID != nil {
-		return nil, httpx.Conflict("任务发布者已经选择了 Agent")
-	}
-
-	claimed, err := s.queries.ClaimTaskQuery(ctx, db.ClaimTaskQueryParams{
-		ID:      taskID,
-		UserID:  userID,
-		AgentID: agentID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Conflict("任务已经被接入或完成")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Claim: ClaimTaskQuery")
-		return nil, httpx.Internal("接任务失败")
-	}
-	return toWorkResponse(&claimed, agentID), nil
-}
-
-// Complete 把一次成功 run 绑定回任务。任务发布者选择推荐 Agent 后可完成；
-// 任务广场接单方也可在自己的 Agent 跑完后完成。
-func (s *Service) Complete(ctx context.Context, taskID, userID uuid.UUID, req *CompleteRequest) (*WorkResponse, error) {
-	if req == nil {
-		return nil, httpx.Unprocessable("请求体不能为空")
-	}
-	summary := strings.TrimSpace(req.ResultSummary)
-	if summary == "" || len(summary) > maxTaskResultSummaryLen {
-		return nil, httpx.Unprocessable("result_summary 长度需在 1-2000 字符之间")
-	}
-	if req.AgentID == uuid.Nil || req.RunID == uuid.Nil {
-		return nil, httpx.Unprocessable("agent_id 和 run_id 不能为空")
-	}
-
-	t, err := s.queries.GetTaskQuery(ctx, taskID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("任务不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Complete: GetTaskQuery")
-		return nil, httpx.Internal("查询任务失败")
-	}
-	if t.CompletedAt != nil && t.DeliveryStatus != "revision_requested" {
-		return nil, httpx.Conflict("任务已完成，不能重复提交结果")
-	}
-	allowed := t.UserID == userID
-	if t.ClaimedByUserID != nil && *t.ClaimedByUserID == userID {
-		allowed = true
-	}
-	if !allowed {
-		return nil, httpx.NotFound("任务不存在")
-	}
-
-	if t.ClaimedAgentID != nil {
-		if *t.ClaimedAgentID != req.AgentID {
-			return nil, httpx.Conflict("run 的 Agent 与接任务时选择的 Agent 不一致")
-		}
-	} else if t.ChosenAgentID != nil {
-		if *t.ChosenAgentID != req.AgentID {
-			return nil, httpx.Conflict("run 的 Agent 与任务选择的 Agent 不一致")
-		}
-	} else {
-		return nil, httpx.Conflict("任务还没有接入 Agent")
-	}
-
-	run, err := s.queries.GetRunByID(ctx, req.RunID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("运行记录不存在")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("run_id", req.RunID.String()).Msg("task.Complete: GetRunByID")
-		return nil, httpx.Internal("查询运行记录失败")
-	}
-	if run.UserID != userID || run.AgentID != req.AgentID {
-		return nil, httpx.NotFound("运行记录不存在")
-	}
-	if run.Status != "success" {
-		return nil, httpx.Conflict("只有成功完成的 run 才能写回任务结果")
-	}
-	artifact := req.ResultArtifact
-	if artifact == nil {
-		artifact = map[string]interface{}{}
-		if len(run.Output) > 0 {
-			_ = json.Unmarshal(run.Output, &artifact)
-		}
-	}
-	artifactJSON, err := json.Marshal(artifact)
-	if err != nil {
-		return nil, httpx.BadRequest("result_artifact 不是合法 JSON")
-	}
-	visibility := normalizeDeliveryVisibility(req.DeliveryVisibility)
-
-	completed, err := s.queries.CompleteTaskQuery(ctx, db.CompleteTaskQueryParams{
-		ID:                 taskID,
-		UserID:             userID,
-		AgentID:            req.AgentID,
-		CompletionRunID:    req.RunID,
-		CompletionSummary:  summary,
-		DeliveryArtifact:   artifactJSON,
-		DeliveryVisibility: visibility,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Conflict("任务状态已变化，请刷新后重试")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.Complete: CompleteTaskQuery")
-		return nil, httpx.Internal("提交任务结果失败")
-	}
-	return toWorkResponse(&completed, req.AgentID), nil
-}
-
-// AcceptDelivery marks a submitted task result as accepted. Only the task
-// poster can accept a delivery.
-func (s *Service) AcceptDelivery(ctx context.Context, taskID, userID uuid.UUID) (*WorkResponse, error) {
-	accepted, err := s.queries.AcceptTaskDelivery(ctx, db.AcceptTaskDeliveryParams{
-		ID:     taskID,
-		UserID: userID,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Conflict("任务结果不可验收，请确认已提交且未验收")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.AcceptDelivery")
-		return nil, httpx.Internal("验收任务失败")
-	}
-	agentID := uuid.Nil
-	if accepted.ClaimedAgentID != nil {
-		agentID = *accepted.ClaimedAgentID
-	} else if accepted.ChosenAgentID != nil {
-		agentID = *accepted.ChosenAgentID
-	}
-	return toWorkResponse(&accepted, agentID), nil
-}
-
-// RequestRevision asks the worker to resubmit a completed task delivery.
-func (s *Service) RequestRevision(ctx context.Context, taskID, userID uuid.UUID, req *RevisionRequest) (*WorkResponse, error) {
-	if req == nil {
-		return nil, httpx.Unprocessable("请求体不能为空")
-	}
-	note := strings.TrimSpace(req.Note)
-	if note == "" || len(note) > maxTaskRevisionNoteLen {
-		return nil, httpx.Unprocessable("note 长度需在 1-2000 字符之间")
-	}
-	revision, err := s.queries.RequestTaskRevision(ctx, db.RequestTaskRevisionParams{
-		ID:           taskID,
-		UserID:       userID,
-		RevisionNote: note,
-	})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.Conflict("任务结果不可要求修订，请确认已提交且未验收")
-	}
-	if err != nil {
-		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.RequestRevision")
-		return nil, httpx.Internal("请求修订失败")
-	}
-	agentID := uuid.Nil
-	if revision.ClaimedAgentID != nil {
-		agentID = *revision.ClaimedAgentID
-	} else if revision.ChosenAgentID != nil {
-		agentID = *revision.ChosenAgentID
-	}
-	return toWorkResponse(&revision, agentID), nil
-}
-
-// RunTask 从任务详情启动一次运行。它要求任务已经被发布者选择 Agent，
-// 或已经由创作者接入；结果终态仍由 Complete 写回，便于 async run 统一处理。
+// RunTask 从私有任务详情启动一次运行。任务必须属于调用者，且 Agent
+// 必须先从推荐结果中选定；运行结果由 Run 资源本身承载。
 func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *RunTaskRequest) (*RunTaskResponse, error) {
 	if s.runner == nil {
 		return nil, httpx.Internal("任务运行服务未配置")
@@ -643,32 +370,20 @@ func (s *Service) RunTask(ctx context.Context, taskID, userID uuid.UUID, req *Ru
 		log.Error().Err(err).Str("task_id", taskID.String()).Msg("task.RunTask: GetTaskQuery")
 		return nil, httpx.Internal("查询任务失败")
 	}
-	if t.CompletedAt != nil && t.DeliveryStatus != "revision_requested" {
-		return nil, httpx.Conflict("任务已完成，不能重复运行")
-	}
-	allowed := t.UserID == userID
-	if t.ClaimedByUserID != nil && *t.ClaimedByUserID == userID {
-		allowed = true
-	}
-	if !allowed {
+	if t.UserID != userID {
 		return nil, httpx.NotFound("任务不存在")
 	}
-
-	if t.ClaimedAgentID != nil {
-		if *t.ClaimedAgentID != req.AgentID {
-			return nil, httpx.Conflict("只能运行接任务时选择的 Agent")
-		}
-	} else if t.ChosenAgentID != nil {
+	if t.ChosenAgentID != nil {
 		if *t.ChosenAgentID != req.AgentID {
-			return nil, httpx.Conflict("只能运行任务发布者已选择的 Agent")
+			return nil, httpx.Conflict("只能运行任务中已选择的 Agent")
 		}
 	} else {
-		return nil, httpx.Conflict("请先选择或接入 Agent")
+		return nil, httpx.Conflict("请先选择 Agent")
 	}
 
 	input := req.Input
 	if input == nil {
-		input = map[string]interface{}{"text": runnableTaskText(&t, userID)}
+		input = map[string]interface{}{"text": t.Query}
 	}
 	metadata := map[string]interface{}{
 		"task_id": taskID.String(),
@@ -701,7 +416,7 @@ func (s *Service) ListMine(ctx context.Context, userID uuid.UUID, limit int32) (
 	if limit <= 0 || limit > 20 {
 		limit = 20
 	}
-	resp, err := s.ListMinePage(ctx, userID, "", "", "", "created_desc", 1, limit)
+	resp, err := s.ListMinePage(ctx, userID, "", "", "created_desc", 1, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -709,32 +424,29 @@ func (s *Service) ListMine(ctx context.Context, userID uuid.UUID, limit int32) (
 }
 
 // ListMinePage returns task history with server-side search, filters, sorting, and pagination.
-func (s *Service) ListMinePage(ctx context.Context, userID uuid.UUID, query, visibility, status, sort string, page, size int32) (*HistoryListResponse, error) {
+func (s *Service) ListMinePage(ctx context.Context, userID uuid.UUID, query, status, sort string, page, size int32) (*HistoryListResponse, error) {
 	page, size = normalizeTaskHistoryPage(page, size)
 	query = normalizeTaskHistoryQuery(query)
-	visibility = normalizeTaskHistoryVisibility(visibility)
 	status = normalizeTaskHistoryStatus(status)
 	sort = normalizeTaskHistorySort(sort)
 	offset := (page - 1) * size
 
 	rows, err := s.queries.ListTaskQueriesByUser(ctx, db.ListTaskQueriesByUserParams{
-		UserID:     userID,
-		Query:      query,
-		Visibility: visibility,
-		Status:     status,
-		Sort:       sort,
-		Limit:      size,
-		Offset:     offset,
+		UserID: userID,
+		Query:  query,
+		Status: status,
+		Sort:   sort,
+		Limit:  size,
+		Offset: offset,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("task.ListMine: query")
 		return nil, httpx.Internal("查询任务历史失败")
 	}
 	total, err := s.queries.CountTaskQueriesByUser(ctx, db.CountTaskQueriesByUserParams{
-		UserID:     userID,
-		Query:      query,
-		Visibility: visibility,
-		Status:     status,
+		UserID: userID,
+		Query:  query,
+		Status: status,
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("task.ListMine: count")
@@ -745,14 +457,13 @@ func (s *Service) ListMinePage(ctx context.Context, userID uuid.UUID, query, vis
 		out = append(out, toHistoryItem(&rows[i]))
 	}
 	return &HistoryListResponse{
-		Items:            out,
-		Total:            total,
-		Page:             page,
-		Size:             size,
-		Query:            query,
-		Sort:             sort,
-		StatusFilter:     status,
-		VisibilityFilter: visibility,
+		Items:        out,
+		Total:        total,
+		Page:         page,
+		Size:         size,
+		Query:        query,
+		Sort:         sort,
+		StatusFilter: status,
 	}, nil
 }
 
@@ -777,20 +488,9 @@ func normalizeTaskHistoryQuery(query string) string {
 	return query
 }
 
-func normalizeTaskHistoryVisibility(visibility string) string {
-	switch strings.ToLower(strings.TrimSpace(visibility)) {
-	case taskVisibilityPrivate:
-		return taskVisibilityPrivate
-	case taskVisibilityPublic:
-		return taskVisibilityPublic
-	default:
-		return ""
-	}
-}
-
 func normalizeTaskHistoryStatus(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case "accepted", "revision_requested", "completed", "in_progress", "matched", "needs_agent", "open":
+	case "completed", "matched", "needs_agent", "open":
 		return strings.ToLower(strings.TrimSpace(status))
 	default:
 		return ""
@@ -803,120 +503,6 @@ func normalizeTaskHistorySort(sort string) string {
 		return "created_asc"
 	default:
 		return "created_desc"
-	}
-}
-
-// ListBoard 返回任务广场最近公开任务。列表不暴露发布者身份。
-func (s *Service) ListBoard(ctx context.Context, limit int32) ([]PublicTaskItem, error) {
-	resp, err := s.ListBoardPage(ctx, "", "", "", "", "published_desc", 1, limit)
-	if err != nil {
-		return nil, err
-	}
-	return resp.Items, nil
-}
-
-// ListBoardPage returns public task board data with server-side search,
-// filters, sorting, and pagination. It never exposes publisher identity or
-// uses the private original query as public search text.
-func (s *Service) ListBoardPage(ctx context.Context, query, status, skill, mcp, sort string, page, size int32) (*PublicTaskListResponse, error) {
-	page, size = normalizeTaskHistoryPage(page, size)
-	query = normalizeTaskHistoryQuery(query)
-	status = normalizeTaskHistoryStatus(status)
-	skillIDs := normalizeTaskBoardSkillFilters(skill)
-	skillFilter := strings.Join(skillIDs, ",")
-	mcp = normalizeTaskBoardExactFilter(mcp)
-	sort = normalizeTaskBoardSort(sort)
-	offset := (page - 1) * size
-
-	rows, err := s.queries.ListPublicTaskQueriesPage(ctx, db.ListPublicTaskQueriesPageParams{
-		Query:    query,
-		Status:   status,
-		SkillIDs: skillIDs,
-		MCP:      mcp,
-		Sort:     sort,
-		Limit:    size,
-		Offset:   offset,
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("task.ListBoard: query")
-		return nil, httpx.Internal("查询任务广场失败")
-	}
-	total, err := s.queries.CountPublicTaskQueriesPage(ctx, db.CountPublicTaskQueriesPageParams{
-		Query:    query,
-		Status:   status,
-		SkillIDs: skillIDs,
-		MCP:      mcp,
-	})
-	if err != nil {
-		log.Error().Err(err).Msg("task.ListBoard: count")
-		return nil, httpx.Internal("查询任务广场失败")
-	}
-	skills, err := s.skills(ctx)
-	if err != nil {
-		log.Warn().Err(err).Msg("task.ListBoard: skills")
-	}
-	skillByID := skillCatalogByID(skills)
-	out := make([]PublicTaskItem, 0, len(rows))
-	for i := range rows {
-		out = append(out, toPublicTaskItem(&rows[i], skillByID))
-	}
-	return &PublicTaskListResponse{
-		Items:          out,
-		Total:          total,
-		Page:           page,
-		Size:           size,
-		Query:          query,
-		Sort:           sort,
-		StatusFilter:   status,
-		SkillFilter:    skillFilter,
-		SkillIDsFilter: skillIDs,
-		MCPFilter:      mcp,
-	}, nil
-}
-
-func normalizeTaskBoardSkillFilters(values ...string) []string {
-	seen := make(map[string]struct{})
-	out := make([]string, 0, 5)
-	for _, value := range values {
-		for _, part := range strings.Split(value, ",") {
-			clean := strings.TrimSpace(strings.ToLower(part))
-			if clean == "" {
-				continue
-			}
-			if len([]rune(clean)) > 80 {
-				clean = string([]rune(clean)[:80])
-			}
-			if _, ok := seen[clean]; ok {
-				continue
-			}
-			seen[clean] = struct{}{}
-			out = append(out, clean)
-			if len(out) >= 5 {
-				return out
-			}
-		}
-	}
-	return out
-}
-
-func normalizeTaskBoardExactFilter(value string) string {
-	value = strings.TrimSpace(value)
-	if len([]rune(value)) > 80 {
-		value = string([]rune(value)[:80])
-	}
-	return value
-}
-
-func normalizeTaskBoardSort(sort string) string {
-	switch strings.ToLower(strings.TrimSpace(sort)) {
-	case "published_asc":
-		return "published_asc"
-	case "created_desc":
-		return "created_desc"
-	case "recommended_desc":
-		return "recommended_desc"
-	default:
-		return "published_desc"
 	}
 }
 
@@ -943,21 +529,16 @@ func (s *Service) GetByID(ctx context.Context, taskID, userID uuid.UUID) (*Detai
 
 func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailResponse, error) {
 	resp := &DetailResponse{
-		ID:            t.ID.String(),
-		Query:         t.Query,
-		Visibility:    normalizedTaskVisibility(t.Visibility),
-		PublicSummary: copyStringPtr(t.PublicSummary),
-		ParsedSkills:  append([]string{}, t.ParsedSkills...),
-		MCPTools:      append([]string{}, t.MCPTools...),
-		MCPToolRefs:   mcpToolRefsForNames(t.MCPTools),
-		Status:        taskStatus(t),
-		CreatedAt:     t.CreatedAt.UTC().Format(time.RFC3339),
+		ID:           t.ID.String(),
+		Query:        t.Query,
+		Visibility:   taskVisibilityPrivate,
+		ParsedSkills: append([]string{}, t.ParsedSkills...),
+		MCPTools:     append([]string{}, t.MCPTools...),
+		MCPToolRefs:  mcpToolRefsForNames(t.MCPTools),
+		Status:       taskStatus(t),
+		CreatedAt:    t.CreatedAt.UTC().Format(time.RFC3339),
 
 		Recommendations: []Recommendation{},
-	}
-	if t.PublishedAt != nil {
-		ts := t.PublishedAt.UTC().Format(time.RFC3339)
-		resp.PublishedAt = &ts
 	}
 	if t.ChosenAgentID != nil {
 		s := t.ChosenAgentID.String()
@@ -967,9 +548,7 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 		ts := t.ChosenAt.UTC().Format(time.RFC3339)
 		resp.ChosenAt = &ts
 	}
-	attachTaskWorkFields(t, &resp.ClaimedAgentID, &resp.ClaimedByUserID, &resp.ClaimedAt, &resp.CompletionRunID, &resp.CompletedAt, &resp.CompletionSummary)
-	attachTaskDeliveryFields(t, &resp.DeliveryStatus, &resp.DeliveryVisibility, &resp.DeliveryArtifact, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
-
+	attachPrivateTaskCompletion(t, &resp.CompletionRunID, &resp.CompletedAt, &resp.CompletionSummary)
 	// 用 catalog 回填 Why 文案（与 Recommend 一致）
 	skills, err := s.skills(ctx)
 	if err != nil {
@@ -979,9 +558,7 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 	resp.ParsedSkillRefs = skillRefsForIDs(t.ParsedSkills, skillByID)
 
 	if len(t.RecommendedAgentIDs) == 0 {
-		if t.Visibility != taskVisibilityPublic {
-			resp.NextAction = nextActionForNeedsAgent(t.ID, "no_recommendable_agent", "当前任务没有可直接推荐的 Agent")
-		}
+		resp.NextAction = nextActionForNeedsAgent(t.Query, t.ParsedSkills, "no_recommendable_agent", "当前任务没有可直接调用的匹配 Agent")
 		return resp, nil
 	}
 
@@ -1019,8 +596,8 @@ func (s *Service) detailFromTask(ctx context.Context, t *db.TaskQuery) (*DetailR
 			MatchedSkills: matchedSkills,
 		})
 	}
-	if len(resp.Recommendations) == 0 && t.Visibility != taskVisibilityPublic {
-		resp.NextAction = nextActionForNeedsAgent(t.ID, "historical_candidates_unavailable", "历史候选 Agent 当前不可用")
+	if len(resp.Recommendations) == 0 {
+		resp.NextAction = nextActionForNeedsAgent(t.Query, t.ParsedSkills, "historical_candidates_unavailable", "历史候选 Agent 当前不可调用")
 	}
 	return resp, nil
 }
@@ -1229,61 +806,27 @@ func mergePreferredAndMatchedAgentIDs(preferred []uuid.UUID, matches []AgentMatc
 	return out
 }
 
-func normalizePublicSummary(req *PublishRequest, query string) (string, error) {
-	summary := ""
-	if req != nil {
-		summary = strings.TrimSpace(req.PublicSummary)
+func nextActionForNeedsAgent(query string, skillIDs []string, reasonCode, reason string) *TaskNextAction {
+	params := url.Values{}
+	query = truncateRunes(compactWhitespace(query), 500)
+	if query != "" {
+		params.Set("q", query)
 	}
-	if summary == "" {
-		summary = publicSummaryFromQuery(query)
+	skillIDs = mergeSkillIDs(nil, skillIDs, maxTaskSkillRefs)
+	if len(skillIDs) == 1 {
+		params.Set("skill", skillIDs[0])
+	} else if len(skillIDs) > 1 {
+		params.Set("skill_ids", strings.Join(skillIDs, ","))
 	}
-	summary = compactWhitespace(summary)
-	runeLen := len([]rune(summary))
-	if runeLen < 4 || runeLen > maxTaskPublicSummaryLen {
-		return "", httpx.Unprocessable("public_summary 长度需在 4-240 字符之间")
+	href := "/publish"
+	if encoded := params.Encode(); encoded != "" {
+		href += "?" + encoded
 	}
-	return summary, nil
-}
-
-func publicSummaryFromQuery(query string) string {
-	summary := compactWhitespace(query)
-	return truncateRunes(summary, maxTaskPublicSummaryLen)
-}
-
-func publicTaskSummary(t *db.TaskQuery) string {
-	if t.PublicSummary != nil && strings.TrimSpace(*t.PublicSummary) != "" {
-		return *t.PublicSummary
-	}
-	return publicSummaryFromQuery(t.Query)
-}
-
-func runnableTaskText(t *db.TaskQuery, userID uuid.UUID) string {
-	if t.UserID != userID && normalizedTaskVisibility(t.Visibility) == taskVisibilityPublic {
-		return publicTaskSummary(t)
-	}
-	return t.Query
-}
-
-func workResponseQuery(t *db.TaskQuery) string {
-	if normalizedTaskVisibility(t.Visibility) == taskVisibilityPublic {
-		return publicTaskSummary(t)
-	}
-	return t.Query
-}
-
-func normalizedTaskVisibility(raw string) string {
-	if raw == taskVisibilityPublic {
-		return taskVisibilityPublic
-	}
-	return taskVisibilityPrivate
-}
-
-func nextActionForNeedsAgent(taskID uuid.UUID, reasonCode, reason string) *TaskNextAction {
 	return &TaskNextAction{
-		Type:       "publish_task",
-		Label:      "发布公开摘要",
-		Hint:       "任务当前仅自己可见。若想让 Agent 提供方响应，可以单独发布一段不含敏感信息的公开摘要。",
-		Href:       "/tasks/" + taskID.String(),
+		Type:       "connect_agent",
+		Label:      "接入匹配的 Agent",
+		Hint:       "当前市场缺少匹配供给。可以按已识别的 Skill 接入你已有的 Agent，并先保持私有完成连通性验证。",
+		Href:       href,
 		ReasonCode: reasonCode,
 		Reason:     reason,
 	}
@@ -1302,14 +845,6 @@ func truncateRunes(value string, max int) string {
 		return value
 	}
 	return string(runes[:max])
-}
-
-func copyStringPtr(value *string) *string {
-	if value == nil {
-		return nil
-	}
-	out := *value
-	return &out
 }
 
 func mcpToolRefsForNames(names []string) []MCPToolRef {
@@ -1392,17 +927,12 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 	item := HistoryItem{
 		ID:                  t.ID.String(),
 		Query:               t.Query,
-		Visibility:          normalizedTaskVisibility(t.Visibility),
-		PublicSummary:       copyStringPtr(t.PublicSummary),
+		Visibility:          taskVisibilityPrivate,
 		ParsedSkills:        append([]string{}, t.ParsedSkills...),
 		MCPTools:            append([]string{}, t.MCPTools...),
 		RecommendedAgentIDs: make([]string, 0, len(t.RecommendedAgentIDs)),
 		Status:              taskStatus(t),
 		CreatedAt:           t.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if t.PublishedAt != nil {
-		ts := t.PublishedAt.UTC().Format(time.RFC3339)
-		item.PublishedAt = &ts
 	}
 	for _, id := range t.RecommendedAgentIDs {
 		item.RecommendedAgentIDs = append(item.RecommendedAgentIDs, id.String())
@@ -1415,58 +945,14 @@ func toHistoryItem(t *db.TaskQuery) HistoryItem {
 		ts := t.ChosenAt.UTC().Format(time.RFC3339)
 		item.ChosenAt = &ts
 	}
-	attachTaskWorkFields(t, &item.ClaimedAgentID, &item.ClaimedByUserID, &item.ClaimedAt, &item.CompletionRunID, &item.CompletedAt, &item.CompletionSummary)
-	attachTaskDeliveryFields(t, &item.DeliveryStatus, &item.DeliveryVisibility, nil, &item.AcceptedAt, &item.RevisionRequestedAt, &item.RevisionNote)
-	return item
-}
-
-func toPublicTaskItem(t *db.TaskQuery, skillByID map[string]db.Skill) PublicTaskItem {
-	publicSummary := publicTaskSummary(t)
-	item := PublicTaskItem{
-		ID:                    t.ID.String(),
-		Query:                 publicSummary,
-		PublicSummary:         publicSummary,
-		ParsedSkills:          append([]string{}, t.ParsedSkills...),
-		ParsedSkillRefs:       skillRefsForIDs(t.ParsedSkills, skillByID),
-		MCPTools:              append([]string{}, t.MCPTools...),
-		MCPToolRefs:           mcpToolRefsForNames(t.MCPTools),
-		RecommendedAgentCount: len(t.RecommendedAgentIDs),
-		Status:                taskStatus(t),
-		CreatedAt:             t.CreatedAt.UTC().Format(time.RFC3339),
-	}
-	if t.PublishedAt != nil {
-		ts := t.PublishedAt.UTC().Format(time.RFC3339)
-		item.PublishedAt = &ts
-	}
-	if t.ClaimedAgentID != nil {
-		s := t.ClaimedAgentID.String()
-		item.ClaimedAgentID = &s
-	}
-	if t.ClaimedAt != nil {
-		ts := t.ClaimedAt.UTC().Format(time.RFC3339)
-		item.ClaimedAt = &ts
-	}
-	if t.CompletedAt != nil {
-		ts := t.CompletedAt.UTC().Format(time.RFC3339)
-		item.CompletedAt = &ts
-	}
-	item.DeliveryStatus = t.DeliveryStatus
-	if item.DeliveryStatus == "" {
-		item.DeliveryStatus = "pending"
-	}
+	attachPrivateTaskCompletion(t, &item.CompletionRunID, &item.CompletedAt, &item.CompletionSummary)
 	return item
 }
 
 func taskStatus(t *db.TaskQuery) string {
 	switch {
-	case t.DeliveryStatus == "accepted":
-		return "accepted"
-	case t.DeliveryStatus == "revision_requested":
-		return "revision_requested"
-	case t.CompletedAt != nil:
+	case t.CompletionRunID != nil && t.CompletedAt != nil:
 		return "completed"
-	case t.ClaimedAgentID != nil:
-		return "in_progress"
 	case t.ChosenAgentID != nil:
 		return "matched"
 	case len(t.RecommendedAgentIDs) == 0:
@@ -1476,13 +962,18 @@ func taskStatus(t *db.TaskQuery) string {
 	}
 }
 
-func normalizeDeliveryVisibility(raw string) string {
-	raw = strings.TrimSpace(raw)
-	switch raw {
-	case "shared", "public_example":
-		return raw
-	default:
-		return "private"
+func attachPrivateTaskCompletion(t *db.TaskQuery, runID **string, completedAt **string, summary **string) {
+	if t.CompletionRunID != nil {
+		value := t.CompletionRunID.String()
+		*runID = &value
+	}
+	if t.CompletedAt != nil {
+		value := t.CompletedAt.UTC().Format(time.RFC3339)
+		*completedAt = &value
+	}
+	if t.CompletionSummary != nil {
+		value := *t.CompletionSummary
+		*summary = &value
 	}
 }
 
@@ -1495,115 +986,4 @@ func taskRunUsedMCPTools(required []string) []string {
 		}
 	}
 	return out
-}
-
-func deliveryArtifact(raw []byte) DeliveryArtifact {
-	if len(raw) == 0 {
-		return nil
-	}
-	var out map[string]interface{}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil
-	}
-	return DeliveryArtifact(out)
-}
-
-func attachTaskDeliveryFields(
-	t *db.TaskQuery,
-	deliveryStatus *string,
-	deliveryVisibility *string,
-	deliveryArtifactOut *DeliveryArtifact,
-	acceptedAt **string,
-	revisionRequestedAt **string,
-	revisionNote **string,
-) {
-	if deliveryStatus != nil {
-		*deliveryStatus = t.DeliveryStatus
-		if *deliveryStatus == "" {
-			*deliveryStatus = "pending"
-		}
-	}
-	if deliveryVisibility != nil {
-		*deliveryVisibility = t.DeliveryVisibility
-		if *deliveryVisibility == "" {
-			*deliveryVisibility = "private"
-		}
-	}
-	if deliveryArtifactOut != nil {
-		*deliveryArtifactOut = deliveryArtifact(t.DeliveryArtifact)
-	}
-	if acceptedAt != nil && t.AcceptedAt != nil {
-		ts := t.AcceptedAt.UTC().Format(time.RFC3339)
-		*acceptedAt = &ts
-	}
-	if revisionRequestedAt != nil && t.RevisionRequestedAt != nil {
-		ts := t.RevisionRequestedAt.UTC().Format(time.RFC3339)
-		*revisionRequestedAt = &ts
-	}
-	if revisionNote != nil && t.RevisionNote != nil {
-		s := *t.RevisionNote
-		*revisionNote = &s
-	}
-}
-
-func attachTaskWorkFields(
-	t *db.TaskQuery,
-	claimedAgentID **string,
-	claimedByUserID **string,
-	claimedAt **string,
-	completionRunID **string,
-	completedAt **string,
-	completionSummary **string,
-) {
-	if t.ClaimedAgentID != nil {
-		s := t.ClaimedAgentID.String()
-		*claimedAgentID = &s
-	}
-	if t.ClaimedByUserID != nil {
-		s := t.ClaimedByUserID.String()
-		*claimedByUserID = &s
-	}
-	if t.ClaimedAt != nil {
-		ts := t.ClaimedAt.UTC().Format(time.RFC3339)
-		*claimedAt = &ts
-	}
-	if t.CompletionRunID != nil {
-		s := t.CompletionRunID.String()
-		*completionRunID = &s
-	}
-	if t.CompletedAt != nil {
-		ts := t.CompletedAt.UTC().Format(time.RFC3339)
-		*completedAt = &ts
-	}
-	if t.CompletionSummary != nil {
-		s := *t.CompletionSummary
-		*completionSummary = &s
-	}
-}
-
-func toWorkResponse(t *db.TaskQuery, agentID uuid.UUID) *WorkResponse {
-	resp := &WorkResponse{
-		TaskID:  t.ID.String(),
-		Status:  taskStatus(t),
-		Query:   workResponseQuery(t),
-		AgentID: agentID.String(),
-	}
-	if t.ClaimedAt != nil {
-		ts := t.ClaimedAt.UTC().Format(time.RFC3339)
-		resp.ClaimedAt = &ts
-	}
-	if t.CompletionRunID != nil {
-		s := t.CompletionRunID.String()
-		resp.CompletionRunID = &s
-	}
-	if t.CompletedAt != nil {
-		ts := t.CompletedAt.UTC().Format(time.RFC3339)
-		resp.CompletedAt = &ts
-	}
-	if t.CompletionSummary != nil {
-		s := *t.CompletionSummary
-		resp.CompletionSummary = &s
-	}
-	attachTaskDeliveryFields(t, &resp.DeliveryStatus, &resp.DeliveryVisibility, nil, &resp.AcceptedAt, &resp.RevisionRequestedAt, &resp.RevisionNote)
-	return resp
 }

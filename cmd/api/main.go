@@ -81,7 +81,7 @@ func main() {
 	}
 	defer pool.Close()
 	log.Info().Msg("database connected")
-	if err := autoBootstrapAdminIfNeeded(rootCtx, pool); err != nil {
+	if err := autoBootstrapAdminIfNeeded(rootCtx, pool, cfg.Env); err != nil {
 		log.Fatal().Err(err).Msg("bootstrap admin failed")
 	}
 

@@ -1,4 +1,4 @@
-.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test deps demo-a2a demo-a2a-live runtime-loadtest
+.PHONY: help dev build run bootstrap-admin runtime-node-issue runtime-node-inspect test lint fmt sqlc migrate-up migrate-down migrate-create migrate-status migration-063-test deps runtime-loadtest
 
 ENV_FILE ?= .env
 API_URL ?= http://localhost:8080
@@ -34,13 +34,7 @@ runtime-node-inspect: build ## 审计 Runtime Node 证书; 参数放在 RUNTIME_
 test: ## 运行测试(race + cover)
 	go test ./... -race -cover
 
-demo-a2a: ## 对已启动的本地 API 跑真实 Agent-to-Agent 闭环
-	go run ./cmd/a2a-demo -api $(API_URL)
-
-demo-a2a-live: ## 注册并保持可从 Playground 反复调用的本地 Agent
-	go run ./cmd/a2a-demo -api $(API_URL) -serve
-
-runtime-loadtest: ## 对已启动 Core API 跑 runtime_ws/runtime_pull 压测; 用 RUNTIME_LOADTEST_ARGS 覆盖参数
+runtime-loadtest: ## 通过 WebSocket/Pull v2 对已启动 Core API 压测 Agent Node; 用 RUNTIME_LOADTEST_ARGS 覆盖参数
 	go run ./cmd/runtime-loadtest -api $(API_URL)/api/v1 $(RUNTIME_LOADTEST_ARGS)
 
 lint: ## golangci-lint

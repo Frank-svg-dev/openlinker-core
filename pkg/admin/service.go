@@ -37,23 +37,17 @@ func (s *Service) Summary(ctx context.Context) (*SummaryResponse, error) {
 		return nil, httpx.Internal("加载管理概览失败")
 	}
 	return &SummaryResponse{
-		TotalUsers:             row.TotalUsers,
-		AdminUsers:             row.AdminUsers,
-		CreatorUsers:           row.CreatorUsers,
-		VerifiedCreators:       row.VerifiedCreators,
-		TotalAgents:            row.TotalAgents,
-		ActiveAgents:           row.ActiveAgents,
-		DisabledAgents:         row.DisabledAgents,
-		PendingAgents:          row.PendingAgents,
-		CertifiedAgents:        row.CertifiedAgents,
-		TotalTasks:             row.TotalTasks,
-		PublicTasks:            row.PublicTasks,
-		PrivateTasks:           row.PrivateTasks,
-		OpenTasks:              row.OpenTasks,
-		ClaimedTasks:           row.ClaimedTasks,
-		CompletedTasks:         row.CompletedTasks,
-		AcceptedTasks:          row.AcceptedTasks,
-		RevisionRequestedTasks: row.RevisionRequestedTasks,
+		TotalUsers:       row.TotalUsers,
+		AdminUsers:       row.AdminUsers,
+		CreatorUsers:     row.CreatorUsers,
+		VerifiedCreators: row.VerifiedCreators,
+		TotalAgents:      row.TotalAgents,
+		ActiveAgents:     row.ActiveAgents,
+		DisabledAgents:   row.DisabledAgents,
+		PendingAgents:    row.PendingAgents,
+		CertifiedAgents:  row.CertifiedAgents,
+		TotalTasks:       row.TotalTasks,
+		CompletedTasks:   row.CompletedTasks,
 	}, nil
 }
 
@@ -80,7 +74,6 @@ func (s *Service) ListUsers(ctx context.Context, query, role string, limit, offs
 		item.AgentCount = user.AgentCount
 		item.ActiveAgentCount = user.ActiveAgentCount
 		item.TaskCount = user.TaskCount
-		item.PublicTaskCount = user.PublicTaskCount
 		item.RunCount = user.RunCount
 		item.LastTaskAt = timePtrString(user.LastTaskAt)
 		item.LastRunAt = timePtrString(user.LastRunAt)
@@ -236,7 +229,6 @@ func (s *Service) ListAgents(ctx context.Context, query, lifecycle, visibility, 
 		item := toAgentItem(&row.Agent)
 		item.RecommendedTaskCount = row.RecommendedTaskCount
 		item.ChosenTaskCount = row.ChosenTaskCount
-		item.ClaimedTaskCount = row.ClaimedTaskCount
 		item.CompletedTaskCount = row.CompletedTaskCount
 		item.LastRunAt = timePtrString(row.LastRunAt)
 		item.Creator = &AgentCreator{
@@ -298,20 +290,16 @@ func (s *Service) UpdateAgentModeration(ctx context.Context, agentID uuid.UUID, 
 	return &item, nil
 }
 
-func (s *Service) ListTasks(ctx context.Context, query, visibility, deliveryStatus, status string, limit, offset int32) (*TaskListResponse, error) {
+func (s *Service) ListTasks(ctx context.Context, query, status string, limit, offset int32) (*TaskListResponse, error) {
 	query = strings.TrimSpace(query)
-	visibility = normalizeTaskFilter(visibility, taskVisibilityValues)
-	deliveryStatus = normalizeTaskFilter(deliveryStatus, taskDeliveryStatusValues)
 	status = normalizeTaskFilter(status, taskStatusValues)
 	limit, offset = normalizePage(limit, offset)
 
 	params := db.ListAdminTasksParams{
-		Query:          query,
-		Visibility:     visibility,
-		DeliveryStatus: deliveryStatus,
-		Status:         status,
-		Limit:          limit,
-		Offset:         offset,
+		Query:  query,
+		Status: status,
+		Limit:  limit,
+		Offset: offset,
 	}
 	items, err := s.queries.ListAdminTasks(ctx, params)
 	if err != nil {
@@ -319,10 +307,8 @@ func (s *Service) ListTasks(ctx context.Context, query, visibility, deliveryStat
 		return nil, httpx.Internal("加载任务列表失败")
 	}
 	total, err := s.queries.CountAdminTasks(ctx, db.CountAdminTasksParams{
-		Query:          query,
-		Visibility:     visibility,
-		DeliveryStatus: deliveryStatus,
-		Status:         status,
+		Query:  query,
+		Status: status,
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("admin.CountTasks")
@@ -337,12 +323,10 @@ func (s *Service) ListTasks(ctx context.Context, query, visibility, deliveryStat
 }
 
 var (
-	lifecycleValues          = map[string]bool{"active": true, "disabled": true}
-	visibilityValues         = map[string]bool{"public": true, "unlisted": true, "private": true}
-	certificationValues      = map[string]bool{"unreviewed": true, "pending": true, "certified": true, "rejected": true}
-	taskVisibilityValues     = map[string]bool{"private": true, "public": true}
-	taskDeliveryStatusValues = map[string]bool{"pending": true, "submitted": true, "revision_requested": true, "accepted": true, "failed": true}
-	taskStatusValues         = map[string]bool{"open": true, "matched": true, "in_progress": true, "completed": true, "needs_agent": true, "accepted": true, "revision_requested": true}
+	lifecycleValues     = map[string]bool{"active": true, "disabled": true}
+	visibilityValues    = map[string]bool{"public": true, "unlisted": true, "private": true}
+	certificationValues = map[string]bool{"unreviewed": true, "pending": true, "certified": true, "rejected": true}
+	taskStatusValues    = map[string]bool{"open": true, "matched": true, "completed": true, "needs_agent": true}
 )
 
 func normalizePage(limit, offset int32) (int32, int32) {
@@ -492,16 +476,12 @@ func toTaskItem(row *db.ListAdminTasksRow) TaskItem {
 		ID:                    task.ID.String(),
 		UserID:                task.UserID.String(),
 		Query:                 task.Query,
-		Visibility:            task.Visibility,
-		PublicSummary:         task.PublicSummary,
+		Visibility:            "private",
 		ParsedSkills:          task.ParsedSkills,
 		MCPTools:              task.MCPTools,
 		RecommendedAgentCount: len(task.RecommendedAgentIDs),
 		Status:                taskStatus(task),
-		DeliveryStatus:        task.DeliveryStatus,
-		DeliveryVisibility:    task.DeliveryVisibility,
 		CompletionSummary:     task.CompletionSummary,
-		RevisionNote:          task.RevisionNote,
 		CreatedAt:             formatTime(task.CreatedAt),
 		User: &TaskUser{
 			ID:          task.UserID.String(),
@@ -511,37 +491,18 @@ func toTaskItem(row *db.ListAdminTasksRow) TaskItem {
 	}
 	item.ChosenAgentID = uuidPtrString(task.ChosenAgentID)
 	item.ChosenAt = timePtrString(task.ChosenAt)
-	item.ClaimedAgentID = uuidPtrString(task.ClaimedAgentID)
-	item.ClaimedByUserID = uuidPtrString(task.ClaimedByUserID)
-	item.ClaimedAt = timePtrString(task.ClaimedAt)
-	item.ClaimRunID = uuidPtrString(task.ClaimRunID)
 	item.CompletedAt = timePtrString(task.CompletedAt)
 	item.CompletionRunID = uuidPtrString(task.CompletionRunID)
-	item.AcceptedAt = timePtrString(task.AcceptedAt)
-	item.RevisionRequestedAt = timePtrString(task.RevisionRequestedAt)
-	item.PublishedAt = timePtrString(task.PublishedAt)
 	if task.ChosenAgentID != nil && row.ChosenAgentSlug != nil && row.ChosenAgentName != nil {
 		item.ChosenAgent = &TaskAgent{ID: task.ChosenAgentID.String(), Slug: *row.ChosenAgentSlug, Name: *row.ChosenAgentName}
-	}
-	if task.ClaimedAgentID != nil && row.ClaimedAgentSlug != nil && row.ClaimedAgentName != nil {
-		item.ClaimedAgent = &TaskAgent{ID: task.ClaimedAgentID.String(), Slug: *row.ClaimedAgentSlug, Name: *row.ClaimedAgentName}
-	}
-	if task.ClaimedByUserID != nil && row.ClaimedByEmail != nil && row.ClaimedByDisplayName != nil {
-		item.ClaimedBy = &TaskUser{ID: task.ClaimedByUserID.String(), Email: *row.ClaimedByEmail, DisplayName: *row.ClaimedByDisplayName}
 	}
 	return item
 }
 
 func taskStatus(t *db.TaskQuery) string {
 	switch {
-	case t.DeliveryStatus == "accepted":
-		return "accepted"
-	case t.DeliveryStatus == "revision_requested":
-		return "revision_requested"
-	case t.CompletedAt != nil:
+	case t.CompletionRunID != nil && t.CompletedAt != nil:
 		return "completed"
-	case t.ClaimedAgentID != nil:
-		return "in_progress"
 	case t.ChosenAgentID != nil:
 		return "matched"
 	case len(t.RecommendedAgentIDs) == 0:

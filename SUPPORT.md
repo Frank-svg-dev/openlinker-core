@@ -20,7 +20,7 @@ requests that fit OpenLinker Core's open-source scope.
 - Include operating system, Go version, database version, and commit SHA.
 - Include reproduction steps, expected behavior, actual behavior, and sanitized
   logs.
-- Redact JWTs, runtime tokens, OAuth secrets, private URLs, customer data, and
+- Redact JWTs, Agent Tokens, OAuth secrets, private URLs, customer data, and
   local `.env` values.
 
 ## Not Supported Here

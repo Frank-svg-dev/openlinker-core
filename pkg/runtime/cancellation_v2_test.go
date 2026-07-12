@@ -265,7 +265,7 @@ func newRuntimeCancellationFixture(t *testing.T) *runtimeCancellationFixture {
 	lockedRun := db.LockRunForResultFinalizationRow{
 		ID: runID, UserID: ownerID, AgentID: agentID, Status: string(RuntimeRunRunning),
 		DispatchState: string(RuntimeDispatchExecuting), RuntimeContractID: "openlinker.runtime.v2",
-		ConnectionModeSnapshot: runtimeCancellationStringPointer(connectionModeRuntimePull),
+		ConnectionModeSnapshot: runtimeCancellationStringPointer(connectionModeAgentNode),
 		AttemptCount:           1, MaxAttempts: 3, LatestAttemptID: &attemptID, ActiveAttemptID: &attemptID,
 		LeaseID: &leaseID, FencingToken: 3, RuntimeNodeID: &nodeID, RuntimeWorkerID: &workerID,
 		RuntimeSessionID: &sessionID, LeaseTokenID: &credentialID,
@@ -354,6 +354,13 @@ type runtimeCancellationTransactionFake struct {
 	persistCalls     int
 	finishCalls      int
 	capacityCASCalls int
+}
+
+func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeV2CoreCancellation(
+	context.Context,
+	int64,
+) (db.FindNextDueRuntimeV2CoreCancellationRow, error) {
+	return db.FindNextDueRuntimeV2CoreCancellationRow{}, pgx.ErrNoRows
 }
 
 func (f *runtimeCancellationTransactionFake) call(name string) { f.calls = append(f.calls, name) }

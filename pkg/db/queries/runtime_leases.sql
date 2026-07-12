@@ -162,7 +162,7 @@ FROM runs r
 WHERE r.agent_id = sqlc.arg(agent_id)
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
-  AND r.connection_mode_snapshot IN ('runtime_pull', 'runtime_ws')
+  AND r.connection_mode_snapshot = 'agent_node'
   AND (
       r.dispatch_state = 'pending'
       OR (
@@ -228,7 +228,7 @@ CROSS JOIN database_clock c
 WHERE r.id = sqlc.arg(run_id)
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
-  AND r.connection_mode_snapshot IN ('runtime_pull', 'runtime_ws')
+  AND r.connection_mode_snapshot = 'agent_node'
   AND (
       r.dispatch_state = 'pending'
       OR (

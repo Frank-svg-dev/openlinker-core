@@ -113,20 +113,6 @@ type Config struct {
 	WorkflowRunWorkerIntervalSeconds int  `envconfig:"WORKFLOW_RUN_WORKER_INTERVAL_SECONDS" default:"10"`
 	WorkflowRunStaleSeconds          int  `envconfig:"WORKFLOW_RUN_STALE_SECONDS" default:"1800"`
 	WorkflowRunClaimBurst            int  `envconfig:"WORKFLOW_RUN_CLAIM_BURST" default:"5"`
-
-	// Runtime Pull run timeout worker.
-	RuntimePullRunWorkerEnabled          bool `envconfig:"RUNTIME_PULL_RUN_WORKER_ENABLED" default:"true"`
-	RuntimePullRunWorkerIntervalSeconds  int  `envconfig:"RUNTIME_PULL_RUN_WORKER_INTERVAL_SECONDS" default:"30"`
-	RuntimePullDispatchTimeoutSeconds    int  `envconfig:"RUNTIME_PULL_DISPATCH_TIMEOUT_SECONDS" default:"120"`
-	RuntimePullResultTimeoutSeconds      int  `envconfig:"RUNTIME_PULL_RESULT_TIMEOUT_SECONDS" default:"900"`
-	RuntimePullRunWorkerTimeoutBatchSize int  `envconfig:"RUNTIME_PULL_RUN_WORKER_TIMEOUT_BATCH_SIZE" default:"50"`
-
-	// Endpoint run timeout worker for direct_http / mcp_server runs. A zero
-	// timeout means max(RUN_TIMEOUT_SECONDS+30s, 180s).
-	RuntimeEndpointRunWorkerEnabled         bool `envconfig:"RUNTIME_ENDPOINT_RUN_WORKER_ENABLED" default:"true"`
-	RuntimeEndpointRunWorkerIntervalSeconds int  `envconfig:"RUNTIME_ENDPOINT_RUN_WORKER_INTERVAL_SECONDS" default:"30"`
-	RuntimeEndpointRunTimeoutSeconds        int  `envconfig:"RUNTIME_ENDPOINT_RUN_TIMEOUT_SECONDS" default:"0"`
-	RuntimeEndpointRunWorkerBatchSize       int  `envconfig:"RUNTIME_ENDPOINT_RUN_WORKER_BATCH_SIZE" default:"50"`
 }
 
 // Load 从环境变量加载配置。

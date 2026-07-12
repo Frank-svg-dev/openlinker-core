@@ -218,18 +218,6 @@ func TestRunQueriesScanRowsAndGuardAffectedRows(t *testing.T) {
 		t.Fatalf("ListRunsByUserWithAgent scan = %#v", listed)
 	}
 
-	if err := q.MarkRunSuccess(context.Background(), MarkRunSuccessParams{ID: runID, Output: output, DurationMs: duration}); err != nil {
-		t.Fatalf("MarkRunSuccess affected row error = %v", err)
-	}
-	requireSQLName(t, dbtx.execSQL, "MarkRunSuccess")
-	if !reflect.DeepEqual(dbtx.execArgs, []any{runID, output, duration}) {
-		t.Fatalf("MarkRunSuccess args = %#v", dbtx.execArgs)
-	}
-
-	noRows := &fakeDBTX{execTag: pgconn.NewCommandTag("UPDATE 0")}
-	if err := New(noRows).MarkRunFailed(context.Background(), MarkRunFailedParams{ID: runID, Status: "failed"}); !errors.Is(err, pgx.ErrNoRows) {
-		t.Fatalf("MarkRunFailed zero rows error = %v, want pgx.ErrNoRows", err)
-	}
 }
 
 func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
@@ -304,7 +292,7 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 		t.Fatalf("ListAdminAgents error = %v", err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ListAdminAgents")
-	if !adminAgentRows.closed || len(adminAgents) != 1 || adminAgents[0].CreatorEmail != "creator@example.com" || adminAgents[0].ClaimedTaskCount != 3 {
+	if !adminAgentRows.closed || len(adminAgents) != 1 || adminAgents[0].CreatorEmail != "creator@example.com" || adminAgents[0].CompletedTaskCount != 2 {
 		t.Fatalf("ListAdminAgents scan = %#v closed=%v", adminAgents, adminAgentRows.closed)
 	}
 
@@ -338,10 +326,10 @@ func TestAgentQueriesScanRowsAndAffectedRows(t *testing.T) {
 
 	dbtx.row = fakeRow{values: []any{
 		int32(12), int32(2), int32(5), int32(3), int32(9), int32(8), int32(1), int32(4), int32(6),
-		int32(17), int32(7), int32(10), int32(4), int32(3), int32(5), int32(2), int32(1),
+		int32(17), int32(5),
 	}}
 	summary, err := q.GetAdminSummary(context.Background())
-	if err != nil || summary.TotalUsers != 12 || summary.PendingAgents != 4 || summary.TotalTasks != 17 || summary.RevisionRequestedTasks != 1 {
+	if err != nil || summary.TotalUsers != 12 || summary.PendingAgents != 4 || summary.TotalTasks != 17 || summary.CompletedTasks != 5 {
 		t.Fatalf("GetAdminSummary = %#v, %v", summary, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetAdminSummary")
@@ -1702,7 +1690,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	q := New(dbtx)
 
 	activeTokenValues := append([]any{}, tokenValues...)
-	activeTokenValues = append(activeTokenValues, "runtime_pull")
+	activeTokenValues = append(activeTokenValues, "agent_node")
 	activeTokenRows := &fakeRows{rows: [][]any{activeTokenValues}}
 	dbtx.queryRows = activeTokenRows
 	activeTokens, err := q.ListActiveAgentRuntimeTokensByPrefix(context.Background(), "ol_agent_abcd")
@@ -1710,7 +1698,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix error = %v", err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ListActiveAgentRuntimeTokensByPrefix")
-	if !activeTokenRows.closed || len(activeTokens) != 1 || activeTokens[0].ID != tokenID || activeTokens[0].ConnectionMode != "runtime_pull" {
+	if !activeTokenRows.closed || len(activeTokens) != 1 || activeTokens[0].ID != tokenID || activeTokens[0].ConnectionMode != "agent_node" {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix scan = %#v closed=%v", activeTokens, activeTokenRows.closed)
 	}
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{"ol_agent_abcd"}) {
@@ -1724,13 +1712,6 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	if !reflect.DeepEqual(dbtx.execArgs, []any{tokenID}) {
 		t.Fatalf("TouchAgentRuntimeToken args = %#v", dbtx.execArgs)
 	}
-
-	dbtx.row = fakeRow{values: []any{true}}
-	recent, err := q.HasRecentRuntimePullToken(context.Background(), agentID)
-	if err != nil || !recent {
-		t.Fatalf("HasRecentRuntimePullToken = %v, %v", recent, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "HasRecentRuntimePullToken")
 
 	dbtx.row = fakeRow{values: []any{"private"}}
 	callPolicy, err := q.GetAgentCallPolicy(context.Background(), agentID)
@@ -1961,7 +1942,6 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 	sentinel := errors.New("query failed")
 	ctx := context.Background()
 	id := uuid.New()
-	now := time.Date(2026, 6, 20, 20, 0, 0, 0, time.UTC)
 	q := New(&fakeDBTX{queryErr: sentinel, row: fakeRow{err: sentinel}})
 
 	tests := []struct {
@@ -2132,10 +2112,6 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListPendingTaskCallbackDeliveries(ctx)
 			return err
 		}},
-		{name: "ListStaleEndpointRuns", run: func() error {
-			_, err := q.ListStaleEndpointRuns(ctx, ListStaleEndpointRunsParams{StaleBefore: now, Limit: 10})
-			return err
-		}},
 		{name: "ListRunsByUser", run: func() error {
 			_, err := q.ListRunsByUser(ctx, ListRunsByUserParams{UserID: id, Limit: 10})
 			return err
@@ -2192,12 +2168,8 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.ListTaskQueriesByUser(ctx, ListTaskQueriesByUserParams{UserID: id, Limit: 10})
 			return err
 		}},
-		{name: "ListPublicTaskQueries", run: func() error {
-			_, err := q.ListPublicTaskQueries(ctx, 10)
-			return err
-		}},
 		{name: "ListAdminTasks", run: func() error {
-			_, err := q.ListAdminTasks(ctx, ListAdminTasksParams{Query: "task", Visibility: "public", DeliveryStatus: "submitted", Status: "in_progress", Limit: 10})
+			_, err := q.ListAdminTasks(ctx, ListAdminTasksParams{Query: "task", Status: "matched", Limit: 10})
 			return err
 		}},
 		{name: "ListPendingDeliveries", run: func() error {
@@ -2323,12 +2295,6 @@ func TestGeneratedExecQueriesPropagateExecErrors(t *testing.T) {
 		{name: "ResetRunDeliveryForRetry", run: func() error {
 			_, err := q.ResetRunDeliveryForRetry(ctx, ResetRunDeliveryForRetryParams{ID: id, UserID: id})
 			return err
-		}},
-		{name: "MarkRunSuccess", run: func() error {
-			return q.MarkRunSuccess(ctx, MarkRunSuccessParams{ID: id, Output: []byte(`{"ok":true}`), DurationMs: 100})
-		}},
-		{name: "MarkRunFailed", run: func() error {
-			return q.MarkRunFailed(ctx, MarkRunFailedParams{ID: id, Status: "failed", ErrorMessage: &message, DurationMs: 100})
 		}},
 		{name: "UpdateUserBecomeCreator", run: func() error {
 			_, err := q.UpdateUserBecomeCreator(ctx, id)
@@ -3337,21 +3303,14 @@ func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
 	benchmarkRunID := uuid.New()
 	now := time.Date(2026, 6, 20, 22, 0, 0, 0, time.UTC)
 	chosenAt := now.Add(time.Minute)
-	claimedAt := now.Add(2 * time.Minute)
 	completedAt := now.Add(3 * time.Minute)
-	acceptedAt := now.Add(4 * time.Minute)
-	revisionAt := now.Add(5 * time.Minute)
-	publishedAt := now.Add(6 * time.Minute)
 	finishedAt := now.Add(7 * time.Minute)
 	completionSummary := "dashboard delivered"
-	publicSummary := "Need a SQL dashboard"
-	revisionNote := "add chart labels"
-	deliveryArtifact := []byte(`{"artifact":"dashboard"}`)
 	score := int32(92)
 	judgeReasoning := "complete and accurate"
 	errorMessage := "judge failed"
 
-	taskValues := taskQueryRow(taskID, userID, agentID, creatorID, runID, now, &chosenAt, &claimedAt, &completedAt, &acceptedAt, &revisionAt, &publishedAt, &completionSummary, &publicSummary, &revisionNote, deliveryArtifact)
+	taskValues := taskQueryRow(taskID, userID, agentID, runID, now, &chosenAt, &completedAt, &completionSummary)
 	testCaseValues := skillTestCaseRow(testCaseID, now)
 	benchmarkValues := benchmarkRunRow(benchmarkRunID, batchID, agentID, testCaseID, now, &finishedAt, &score, []byte(`{"answer":"ok"}`), &judgeReasoning, &errorMessage)
 	scoreValues := agentSkillScoreRow(agentID, batchID, now, &score, &finishedAt)
@@ -3372,7 +3331,7 @@ func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("CreateTaskQuery error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CreateTaskQuery")
-	if task.ID != taskID || task.ChosenAgentID == nil || *task.ChosenAgentID != agentID || string(task.DeliveryArtifact) == "" {
+	if task.ID != taskID || task.ChosenAgentID == nil || *task.ChosenAgentID != agentID || task.CompletionRunID == nil {
 		t.Fatalf("CreateTaskQuery scan = %#v", task)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{userID, "build a dashboard", []string{"data/sql-query"}, []string{"browser.search"}, []uuid.UUID{agentID}}) {
@@ -3391,44 +3350,6 @@ func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "MarkTaskQueryChosen")
 
-	dbtx.row = fakeRow{values: taskValues}
-	if got, err := q.PublishTaskQuery(context.Background(), PublishTaskQueryParams{ID: taskID, UserID: userID, PublicSummary: publicSummary}); err != nil || got.PublicSummary == nil {
-		t.Fatalf("PublishTaskQuery = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "PublishTaskQuery")
-
-	dbtx.row = fakeRow{values: taskValues}
-	if got, err := q.ClaimTaskQuery(context.Background(), ClaimTaskQueryParams{ID: taskID, UserID: creatorID, AgentID: agentID}); err != nil || got.ClaimedByUserID == nil {
-		t.Fatalf("ClaimTaskQuery = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "ClaimTaskQuery")
-
-	dbtx.row = fakeRow{values: taskValues}
-	if got, err := q.CompleteTaskQuery(context.Background(), CompleteTaskQueryParams{
-		ID:                 taskID,
-		UserID:             creatorID,
-		AgentID:            agentID,
-		CompletionRunID:    runID,
-		CompletionSummary:  completionSummary,
-		DeliveryArtifact:   deliveryArtifact,
-		DeliveryVisibility: "shared",
-	}); err != nil || got.CompletedAt == nil {
-		t.Fatalf("CompleteTaskQuery = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "CompleteTaskQuery")
-
-	dbtx.row = fakeRow{values: taskValues}
-	if got, err := q.AcceptTaskDelivery(context.Background(), AcceptTaskDeliveryParams{ID: taskID, UserID: userID}); err != nil || got.AcceptedAt == nil {
-		t.Fatalf("AcceptTaskDelivery = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "AcceptTaskDelivery")
-
-	dbtx.row = fakeRow{values: taskValues}
-	if got, err := q.RequestTaskRevision(context.Background(), RequestTaskRevisionParams{ID: taskID, UserID: userID, RevisionNote: revisionNote}); err != nil || got.RevisionNote == nil {
-		t.Fatalf("RequestTaskRevision = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "RequestTaskRevision")
-
 	taskRows := &fakeRows{rows: [][]any{taskValues}}
 	dbtx.queryRows = taskRows
 	tasks, err := q.ListTaskQueriesByUser(context.Background(), ListTaskQueriesByUserParams{UserID: userID, Limit: 10})
@@ -3440,50 +3361,35 @@ func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
 		t.Fatalf("ListTaskQueriesByUser scan = %#v closed=%v", tasks, taskRows.closed)
 	}
 
-	publicTaskRows := &fakeRows{rows: [][]any{taskValues}}
-	dbtx.queryRows = publicTaskRows
-	publicTasks, err := q.ListPublicTaskQueries(context.Background(), 15)
-	if err != nil {
-		t.Fatalf("ListPublicTaskQueries error = %v", err)
-	}
-	requireSQLName(t, dbtx.querySQL, "ListPublicTaskQueries")
-	if !publicTaskRows.closed || len(publicTasks) != 1 || publicTasks[0].Visibility != "public" {
-		t.Fatalf("ListPublicTaskQueries scan = %#v closed=%v", publicTasks, publicTaskRows.closed)
-	}
-
-	adminTaskRows := &fakeRows{rows: [][]any{adminTaskRow(taskValues, "user@example.com", "Task Owner", "chosen-agent", "Chosen Agent", "claimed-agent", "Claimed Agent", "creator@example.com", "Task Creator")}}
+	adminTaskRows := &fakeRows{rows: [][]any{adminTaskRow(taskValues, "user@example.com", "Task Owner", "chosen-agent", "Chosen Agent")}}
 	dbtx.queryRows = adminTaskRows
 	adminTasks, err := q.ListAdminTasks(context.Background(), ListAdminTasksParams{
-		Query:          "dashboard",
-		Visibility:     "public",
-		DeliveryStatus: "submitted",
-		Status:         "in_progress",
-		Limit:          20,
-		Offset:         40,
+		Query:  "dashboard",
+		Status: "matched",
+		Limit:  20,
+		Offset: 40,
 	})
 	if err != nil {
 		t.Fatalf("ListAdminTasks error = %v", err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ListAdminTasks")
-	if !adminTaskRows.closed || len(adminTasks) != 1 || adminTasks[0].UserEmail != "user@example.com" || adminTasks[0].ClaimedAgentSlug == nil {
+	if !adminTaskRows.closed || len(adminTasks) != 1 || adminTasks[0].UserEmail != "user@example.com" || adminTasks[0].ChosenAgentSlug == nil {
 		t.Fatalf("ListAdminTasks scan = %#v closed=%v", adminTasks, adminTaskRows.closed)
 	}
-	if !reflect.DeepEqual(dbtx.queryArgs, []any{"dashboard", "public", "submitted", "in_progress", int32(20), int32(40)}) {
+	if !reflect.DeepEqual(dbtx.queryArgs, []any{"dashboard", "matched", int32(20), int32(40)}) {
 		t.Fatalf("ListAdminTasks args = %#v", dbtx.queryArgs)
 	}
 
 	dbtx.row = fakeRow{values: []any{int32(6)}}
 	totalAdminTasks, err := q.CountAdminTasks(context.Background(), CountAdminTasksParams{
-		Query:          "dashboard",
-		Visibility:     "public",
-		DeliveryStatus: "submitted",
-		Status:         "in_progress",
+		Query:  "dashboard",
+		Status: "matched",
 	})
 	if err != nil || totalAdminTasks != 6 {
 		t.Fatalf("CountAdminTasks = %d, %v", totalAdminTasks, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "CountAdminTasks")
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"dashboard", "public", "submitted", "in_progress"}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"dashboard", "matched"}) {
 		t.Fatalf("CountAdminTasks args = %#v", dbtx.queryRowArgs)
 	}
 
@@ -3960,30 +3866,10 @@ func TestMarketAgentRunUserQueriesScanRowsAndArgs(t *testing.T) {
 	requireSQLName(t, dbtx.queryRowSQL, "RunsCount")
 
 	dbtx.row = fakeRow{values: runValues}
-	if got, err := q.CancelRun(context.Background(), CancelRunParams{ID: runID, UserID: userID, ErrorMessage: "user canceled"}); err != nil || got.ID != runID {
-		t.Fatalf("CancelRun = %#v, %v", got, err)
-	}
-	requireSQLName(t, dbtx.queryRowSQL, "CancelRun")
-
-	dbtx.row = fakeRow{values: runValues}
 	if got, err := q.GetRunByID(context.Background(), runID); err != nil || got.UserID != userID {
 		t.Fatalf("GetRunByID = %#v, %v", got, err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "GetRunByID")
-
-	endpointRows := &fakeRows{rows: [][]any{{runID, userID, agentID, int32(100), now, "mcp_server", "ENDPOINT_RUN_TIMEOUT", "Agent endpoint timed out"}}}
-	dbtx.queryRows = endpointRows
-	endpointRuns, err := q.ListStaleEndpointRuns(context.Background(), ListStaleEndpointRunsParams{
-		StaleBefore: now.Add(-time.Hour),
-		Limit:       25,
-	})
-	if err != nil {
-		t.Fatalf("ListStaleEndpointRuns error = %v", err)
-	}
-	requireSQLName(t, dbtx.querySQL, "ListStaleEndpointRuns")
-	if !endpointRows.closed || len(endpointRuns) != 1 || endpointRuns[0].ConnectionMode != "mcp_server" || endpointRuns[0].ErrorCode != "ENDPOINT_RUN_TIMEOUT" {
-		t.Fatalf("ListStaleEndpointRuns scan = %#v closed=%v", endpointRuns, endpointRows.closed)
-	}
 }
 
 func userRow(id uuid.UUID, now time.Time, passwordHash, provider, oauthID, avatar *string, deletedAt *time.Time) []any {
@@ -4009,7 +3895,7 @@ func adminUserRow(values []any, now time.Time) []any {
 	lastTask := now.Add(15 * time.Minute)
 	lastRun := now.Add(30 * time.Minute)
 	row := append([]any{}, values...)
-	row = append(row, int32(2), int32(1), int32(6), int32(3), int32(9), &lastTask, &lastRun)
+	row = append(row, int32(2), int32(1), int32(6), int32(9), &lastTask, &lastRun)
 	return row
 }
 
@@ -4085,7 +3971,7 @@ func agentRow(id, creatorID uuid.UUID, now time.Time, authHeader, webhookURL, to
 func adminAgentRow(values []any, creatorEmail, creatorName string, now time.Time) []any {
 	lastRun := now.Add(45 * time.Minute)
 	row := append([]any{}, values...)
-	row = append(row, creatorEmail, creatorName, int32(8), int32(4), int32(3), int32(2), &lastRun)
+	row = append(row, creatorEmail, creatorName, int32(8), int32(4), int32(2), &lastRun)
 	return row
 }
 
@@ -4624,11 +4510,10 @@ func runRequirementEvidenceRow(runID, taskID, agentID, userID uuid.UUID, created
 }
 
 func taskQueryRow(
-	id, userID, agentID, claimedByUserID, runID uuid.UUID,
+	id, userID, agentID, runID uuid.UUID,
 	createdAt time.Time,
-	chosenAt, claimedAt, completedAt, acceptedAt, revisionRequestedAt, publishedAt *time.Time,
-	completionSummary, publicSummary, revisionNote *string,
-	deliveryArtifact []byte,
+	chosenAt, completedAt *time.Time,
+	completionSummary *string,
 ) []any {
 	return []any{
 		id,
@@ -4639,22 +4524,9 @@ func taskQueryRow(
 		[]uuid.UUID{agentID},
 		&agentID,
 		chosenAt,
-		&agentID,
-		&claimedByUserID,
-		claimedAt,
-		&runID,
 		completedAt,
 		completionSummary,
 		&runID,
-		"submitted",
-		"shared",
-		deliveryArtifact,
-		acceptedAt,
-		revisionRequestedAt,
-		revisionNote,
-		"public",
-		publicSummary,
-		publishedAt,
 		createdAt,
 	}
 }
@@ -4662,7 +4534,7 @@ func taskQueryRow(
 func adminTaskRow(
 	taskValues []any,
 	userEmail, userDisplayName string,
-	chosenSlug, chosenName, claimedSlug, claimedName, claimedByEmail, claimedByDisplayName string,
+	chosenSlug, chosenName string,
 ) []any {
 	row := append([]any{}, taskValues...)
 	row = append(row,
@@ -4670,10 +4542,6 @@ func adminTaskRow(
 		userDisplayName,
 		&chosenSlug,
 		&chosenName,
-		&claimedSlug,
-		&claimedName,
-		&claimedByEmail,
-		&claimedByDisplayName,
 	)
 	return row
 }

@@ -252,6 +252,47 @@ func TestEventStoreReliableAppendAndContinuity(t *testing.T) {
 			projectionFixture.identity.RunID, created.Sequence,
 		).Scan(&messageCount))
 		require.Equal(t, 1, messageCount)
+
+		artifactRequest := runtime.RuntimeEventRequest{
+			ClientEventID:  uuid.New(),
+			ClientEventSeq: 2,
+			EventType:      "run.artifact.delta",
+			Payload: map[string]any{
+				"artifact_id":   "projected-artifact",
+				"artifact_type": "text",
+				"title":         "Projected artifact",
+				"append":        true,
+				"last_chunk":    true,
+				"parts":         []any{map[string]any{"type": "text", "text": "artifact body"}},
+			},
+		}
+		artifactAck, err := svc.AppendRuntimeEvent(
+			context.Background(), projectionFixture.principal, projectionFixture.identity, artifactRequest,
+		)
+		require.NoError(t, err)
+		require.True(t, artifactAck.Inserted)
+		replayedArtifact, err := svc.AppendRuntimeEvent(
+			context.Background(), projectionFixture.principal, projectionFixture.identity, artifactRequest,
+		)
+		require.NoError(t, err)
+		require.True(t, replayedArtifact.Replayed)
+		require.False(t, replayedArtifact.Inserted)
+
+		var artifactCount, chunkCount int
+		require.NoError(t, pool.QueryRow(context.Background(), `
+			SELECT COUNT(*)
+			FROM run_artifacts
+			WHERE run_id = $1 AND source_artifact_id = 'projected-artifact'`,
+			projectionFixture.identity.RunID,
+		).Scan(&artifactCount))
+		require.Equal(t, 1, artifactCount)
+		require.NoError(t, pool.QueryRow(context.Background(), `
+			SELECT COUNT(*)
+			FROM run_artifact_chunks
+			WHERE run_id = $1 AND event_sequence = $2`,
+			projectionFixture.identity.RunID, artifactAck.Sequence,
+		).Scan(&chunkCount))
+		require.Equal(t, 1, chunkCount)
 	})
 }
 
@@ -391,7 +432,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 				$1, $2, $3, '{}'::jsonb, 'running',
 				0, 0, 0, 'api',
 				'openlinker.runtime.v2', $4, $5,
-				'{}'::jsonb, 'runtime_ws', NULL,
+				'{}'::jsonb, 'agent_node', NULL,
 				'pending', 20, 3, $6, $7
 			)`,
 			runID,

@@ -114,6 +114,48 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 	assertFinalizerTerminalCounts(t, pool, fixture.identity.RunID, 1, 3, 0)
 }
 
+func TestResultFinalizerLinksSuccessfulRunToPrivateTask(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeV2Schema(t, pool)
+	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+
+	var userID uuid.UUID
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(&userID))
+	taskID := uuid.New()
+	_, err := pool.Exec(context.Background(), `
+		INSERT INTO task_queries (
+			id, user_id, query, parsed_skills, mcp_tools,
+			recommended_agent_ids, chosen_agent_id, chosen_at
+		) VALUES ($1, $2, 'private task result link', '{}', '{run_agent}', $3, $4, NOW())`,
+		taskID, userID, []uuid.UUID{fixture.identity.AgentID}, fixture.identity.AgentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(context.Background(), `
+		INSERT INTO run_requirement_evidence (
+			run_id, task_id, agent_id, user_id, coverage_status, evidence_source
+		) VALUES ($1, $2, $3, $4, 'no_requirements', 'web')`,
+		fixture.identity.RunID, taskID, fixture.identity.AgentID, userID)
+	require.NoError(t, err)
+
+	request := successfulRuntimeResult(fixture, map[string]any{"summary": "  linked\nresult  "})
+	ack, err := runtime.NewResultFinalizer(pool, nil, nil).Finalize(context.Background(), fixture.principal, request)
+	require.NoError(t, err)
+	require.Equal(t, "success", ack.RunStatus)
+
+	var completionRunID uuid.UUID
+	var completedAt time.Time
+	var completionSummary string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT completion_run_id, completed_at, completion_summary
+		FROM task_queries WHERE id = $1`, taskID).Scan(&completionRunID, &completedAt, &completionSummary))
+	require.Equal(t, fixture.identity.RunID, completionRunID)
+	require.False(t, completedAt.IsZero())
+	require.Equal(t, "linked result", completionSummary)
+
+	replayed, err := runtime.NewResultFinalizer(pool, nil, nil).Finalize(context.Background(), fixture.principal, request)
+	require.NoError(t, err)
+	require.True(t, replayed.Replayed)
+}
+
 func TestResultFinalizerNonRetryableFailureAndReplayOwnership(t *testing.T) {
 	pool := setupTestDB(t)
 	requireReliableRuntimeV2Schema(t, pool)

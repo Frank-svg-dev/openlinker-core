@@ -116,7 +116,7 @@ func RequirePermission(c echo.Context, permission, resourceType string, resource
 			return nil
 		}
 		if method == AuthMethodUserToken {
-			if httpx.HasScope(c, permission) || (permission == "tasks:create" && httpx.HasScope(c, "tasks:write")) {
+			if httpx.HasScope(c, permission) {
 				return nil
 			}
 			return httpx.PermissionDenied(permission, resourceType)

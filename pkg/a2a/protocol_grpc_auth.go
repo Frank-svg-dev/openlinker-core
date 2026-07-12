@@ -45,12 +45,12 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 	}
 	if credential.HasAnyPrefix(token, credential.UserTokenPrefix) {
 		if a.verifier == nil {
-			return nil, httpx.Unauthorized("访问令牌鉴权未启用")
+			return nil, httpx.Unauthorized("User Token 鉴权未启用")
 		}
 		if principalVerifier, ok := a.verifier.(auth.PrincipalAPIKeyVerifier); ok {
 			principal, err := principalVerifier.VerifyPrincipal(ctx, token)
 			if err != nil {
-				return nil, httpx.Unauthorized("访问令牌无效或已撤销")
+				return nil, httpx.Unauthorized("User Token 无效或已撤销")
 			}
 			return &GRPCAuthInfo{
 				UserID: principal.UserID, AuthMethod: auth.AuthMethodUserToken,
@@ -59,7 +59,7 @@ func (a *BearerGRPCAuthenticator) AuthenticateA2AGRPC(ctx context.Context) (*GRP
 		}
 		uid, scopes, err := a.verifier.Verify(ctx, token)
 		if err != nil {
-			return nil, httpx.Unauthorized("访问令牌无效或已撤销")
+			return nil, httpx.Unauthorized("User Token 无效或已撤销")
 		}
 		grants := make([]auth.Grant, 0, len(scopes))
 		for _, scope := range scopes {

@@ -42,7 +42,7 @@ func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
 }
 
 func isQueuedRuntimeConnectionMode(mode string) bool {
-	return mode == "runtime_pull" || mode == "runtime_ws"
+	return mode == "agent_node"
 }
 
 func (s *Service) GetCallPolicy(ctx context.Context, userID, agentID uuid.UUID) (*CallPolicyResponse, error) {

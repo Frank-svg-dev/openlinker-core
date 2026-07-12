@@ -74,6 +74,25 @@ func TestRuntimeV2WebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	require.Equal(t, "SESSION_DISCONNECTED", fixture.leases.releaseReason())
 }
 
+func TestRuntimeV2WebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
+	fixture := newRuntimeV2WSTestFixture()
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeV2WS(t, target)
+	defer conn.Close()
+
+	writeRuntimeV2WSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeV2WSEnvelope(t, conn).Type)
+	assignment := fixture.assignment()
+	fixture.leases.setAssignment(&assignment)
+	started := time.Now()
+	fixture.wakeHub.Wake(fixture.principal.AgentID)
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(350*time.Millisecond)))
+	assigned := readRuntimeV2WSEnvelope(t, conn)
+	require.Equal(t, RuntimeMessageRunAssigned, assigned.Type)
+	require.Less(t, time.Since(started), 350*time.Millisecond)
+}
+
 func TestRuntimeV2WebSocketHandshakeCloseCodes(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -533,6 +552,7 @@ type runtimeV2WSTestFixture struct {
 	finalizer     *runtimeV2WSFinalizerFake
 	resume        RuntimeV2ResumeService
 	cancellations *runtimeV2WSCancellationServiceFake
+	wakeHub       *RuntimeWakeHub
 }
 
 func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
@@ -601,6 +621,7 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 		leases:    &runtimeV2WSLeaseServiceFake{operations: operations},
 		events:    &runtimeV2WSEventStoreFake{},
 		finalizer: &runtimeV2WSFinalizerFake{},
+		wakeHub:   NewRuntimeWakeHub(),
 		cancellations: &runtimeV2WSCancellationServiceFake{
 			databaseTime: now,
 		},
@@ -613,10 +634,11 @@ func (f *runtimeV2WSTestFixture) controller() *RuntimeV2HTTPController {
 		DeviceAuthenticator: f.devices,
 		Sessions:            f.sessions,
 		Leases:              f.leases,
-		EventStore:          f.events,
+		EventProjector:      f.events,
 		Finalizer:           f.finalizer,
 		Resume:              f.resume,
 		Cancellations:       f.cancellations,
+		WakeHub:             f.wakeHub,
 	})
 }
 
@@ -932,7 +954,7 @@ type runtimeV2WSEventStoreFake struct {
 	request   RuntimeEventRequest
 }
 
-func (f *runtimeV2WSEventStoreFake) Append(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
+func (f *runtimeV2WSEventStoreFake) AppendRuntimeEvent(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -1071,7 +1093,7 @@ var (
 	_ RuntimeV2DeviceAuthenticator = (*runtimeV2WSDeviceAuthenticatorFake)(nil)
 	_ RuntimeV2SessionService      = (*runtimeV2WSSessionServiceFake)(nil)
 	_ RuntimeV2LeaseService        = (*runtimeV2WSLeaseServiceFake)(nil)
-	_ RuntimeV2EventStore          = (*runtimeV2WSEventStoreFake)(nil)
+	_ RuntimeV2EventProjector      = (*runtimeV2WSEventStoreFake)(nil)
 	_ RuntimeV2ResultFinalizer     = (*runtimeV2WSFinalizerFake)(nil)
 	_ RuntimeV2ResumeService       = (*runtimeV2WSResumeServiceFake)(nil)
 	_ RuntimeV2CancellationService = (*runtimeV2WSCancellationServiceFake)(nil)

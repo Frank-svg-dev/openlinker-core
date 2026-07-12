@@ -31,8 +31,16 @@ runtime protocol, and migration contract are declared stable.
 - Added migration 062 to adopt legacy User Token records in place while
   preserving identifiers, hashes, prefixes, scopes, timestamps, usage, and
   revocation state. Legacy bcrypt-backed tokens remain verifiable during the
-  compatibility window. Legacy `tasks:write` is narrowed to `tasks:create`; it
-  does not grant `tasks:publish`, `tasks:run`, `tasks:work`, or `tasks:review`.
+  compatibility window. Migration 067 removes the retired Task-market grants,
+  including `tasks:write`; callers must request the explicit `tasks:create`
+  permission.
+- Removed the public Task board, publishing, claiming, delivery, and review
+  contract, including its database columns and generated query model. Tasks are
+  private demand context for recommendation and Run; seller supply remains the
+  public Agent market.
+- Routed Pull v2 and WebSocket execution Events through one projected append
+  boundary, so durable Events update messages, artifacts, callbacks, and
+  evidence consistently across both Agent Node transports.
 
 ### Fixed
 
@@ -40,15 +48,16 @@ runtime protocol, and migration contract are declared stable.
   parsing, preventing ordinary English prose from selecting unrelated Skills
   while preserving Chinese single-character matching.
 - Restored Skill recommendations for active public Agents with any valid
-  readiness evidence: healthy availability, a non-unreachable successful Run,
-  or a recently used runtime pull token.
+  readiness evidence: direct/MCP health or successful execution, or a live
+  current-contract Agent Node Session. Token use alone no longer counts as
+  online presence.
 - Aligned the runtime pull claim test contract with idempotent in-flight Run
   replay, including the absence of a retry cooldown for successful claims.
 
 ### Documentation
 
-- Documented the default `admin@openlinker.ai` / `openlinker-admin` bootstrap
-  admin identity and the `OPENLINKER_BOOTSTRAP_ADMIN_PASSWORD` override.
+- Limited the predictable bootstrap admin to local development and made
+  staging/production require explicit email and a non-default strong password.
 - Split Chinese documentation into dedicated `*.zh-CN.md` files and kept the
   default GitHub-facing documentation English-only.
 - Strengthened the README introduction for AI agent registry, agent marketplace,

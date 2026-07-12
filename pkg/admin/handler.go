@@ -119,8 +119,6 @@ func (h *Handler) ListTasks(c echo.Context) error {
 	resp, err := h.svc.ListTasks(
 		c.Request().Context(),
 		c.QueryParam("q"),
-		c.QueryParam("visibility"),
-		c.QueryParam("delivery_status"),
 		c.QueryParam("status"),
 		queryInt(c, "limit", defaultLimit),
 		queryInt(c, "offset", 0),

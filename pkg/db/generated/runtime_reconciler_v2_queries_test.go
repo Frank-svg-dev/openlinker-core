@@ -73,7 +73,7 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 		"a.lease_id = $5", "a.fencing_token = $6",
 		"a.finished_at IS NULL", "a.result_id IS NULL",
 		"r.cancel_request_id IS NULL", "r.active_attempt_id = a.id",
-		"$1 = 'offer_expired'", "$1 IN ('lease_expired', 'timeout')",
+		"$1 = 'offer_expired'", "$1 IN ('lease_expired', 'timeout', 'result_unknown')",
 	} {
 		if !strings.Contains(finishRuntimeV2ReconciledAttempt, fragment) {
 			t.Fatalf("Attempt finish query missing %q", fragment)
@@ -131,7 +131,7 @@ func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 
 	lockedValues := []any{
 		runID, uuid.New(), uuid.New(), "running", "executing",
-		stringPointer("runtime_ws"), (*bool)(nil), int32(1), int32(3),
+		stringPointer("agent_node"), (*bool)(nil), int32(1), int32(3),
 		int32(1), int32(3), &attemptID, &attemptID, uuidPointer(uuid.New()),
 		int64(4), &executor, &nodeID, stringPointer("worker"), &sessionID,
 		now.Add(time.Minute), now.Add(2 * time.Minute), (*uuid.UUID)(nil),

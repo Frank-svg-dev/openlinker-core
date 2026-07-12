@@ -1199,7 +1199,7 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 	if snapshot.AvailabilityStatus == "unreachable" {
 		return false, nil
 	}
-	if requireRuntimeOnline && (agentRow.ConnectionMode == "runtime_pull" || agentRow.ConnectionMode == "runtime_ws") {
+	if requireRuntimeOnline && agentRow.ConnectionMode == "agent_node" {
 		hasActiveSession, err := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agentRow.ID)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeV2SessionForAgent")

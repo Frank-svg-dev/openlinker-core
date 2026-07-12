@@ -313,20 +313,24 @@ func TestHybridAuthMiddlewareBranches(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name     string
-		header   string
-		verifier ApiKeyVerifier
+		name        string
+		header      string
+		verifier    ApiKeyVerifier
+		wantMessage string
 	}{
 		{name: "missing header"},
 		{name: "bad format", header: "Bearer"},
-		{name: "user token verifier missing", header: "Bearer ol_user_abc"},
-		{name: "user token verifier rejects", header: "Bearer ol_user_abc", verifier: &fakeAPIKeyVerifier{err: errors.New("revoked")}},
+		{name: "user token verifier missing", header: "Bearer ol_user_abc", wantMessage: "User Token 鉴权未启用"},
+		{name: "user token verifier rejects", header: "Bearer ol_user_abc", verifier: &fakeAPIKeyVerifier{err: errors.New("revoked")}, wantMessage: "User Token 无效或已撤销"},
 		{name: "jwt invalid", header: "Bearer not.a.jwt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rec, got := invokeHybridAuth(t, pureAuthSecret, tc.verifier, tc.header)
 			if rec.Code != http.StatusUnauthorized || got.nextCalled {
 				t.Fatalf("expected unauthorized without next, code=%d got=%+v", rec.Code, got)
+			}
+			if tc.wantMessage != "" && !strings.Contains(rec.Body.String(), tc.wantMessage) {
+				t.Fatalf("response body = %q, want message %q", rec.Body.String(), tc.wantMessage)
 			}
 		})
 	}

@@ -15,7 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const runtimeV2ContractDigest = "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
+const runtimeV2ContractDigest = "857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f"
 
 var runtimeV2RequiredFeatures = []string{
 	"lease_fence",
@@ -364,7 +364,7 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			     id, creator_id, slug, name, description, endpoint_url,
 			     price_per_call_cents, connection_mode
 			 ) VALUES ($1, $2, $3, 'Runtime Lease Test', 'runtime test fixture',
-			           'openlinker-runtime-pull://test', 0, 'runtime_pull')`,
+			           'openlinker-agent-node://test', 0, 'agent_node')`,
 			[]any{f.agentID, f.userID, "runtime-lease-" + suffix},
 		},
 		{
@@ -412,7 +412,7 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			 ) VALUES ($1, $2, $3, '{"prompt":"lease test"}'::jsonb,
 			           'running', 0, 0, 0, 'api', decode(repeat('aa', 32), 'hex'),
 			           decode(repeat('bb', 32), 'hex'), '{}'::jsonb,
-			           'runtime_pull', NULL, 5, 3,
+			           'agent_node', NULL, 5, 3,
 			           clock_timestamp() + INTERVAL '5 minutes',
 			           clock_timestamp() + INTERVAL '15 minutes')`,
 			[]any{f.runID, f.userID, f.agentID},
@@ -536,7 +536,7 @@ func TestRuntimeSessionScopeTriggerRejectsCallOnlyCredential(t *testing.T) {
 		{`INSERT INTO agents (id, creator_id, slug, name, description, endpoint_url,
 		      price_per_call_cents, connection_mode)
 		  VALUES ($1, $2, $3, 'Scope Test', 'scope fixture',
-		      'openlinker-runtime-pull://test', 0, 'runtime_pull')`, []any{f.agentID, f.userID, "runtime-scope-" + suffix}},
+		      'openlinker-agent-node://test', 0, 'agent_node')`, []any{f.agentID, f.userID, "runtime-scope-" + suffix}},
 		{`INSERT INTO agent_tokens (id, agent_id, creator_user_id, name, prefix,
 		      token_hash, scopes, status, redeemed_at)
 		  VALUES ($1, $2, $3, 'Scope Test', $4, 'hash', ARRAY['agent:call']::text[],

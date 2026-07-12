@@ -265,7 +265,6 @@ SELECT u.id, u.email, u.password_hash, u.oauth_provider, u.oauth_id, u.display_n
        COALESCE(agent_stats.agent_count, 0)::int AS agent_count,
        COALESCE(agent_stats.active_agent_count, 0)::int AS active_agent_count,
        COALESCE(task_stats.task_count, 0)::int AS task_count,
-       COALESCE(task_stats.public_task_count, 0)::int AS public_task_count,
        COALESCE(run_stats.run_count, 0)::int AS run_count,
        task_stats.last_task_at,
        run_stats.last_run_at
@@ -280,7 +279,6 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
     SELECT
         COUNT(*)::int AS task_count,
-        COUNT(*) FILTER (WHERE visibility = 'public')::int AS public_task_count,
         MAX(created_at) AS last_task_at
     FROM task_queries
     WHERE user_id = u.id
@@ -321,7 +319,6 @@ type ListAdminUsersRow struct {
 	AgentCount       int32      `db:"agent_count" json:"agent_count"`
 	ActiveAgentCount int32      `db:"active_agent_count" json:"active_agent_count"`
 	TaskCount        int32      `db:"task_count" json:"task_count"`
-	PublicTaskCount  int32      `db:"public_task_count" json:"public_task_count"`
 	RunCount         int32      `db:"run_count" json:"run_count"`
 	LastTaskAt       *time.Time `db:"last_task_at" json:"last_task_at"`
 	LastRunAt        *time.Time `db:"last_run_at" json:"last_run_at"`
@@ -355,7 +352,6 @@ func (q *Queries) ListAdminUsers(ctx context.Context, arg ListAdminUsersParams) 
 			&u.AgentCount,
 			&u.ActiveAgentCount,
 			&u.TaskCount,
-			&u.PublicTaskCount,
 			&u.RunCount,
 			&u.LastTaskAt,
 			&u.LastRunAt,

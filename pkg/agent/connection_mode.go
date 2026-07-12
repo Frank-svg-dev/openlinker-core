@@ -8,14 +8,12 @@ import (
 )
 
 const (
-	ConnectionModeDirectHTTP  = "direct_http"
-	ConnectionModeMCPServer   = "mcp_server"
-	ConnectionModeRuntimePull = "runtime_pull"
-	ConnectionModeRuntimeWS   = "runtime_ws"
+	ConnectionModeDirectHTTP = "direct_http"
+	ConnectionModeMCPServer  = "mcp_server"
+	ConnectionModeAgentNode  = "agent_node"
 )
 
-const runtimePullEndpointPrefix = "openlinker-runtime-pull://"
-const runtimeWSEndpointPrefix = "openlinker-runtime-ws://"
+const agentNodeEndpointPrefix = "openlinker-agent-node://"
 
 type connectionSettings struct {
 	Mode        string
@@ -51,14 +49,9 @@ func normalizeConnectionSettings(slug, endpointURL, mode, mcpToolName string, al
 			return connectionSettings{}, httpx.Unprocessable(err.Error())
 		}
 		return connectionSettings{Mode: mode, EndpointURL: endpointURL, MCPToolName: &mcpToolName}, nil
-	case ConnectionModeRuntimePull:
-		if endpointURL == "" || !strings.HasPrefix(endpointURL, runtimePullEndpointPrefix) {
-			endpointURL = runtimePullEndpointPrefix + slug
-		}
-		return connectionSettings{Mode: mode, EndpointURL: endpointURL}, nil
-	case ConnectionModeRuntimeWS:
-		if endpointURL == "" || !strings.HasPrefix(endpointURL, runtimeWSEndpointPrefix) {
-			endpointURL = runtimeWSEndpointPrefix + slug
+	case ConnectionModeAgentNode:
+		if endpointURL == "" || !strings.HasPrefix(endpointURL, agentNodeEndpointPrefix) {
+			endpointURL = agentNodeEndpointPrefix + slug
 		}
 		return connectionSettings{Mode: mode, EndpointURL: endpointURL}, nil
 	default:

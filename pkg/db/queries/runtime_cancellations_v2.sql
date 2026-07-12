@@ -305,13 +305,105 @@ WHERE a.run_id = sqlc.arg(run_id)
   AND EXISTS (
       SELECT 1
       FROM runs r
-      JOIN run_cancellations c ON c.run_id = r.id
+      JOIN run_cancellations c
+        ON c.run_id = r.id
+       AND c.id = r.cancel_request_id
       WHERE r.id = a.run_id
         AND r.runtime_contract_id = 'openlinker.runtime.v2'
-        AND r.status = 'running'
-        AND r.dispatch_state = 'executing'
-        AND r.active_attempt_id = a.id
+        AND r.status = 'canceled'
+        AND r.dispatch_state = 'terminal'
+        AND r.latest_attempt_id = a.id
         AND c.target_attempt_id = a.id
         AND c.state = 'stopped'
+  )
+RETURNING *;
+
+-- name: FindNextDueRuntimeV2CoreCancellation :one
+SELECT r.id AS run_id,
+       r.agent_id,
+       c.id AS cancellation_id,
+       c.target_attempt_id
+FROM runs r
+JOIN run_cancellations c
+  ON c.run_id = r.id
+ AND c.id = r.cancel_request_id
+JOIN run_attempts a
+  ON a.run_id = r.id
+ AND a.id = c.target_attempt_id
+WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'canceled'
+  AND r.dispatch_state = 'terminal'
+  AND r.cancel_state = c.state
+  AND c.state IN ('requested', 'delivered', 'stopping')
+  AND c.requested_at
+      + (sqlc.arg(command_deadline_ms)::bigint * INTERVAL '1 millisecond')
+      <= clock_timestamp()
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL
+ORDER BY c.requested_at ASC, c.id ASC
+LIMIT 1;
+
+-- name: LockDueRuntimeV2CoreCancellationRun :one
+SELECT r.id AS run_id,
+       r.agent_id,
+       c.id AS cancellation_id,
+       c.target_attempt_id,
+       clock_timestamp() AS database_now
+FROM runs r
+JOIN run_cancellations c
+  ON c.run_id = r.id
+ AND c.id = r.cancel_request_id
+JOIN run_attempts a
+  ON a.run_id = r.id
+ AND a.id = c.target_attempt_id
+WHERE r.id = sqlc.arg(run_id)
+  AND c.id = sqlc.arg(cancellation_id)
+  AND a.id = sqlc.arg(target_attempt_id)
+  AND r.runtime_contract_id = 'openlinker.runtime.v2'
+  AND r.status = 'canceled'
+  AND r.dispatch_state = 'terminal'
+  AND r.cancel_state = c.state
+  AND c.state IN ('requested', 'delivered', 'stopping')
+  AND c.requested_at
+      + (sqlc.arg(command_deadline_ms)::bigint * INTERVAL '1 millisecond')
+      <= clock_timestamp()
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL
+ORDER BY c.requested_at ASC, c.id ASC
+LIMIT 1
+FOR UPDATE OF r;
+
+-- name: FinishRuntimeV2CoreUnconfirmedAttempt :one
+UPDATE run_attempts a
+SET finished_at = clock_timestamp(),
+    outcome = 'canceled',
+    error_code = 'CANCEL_UNCONFIRMED',
+    error_detail_redacted = NULL
+WHERE a.run_id = sqlc.arg(run_id)
+  AND a.id = sqlc.arg(attempt_id)
+  AND a.lease_id = sqlc.arg(lease_id)
+  AND a.fencing_token = sqlc.arg(fencing_token)
+  AND a.executor_type IN ('core_http', 'core_mcp')
+  AND a.finished_at IS NULL
+  AND a.outcome IS NULL
+  AND a.result_id IS NULL
+  AND EXISTS (
+      SELECT 1
+      FROM runs r
+      JOIN run_cancellations c
+        ON c.run_id = r.id
+       AND c.id = r.cancel_request_id
+      WHERE r.id = a.run_id
+        AND r.runtime_contract_id = 'openlinker.runtime.v2'
+        AND r.status = 'canceled'
+        AND r.dispatch_state = 'terminal'
+        AND r.latest_attempt_id = a.id
+        AND c.target_attempt_id = a.id
+        AND c.state = 'unconfirmed'
+        AND c.error_code = 'CANCEL_UNCONFIRMED'
   )
 RETURNING *;

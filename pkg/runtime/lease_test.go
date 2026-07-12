@@ -31,6 +31,7 @@ func TestRuntimeLeaseClaimUsesGlobalLockAndCapacityOrder(t *testing.T) {
 	require.Equal(t, map[string]any{"trace": "a"}, assigned.Metadata)
 	require.Equal(t, fixture.databaseNow.Add(-fixture.service.config.HeartbeatTTL), fixture.tx.sessionSlotParams.HeartbeatAfter)
 	require.Equal(t, fixture.tx.sessionSlotParams.HeartbeatAfter, fixture.tx.nodeSlotParams.LastSeenAfter)
+	require.Equal(t, fixture.principal.CoreInstanceID, fixture.tx.mirrorOfferParams.CoreInstanceID)
 	require.Equal(t, int32(1), fixture.tx.sessionInflight)
 	require.Equal(t, int32(1), fixture.tx.nodeInflight)
 	require.NotNil(t, fixture.tx.createdAttempt.SlotAcquiredAt)
@@ -482,10 +483,11 @@ type runtimeLeaseTransactionFake struct {
 	nodeInflight      int32
 	nodeSlotErr       error
 
-	createdAttempt db.RunAttempt
-	mirrorOfferErr error
-	run            db.LockRunForLeaseMutationRow
-	attempt        db.RunAttempt
+	createdAttempt    db.RunAttempt
+	mirrorOfferParams db.MirrorRunAgentNodeOfferParams
+	mirrorOfferErr    error
+	run               db.LockRunForLeaseMutationRow
+	attempt           db.RunAttempt
 
 	confirmCalls            int
 	mirrorConfirmCalls      int
@@ -605,8 +607,9 @@ func (f *runtimeLeaseTransactionFake) CreateAgentNodeRunOffer(_ context.Context,
 	return f.createdAttempt, nil
 }
 
-func (f *runtimeLeaseTransactionFake) MirrorRunAgentNodeOffer(_ context.Context, _ db.MirrorRunAgentNodeOfferParams) (db.MirrorRunAgentNodeOfferRow, error) {
+func (f *runtimeLeaseTransactionFake) MirrorRunAgentNodeOffer(_ context.Context, params db.MirrorRunAgentNodeOfferParams) (db.MirrorRunAgentNodeOfferRow, error) {
 	f.call("mirror_offer")
+	f.mirrorOfferParams = params
 	if f.mirrorOfferErr != nil {
 		return db.MirrorRunAgentNodeOfferRow{}, f.mirrorOfferErr
 	}

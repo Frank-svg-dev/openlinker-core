@@ -9,7 +9,6 @@
 //	GET  /api/v1/runs/:id        -> handler.GetRun        (auth required)
 //	GET  /api/v1/runs/:id/events -> handler.GetRunEvents  (auth required)
 //	GET  /api/v1/runs/:id/stream -> handler.StreamRunEvents (auth required)
-//	POST /api/v1/runs/:id/events -> handler.PostRunEvent   (agent token required)
 //
 // 期望 Handler 接口：
 //
@@ -49,7 +48,7 @@ func setupHandlerTest(t *testing.T) (*echo.Echo, *pgxpool.Pool, *runtime.Service
 	t.Helper()
 	pool := setupTestDB(t)
 
-	svc := runtime.NewService(pool, newTestConfig())
+	svc := newTestService(t, pool)
 	h := runtime.NewHandler(svc)
 
 	e := echo.New()
@@ -150,7 +149,7 @@ func insertTerminalRunWithEvents(t *testing.T, pool *pgxpool.Pool, userID, agent
 			'openlinker.runtime.v2',
 			digest($1::uuid::text || ':key', 'sha256'),
 			digest($1::uuid::text || ':fingerprint', 'sha256'),
-			'runtime_pull', 'pending',
+			'agent_node', 'pending',
 			clock_timestamp() + interval '10 minutes',
 			clock_timestamp() + interval '1 hour'
 		)`, runID, userID, agentID)
@@ -199,9 +198,10 @@ func TestPostRun_HappyPath(t *testing.T) {
 		"input":    map[string]any{"q": "hi"},
 	}
 	rec, raw := doRequest(t, e, http.MethodPost, "/api/v1/run", body, map[string]string{
-		"Authorization": signJWT(t, userID),
+		"Authorization":   signJWT(t, userID),
+		"Idempotency-Key": "handler-happy-path",
 	})
-	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", string(raw))
+	assert.Equal(t, http.StatusCreated, rec.Code, "body=%s", string(raw))
 
 	var out runRespBody
 	require.NoError(t, json.Unmarshal(raw, &out))
@@ -260,9 +260,10 @@ func TestPostRun_FreePhaseDoesNotRequireBalance(t *testing.T) {
 
 	body := map[string]any{"agent_id": agentID.String(), "input": map[string]any{}}
 	rec, raw := doRequest(t, e, http.MethodPost, "/api/v1/run", body, map[string]string{
-		"Authorization": signJWT(t, userID),
+		"Authorization":   signJWT(t, userID),
+		"Idempotency-Key": "handler-free-phase",
 	})
-	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", string(raw))
+	assert.Equal(t, http.StatusCreated, rec.Code, "body=%s", string(raw))
 }
 
 func TestPostRunsAsync_Handler_ReturnsAccepted(t *testing.T) {
@@ -299,7 +300,9 @@ func TestPostRunsAsync_Handler_ReturnsAccepted(t *testing.T) {
 		"input":    map[string]any{"q": "hi"},
 	}
 	rec, raw := doRequest(t, e, http.MethodPost, "/api/v1/runs", body, map[string]string{
-		"Authorization": signJWT(t, userID),
+		"Authorization":   signJWT(t, userID),
+		"Idempotency-Key": "handler-async",
+		"Prefer":          "wait=0",
 	})
 	assert.Equal(t, http.StatusAccepted, rec.Code, "body=%s", string(raw))
 
@@ -429,48 +432,6 @@ func TestGetRunEvents_Handler_HappyPath(t *testing.T) {
 	assert.NotContains(t, string(raw), "id:")
 }
 
-func TestPostRunEvent_Handler_UsesAgentTokenNoJWT(t *testing.T) {
-	e, pool, svc := setupHandlerTest(t)
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	rec, raw := doRequest(t, e, http.MethodPost, "/api/v1/runs/"+runID.String()+"/events", map[string]any{
-		"event_type": "run.message.delta",
-		"payload":    map[string]any{"text": "streaming"},
-	}, map[string]string{
-		"X-OpenLinker-Token": "agent-secret",
-	})
-	assert.Equal(t, http.StatusCreated, rec.Code, "body=%s", string(raw))
-
-	var got runEventRespBody
-	require.NoError(t, json.Unmarshal(raw, &got))
-	assert.Equal(t, int32(1), got.Sequence)
-	assert.Equal(t, "run.message.delta", got.EventType)
-	assert.Equal(t, "streaming", got.Payload["text"])
-}
-
-func TestPostRunEvent_Handler_RejectsWrongAgentToken(t *testing.T) {
-	e, pool, svc := setupHandlerTest(t)
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	rec, raw := doRequest(t, e, http.MethodPost, "/api/v1/runs/"+runID.String()+"/events", map[string]any{
-		"event_type": "run.message.delta",
-		"payload":    map[string]any{"text": "streaming"},
-	}, map[string]string{
-		"X-OpenLinker-Token": "wrong-secret",
-	})
-	assert.Equal(t, http.StatusUnauthorized, rec.Code, "body=%s", string(raw))
-}
-
 func TestStreamRunEvents_Handler_ReplaysEvents(t *testing.T) {
 	e, pool, _ := setupHandlerTest(t)
 	userID := insertRuntimeUser(t, pool)
@@ -510,50 +471,4 @@ func TestStreamRunEvents_Handler_UsesLastEventID(t *testing.T) {
 	assert.NotContains(t, string(raw), "event: run.created")
 	assert.NotContains(t, string(raw), "event: run.started")
 	assert.Contains(t, string(raw), "event: run.failed")
-}
-
-func TestStreamRunEvents_Handler_EmitsEventReportedAfterConnectionStarts(t *testing.T) {
-	e, pool, svc := setupHandlerTest(t)
-	userID := insertRuntimeUser(t, pool)
-	creatorID := insertCreator(t, pool)
-	endpoint := startMockEndpointForService(t, svc, mockEndpointReturning(http.StatusOK, `{"output":{"text":"ok"}}`))
-	agentID := insertAgent(t, pool, creatorID, endpoint, 10, "approved")
-	setAgentEndpointToken(t, pool, agentID, "agent-secret")
-	runID := insertRunningRun(t, pool, userID, agentID)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/runs/"+runID.String()+"/stream", nil).WithContext(ctx)
-	req.Header.Set(echo.HeaderAuthorization, signJWT(t, userID))
-	req.Header.Set(echo.HeaderAccept, "text/event-stream")
-	rec := httptest.NewRecorder()
-	done := make(chan struct{})
-	go func() {
-		e.ServeHTTP(rec, req)
-		close(done)
-	}()
-
-	time.Sleep(100 * time.Millisecond)
-	eventRec, eventRaw := doRequest(t, e, http.MethodPost, "/api/v1/runs/"+runID.String()+"/events", map[string]any{
-		"event_type": "run.message.delta",
-		"payload":    map[string]any{"text": "live event"},
-	}, map[string]string{
-		"X-OpenLinker-Token": "agent-secret",
-	})
-	require.Equal(t, http.StatusCreated, eventRec.Code, "body=%s", string(eventRaw))
-
-	time.Sleep(1500 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("SSE handler did not stop after request cancellation")
-	}
-
-	raw := rec.Body.String()
-	assert.Equal(t, http.StatusOK, rec.Code, "body=%s", raw)
-	assert.Contains(t, rec.Header().Get(echo.HeaderContentType), "text/event-stream")
-	assert.Contains(t, raw, "event: run.message.delta")
-	assert.Contains(t, raw, "live event")
 }

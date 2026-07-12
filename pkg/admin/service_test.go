@@ -129,11 +129,11 @@ func TestCreateUserDuplicateEmail(t *testing.T) {
 	assertAdminHTTPStatus(t, err, http.StatusConflict)
 }
 
-func TestSummaryIncludesTaskCounters(t *testing.T) {
+func TestSummaryExposesOnlyPrivateTaskCounters(t *testing.T) {
 	fake := &adminFakeDBTX{
 		row: adminFakeRow{values: []any{
 			int32(12), int32(2), int32(5), int32(3), int32(9), int32(8), int32(1), int32(4), int32(6),
-			int32(17), int32(7), int32(10), int32(4), int32(3), int32(5), int32(2), int32(1),
+			int32(17), int32(5),
 		}},
 	}
 	svc := NewService(fake)
@@ -142,7 +142,7 @@ func TestSummaryIncludesTaskCounters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Summary error = %v", err)
 	}
-	if summary.TotalTasks != 17 || summary.PublicTasks != 7 || summary.CompletedTasks != 5 || summary.RevisionRequestedTasks != 1 {
+	if summary.TotalTasks != 17 || summary.CompletedTasks != 5 {
 		t.Fatalf("Summary task counters = %#v", summary)
 	}
 	if !strings.Contains(fake.queryRowSQL, "-- name: GetAdminSummary ") {

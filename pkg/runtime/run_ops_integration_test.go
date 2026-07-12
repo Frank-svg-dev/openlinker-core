@@ -38,8 +38,8 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	// queued v2 path so the test does not depend on an external endpoint.
 	_, err = pool.Exec(context.Background(), `
 		UPDATE agents
-		SET connection_mode = 'runtime_ws',
-		    endpoint_url = 'openlinker-runtime-ws://run-ops-test'
+		SET connection_mode = 'agent_node',
+		    endpoint_url = 'openlinker-agent-node://run-ops-test'
 		WHERE id = $1`,
 		fixture.identity.AgentID)
 	require.NoError(t, err)

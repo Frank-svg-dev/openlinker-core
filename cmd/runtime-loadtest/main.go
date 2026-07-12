@@ -1068,7 +1068,7 @@ func setupAgents(ctx context.Context, api *apiClient, cfg config, runID string, 
 			extra := struct {
 				PlaintextToken string `json:"plaintext_token"`
 			}{}
-			if _, err := api.do(ctx, "create-agent-runtime-token", http.MethodPost, "/creator/agent-tokens", map[string]any{
+			if _, err := api.do(ctx, "create-agent-token", http.MethodPost, "/creator/agent-tokens", map[string]any{
 				"name":     fmt.Sprintf("runtime-loadtest-%s-agent-%03d-worker-%02d", runID, i, worker),
 				"agent_id": agent.ID,
 				"scopes":   []string{"agent:call", "agent:pull"},

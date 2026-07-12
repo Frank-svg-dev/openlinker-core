@@ -77,7 +77,7 @@ func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *test
 		},
 		Runtime: agent.AgentCardRuntimeExt{
 			Adapter:        "openlinker_a2a_proxy",
-			ConnectionMode: "runtime_pull",
+			ConnectionMode: "agent_node",
 			OnlineSignal:   "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool",
 			TaskLifecycle:  "openlinker_run_task_lifecycle",
 		},
@@ -94,7 +94,7 @@ func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *test
 
 	runtimeContract := decoded["runtime"].(map[string]any)
 	assert.Equal(t, "openlinker_a2a_proxy", runtimeContract["adapter"])
-	assert.Equal(t, "runtime_pull", runtimeContract["connection_mode"])
+	assert.Equal(t, "agent_node", runtimeContract["connection_mode"])
 	assert.Equal(t, "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool", runtimeContract["online_signal"])
 	assert.Equal(t, "openlinker_run_task_lifecycle", runtimeContract["task_lifecycle"])
 }
@@ -241,11 +241,11 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	agentID := createApprovedAgent(t, pool, creatorID, "runtime-offline")
 	_, err := pool.Exec(ctx,
 		`UPDATE agents
-		 SET connection_mode='runtime_pull',
+		 SET connection_mode='agent_node',
 		     endpoint_url=$2
 		 WHERE id=$1`,
 		agentID,
-		"openlinker-runtime-pull://runtime-offline",
+		"openlinker-agent-node://runtime-offline",
 	)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx,

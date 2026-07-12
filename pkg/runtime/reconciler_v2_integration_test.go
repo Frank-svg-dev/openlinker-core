@@ -464,7 +464,7 @@ func insertRuntimeV2PendingDeadlineRun(
 			$1, $2, $3, '{}'::jsonb, 'running',
 			0, 0, 0, 'api',
 			'openlinker.runtime.v2', $4, $5,
-			'{}'::jsonb, 'runtime_ws',
+			'{}'::jsonb, 'agent_node',
 			'pending', 3, 3, $6, $7
 		)`, runID, userID, agentID, keyHash[:], fingerprint[:], dispatchDeadline, runDeadline)
 	require.NoError(t, err)

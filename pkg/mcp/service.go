@@ -174,8 +174,7 @@ var mcpTools = []ToolDescriptor{
 			"required": []string{"task_id", "visibility", "parsed_skills", "parsed_skill_refs", "mcp_tools", "mcp_tool_refs", "recommendations"},
 			"properties": map[string]interface{}{
 				"task_id":           map[string]interface{}{"type": "string", "format": "uuid"},
-				"visibility":        map[string]interface{}{"type": "string", "enum": []string{"private", "public"}, "description": "Task visibility. create_task returns a private task unless a safe summary is published separately."},
-				"public_summary":    map[string]interface{}{"type": "string", "description": "Public task summary, when available."},
+				"visibility":        map[string]interface{}{"type": "string", "enum": []string{"private"}, "description": "Tasks are always private demand context owned by the caller."},
 				"parsed_skills":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}, "description": "Skill IDs associated with the task, ordered by relevance."},
 				"parsed_skill_refs": skillRefsSchema(),
 				"mcp_tools":         map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
@@ -215,13 +214,15 @@ var mcpTools = []ToolDescriptor{
 
 func taskNextActionSchema() map[string]interface{} {
 	return map[string]interface{}{
-		"type": "object",
+		"type":     "object",
+		"required": []string{"type", "label", "hint", "href", "reason"},
 		"properties": map[string]interface{}{
-			"type":   map[string]interface{}{"type": "string"},
-			"label":  map[string]interface{}{"type": "string"},
-			"hint":   map[string]interface{}{"type": "string"},
-			"href":   map[string]interface{}{"type": "string"},
-			"reason": map[string]interface{}{"type": "string"},
+			"type":        map[string]interface{}{"type": "string", "enum": []string{"connect_agent"}},
+			"label":       map[string]interface{}{"type": "string"},
+			"hint":        map[string]interface{}{"type": "string"},
+			"href":        map[string]interface{}{"type": "string", "description": "Internal /publish link carrying the available query and Skill context."},
+			"reason_code": map[string]interface{}{"type": "string"},
+			"reason":      map[string]interface{}{"type": "string"},
 		},
 	}
 }

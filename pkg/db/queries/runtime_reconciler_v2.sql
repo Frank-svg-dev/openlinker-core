@@ -204,7 +204,7 @@ WHERE a.run_id = sqlc.arg(run_id)
           AND a.attempt_no IS NULL
       )
       OR (
-          sqlc.arg(outcome) IN ('lease_expired', 'timeout')
+          sqlc.arg(outcome) IN ('lease_expired', 'timeout', 'result_unknown')
           AND r.dispatch_state = 'executing'
           AND a.accepted_at IS NOT NULL
           AND a.attempt_no IS NOT NULL
@@ -389,6 +389,23 @@ WHERE r.id = sqlc.arg(run_id)
                 AND a.attempt_no = r.attempt_count
                 AND a.finished_at IS NOT NULL
                 AND a.outcome IN ('lease_expired', 'result_unknown')
+          )
+      )
+      OR (
+          sqlc.arg(status) = 'failed'
+          AND sqlc.arg(dispatch_state) = 'terminal'
+          AND sqlc.arg(error_code) = 'ENDPOINT_RESULT_UNKNOWN'
+          AND sqlc.narg(attempt_id)::uuid IS NOT NULL
+          AND r.endpoint_idempotency_snapshot = FALSE
+          AND EXISTS (
+              SELECT 1
+              FROM run_attempts a
+              WHERE a.run_id = r.id
+                AND a.id = sqlc.narg(attempt_id)
+                AND a.executor_type IN ('core_http', 'core_mcp')
+                AND a.finished_at IS NOT NULL
+                AND a.outcome = 'result_unknown'
+                AND a.result_id IS NULL
           )
       )
   )

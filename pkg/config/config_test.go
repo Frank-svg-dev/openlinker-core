@@ -79,17 +79,6 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	if cfg.HTTPRateLimitRate != 50 || cfg.HTTPRateLimitBurst != 200 || cfg.HTTPRateLimitPeriodSec != 1 {
 		t.Fatalf("unexpected http rate limit defaults: %#v", cfg)
 	}
-	if cfg.RuntimePullRunWorkerTimeoutBatchSize != 50 {
-		t.Fatalf("unexpected runtime pull batch default: %d", cfg.RuntimePullRunWorkerTimeoutBatchSize)
-	}
-	if !cfg.RuntimeEndpointRunWorkerEnabled {
-		t.Fatalf("expected RuntimeEndpointRunWorkerEnabled default true")
-	}
-	if cfg.RuntimeEndpointRunWorkerIntervalSeconds != 30 ||
-		cfg.RuntimeEndpointRunTimeoutSeconds != 0 ||
-		cfg.RuntimeEndpointRunWorkerBatchSize != 50 {
-		t.Fatalf("unexpected runtime endpoint worker defaults: %#v", cfg)
-	}
 }
 
 func TestLoadAppliesSafeDevelopmentReleaseDefaults(t *testing.T) {

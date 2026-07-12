@@ -169,10 +169,10 @@ ORDER BY s.average_score DESC NULLS LAST, a.total_calls DESC, a.id
 LIMIT $2;
 
 -- name: ListAgentsBySkillsWithVerified :many
--- 改造 RecommendAgentsBySkills 加 verified/availability 加权：
--- 复用市场 readiness，并把最近 queued runtime token 使用作为 fresh 在线信号；
--- 过滤无 healthy/成功运行/近期 runtime token 证据的 Agent，避免推荐给用户后跑不起来。
--- 排序：命中 skill 数 desc → 可用性 → 最近在线/成功证据 → verified 数 desc → total_calls desc。
+-- RecommendAgentsBySkills 加 verified/availability 加权。Agent Node 必须有
+-- PostgreSQL 证明的 current-contract ready Session；Agent Token 的使用时间
+-- 不是在线性证据。Direct/MCP Agent 仍需 healthy 或成功运行证据。
+-- 排序：命中 skill 数 desc → 可用性 → 最近 Session/成功证据 → verified 数 desc → total_calls desc。
 -- 同时返回 verified_count 让上层决定排序权重。
 SELECT a.id AS agent_id,
        COUNT(DISTINCT ag.skill_id)::int AS match_count,
@@ -182,13 +182,51 @@ FROM agent_skills ag
 JOIN agents a ON a.id = ag.agent_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
-    SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_tokens
-    WHERE agent_id = a.id
-      AND revoked_at IS NULL
-      AND status = 'active_runtime'
-      AND 'agent:pull' = ANY(scopes)
-) rt ON TRUE
+    SELECT MAX(session.heartbeat_at) AS last_runtime_session_at
+    FROM runtime_sessions session
+    JOIN runtime_nodes node ON node.node_id = session.node_id
+    JOIN agent_tokens credential
+      ON credential.id = session.credential_id
+     AND credential.agent_id = session.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = session.runtime_contract_id
+     AND contract.runtime_contract_digest = session.runtime_contract_digest
+     AND contract.is_current
+    WHERE session.agent_id = a.id
+      AND session.status = 'active'
+      AND session.attached_core_instance_id IS NOT NULL
+      AND session.disconnected_at IS NULL
+      AND session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND session.protocol_version = 2
+      AND session.runtime_contract_id = 'openlinker.runtime.v2'
+      AND session.runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f'
+      AND session.features @> ARRAY[
+          'lease_fence', 'assignment_confirm', 'renew', 'resume',
+          'event_ack', 'result_ack', 'cancel', 'persistent_spool'
+      ]::text[]
+      AND node.status = 'active'
+      AND node.revoked_at IS NULL
+      AND node.protocol_version = session.protocol_version
+      AND node.runtime_contract_id = session.runtime_contract_id
+      AND node.runtime_contract_digest = session.runtime_contract_digest
+      AND node.device_certificate_serial = session.device_certificate_serial
+      AND node.node_version = session.node_version
+      AND node.features @> session.features
+      AND session.features @> node.features
+      AND node.last_seen_at IS NOT NULL
+      AND node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND credential.status = 'active_runtime'
+      AND credential.revoked_at IS NULL
+      AND credential.scopes @> ARRAY['agent:pull']::text[]
+      AND (credential.expires_at IS NULL OR credential.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = session.runtime_session_id
+            AND attachment.core_instance_id = session.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
+) runtime_ready ON TRUE
 LEFT JOIN agent_skill_scores s
        ON s.agent_id = ag.agent_id
       AND s.skill_id = ag.skill_id
@@ -203,14 +241,19 @@ WHERE ag.skill_id = ANY($1::text[])
   )
   AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
   AND (
-      COALESCE(av.availability_status, 'unknown') = 'healthy'
-      OR av.last_successful_run_at IS NOT NULL
+      (
+          a.connection_mode = 'agent_node'
+          AND runtime_ready.last_runtime_session_at IS NOT NULL
+      )
       OR (
-          a.connection_mode IN ('runtime_pull', 'runtime_ws')
-          AND rt.last_runtime_token_used_at >= NOW() - INTERVAL '5 minutes'
+          a.connection_mode <> 'agent_node'
+          AND (
+              COALESCE(av.availability_status, 'unknown') = 'healthy'
+              OR av.last_successful_run_at IS NOT NULL
+          )
       )
   )
-GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at, rt.last_runtime_token_used_at
+GROUP BY a.id, a.total_calls, av.availability_status, av.last_successful_run_at, runtime_ready.last_runtime_session_at
 ORDER BY match_count DESC,
     CASE COALESCE(av.availability_status, 'unknown')
     WHEN 'healthy' THEN 0
@@ -220,6 +263,6 @@ ORDER BY match_count DESC,
 END ASC,
     GREATEST(
         COALESCE(av.last_successful_run_at, TIMESTAMPTZ 'epoch'),
-        COALESCE(rt.last_runtime_token_used_at, TIMESTAMPTZ 'epoch')
+        COALESCE(runtime_ready.last_runtime_session_at, TIMESTAMPTZ 'epoch')
     ) DESC,
     verified_count DESC, a.total_calls DESC, a.id;

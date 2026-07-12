@@ -37,7 +37,7 @@ func TestRuntimeSignalOutboxRedisFailureAndRecoveryAgainstPostgres(t *testing.T)
 			id, creator_id, slug, name, description, endpoint_url,
 			price_per_call_cents, connection_mode
 		) VALUES ($1, $2, $3, 'Signal Outbox Agent', 'Signal outbox fixture',
-			'openlinker-runtime-pull://node', 0, 'runtime_pull')`,
+			'openlinker-agent-node://node', 0, 'agent_node')`,
 		agentID, userID, "signal-outbox-"+agentID.String())
 	require.NoError(t, err)
 	t.Cleanup(func() {

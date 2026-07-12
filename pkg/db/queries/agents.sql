@@ -140,7 +140,7 @@ WHERE a.creator_id = $1
         AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
       )
     ) AND NOT (
-      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      a.connection_mode = 'agent_node'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
     ))
     OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
@@ -152,7 +152,7 @@ WHERE a.creator_id = $1
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     ))
@@ -210,7 +210,7 @@ WHERE a.creator_id = $1
         AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
       )
     ) AND NOT (
-      a.connection_mode IN ('runtime_pull', 'runtime_ws')
+      a.connection_mode = 'agent_node'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
     ))
     OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
@@ -222,7 +222,7 @@ WHERE a.creator_id = $1
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     ))
@@ -252,7 +252,7 @@ SELECT
       AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
     )
   ) AND NOT (
-    a.connection_mode IN ('runtime_pull', 'runtime_ws')
+    a.connection_mode = 'agent_node'
     AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
   ))::int AS online,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'public')::int AS public,
@@ -350,7 +350,6 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        u.display_name AS creator_name,
        COALESCE(task_stats.recommended_task_count, 0)::int AS recommended_task_count,
        COALESCE(task_stats.chosen_task_count, 0)::int AS chosen_task_count,
-       COALESCE(task_stats.claimed_task_count, 0)::int AS claimed_task_count,
        COALESCE(task_stats.completed_task_count, 0)::int AS completed_task_count,
        run_stats.last_run_at
 FROM agents a
@@ -359,12 +358,10 @@ LEFT JOIN LATERAL (
     SELECT
         COUNT(*) FILTER (WHERE a.id = ANY(t.recommended_agent_ids))::int AS recommended_task_count,
         COUNT(*) FILTER (WHERE t.chosen_agent_id = a.id)::int AS chosen_task_count,
-        COUNT(*) FILTER (WHERE t.claimed_agent_id = a.id)::int AS claimed_task_count,
-        COUNT(*) FILTER (WHERE t.claimed_agent_id = a.id AND t.completed_at IS NOT NULL)::int AS completed_task_count
+        COUNT(*) FILTER (WHERE t.chosen_agent_id = a.id AND t.completion_run_id IS NOT NULL)::int AS completed_task_count
     FROM task_queries t
     WHERE a.id = ANY(t.recommended_agent_ids)
        OR t.chosen_agent_id = a.id
-       OR t.claimed_agent_id = a.id
 ) task_stats ON TRUE
 LEFT JOIN LATERAL (
     SELECT MAX(started_at) AS last_run_at
@@ -438,13 +435,7 @@ SELECT
   (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'pending') AS pending_agents,
   (SELECT COUNT(*)::int FROM agents WHERE certification_status = 'certified') AS certified_agents,
   (SELECT COUNT(*)::int FROM task_queries) AS total_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE visibility = 'public') AS public_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE visibility = 'private') AS private_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE completed_at IS NULL AND claimed_agent_id IS NULL AND chosen_agent_id IS NULL AND cardinality(recommended_agent_ids) > 0) AS open_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE completed_at IS NULL AND claimed_agent_id IS NOT NULL) AS claimed_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE completed_at IS NOT NULL) AS completed_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE delivery_status = 'accepted') AS accepted_tasks,
-  (SELECT COUNT(*)::int FROM task_queries WHERE delivery_status = 'revision_requested') AS revision_requested_tasks;
+  (SELECT COUNT(*)::int FROM task_queries WHERE completion_run_id IS NOT NULL) AS completed_tasks;
 
 -- ## 模块 3（市场查询 + 详情）
 
@@ -544,7 +535,7 @@ WHERE a.visibility = 'public'
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     )
@@ -559,14 +550,14 @@ ORDER BY CASE
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     ) THEN 0
     ELSE 1
 END ASC,
 CASE
-    WHEN a.connection_mode IN ('runtime_pull', 'runtime_ws')
+    WHEN a.connection_mode = 'agent_node'
       AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       THEN 3
     ELSE CASE COALESCE(av.availability_status, 'unknown')
@@ -636,7 +627,7 @@ WHERE a.visibility = 'public'
         )
       )
       AND NOT (
-        a.connection_mode IN ('runtime_pull', 'runtime_ws')
+        a.connection_mode = 'agent_node'
         AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
       )
     )

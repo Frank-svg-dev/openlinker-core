@@ -148,14 +148,6 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		})).Register(api, jwtMiddleware, opts.AdminMiddleware)
 	}
 	agentSvc.SetDryRunner(runtimeSvc)
-	if cfg.RuntimeEndpointRunWorkerEnabled {
-		go runtime.StartEndpointRunWorker(rootCtx, runtimeSvc, runtime.EndpointRunWorkerConfig{
-			Interval:   time.Duration(cfg.RuntimeEndpointRunWorkerIntervalSeconds) * time.Second,
-			StaleAfter: time.Duration(cfg.RuntimeEndpointRunTimeoutSeconds) * time.Second,
-			RunTimeout: time.Duration(cfg.RunTimeoutSeconds) * time.Second,
-			BatchSize:  clampConfigIntToInt32(cfg.RuntimeEndpointRunWorkerBatchSize),
-		})
-	}
 	if cfg.AvailabilityMonitorEnabled {
 		agent.StartAvailabilityMonitor(rootCtx, agentSvc, agent.AvailabilityMonitorConfig{
 			Interval:     time.Duration(cfg.AvailabilityMonitorIntervalSeconds) * time.Second,
@@ -168,7 +160,6 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	webhookSvc := webhook.NewService(pool, cfg)
 	webhookHandler := webhook.NewHandler(webhookSvc, cfg)
 	webhookHandler.RegisterProtected(api, jwtMiddleware)
-	runtimeSvc.SetWebhookEnqueuer(webhookSvc)
 	runtimeSvc.SetTaskCallbackEnqueuer(webhookSvc)
 	go webhook.StartWorker(rootCtx, webhookSvc)
 
@@ -217,7 +208,6 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	deliverySvc := delivery.NewService(pool, cfg)
 	deliveryHandler := delivery.NewHandler(deliverySvc)
 	deliveryHandler.RegisterProtected(api, jwtMiddleware)
-	runtimeSvc.SetDeliveryEnqueuer(deliverySvc)
 	runtimeSvc.SetRunEffectHandlers(webhookSvc, deliverySvc)
 	if pool != nil {
 		go delivery.StartWorker(rootCtx, deliverySvc)
@@ -257,8 +247,10 @@ func configureRuntimeV2(
 		return
 	}
 	if coreInstanceID == uuid.Nil {
-		coreInstanceID = uuid.New()
+		log.Error().Msg("runtime v2 disabled: Core instance identity is missing")
+		return
 	}
+	runtimeService.ConfigureCoreRuntime(coreInstanceID)
 	sessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
 	cancellations := runtime.NewRuntimeCancellationCoordinator(pool)
@@ -278,16 +270,27 @@ func configureRuntimeV2(
 		delegation = runtime.NewRuntimeV2DelegationService(pool, runtimeService, signer)
 	}
 
+	wakeHub := runtime.NewRuntimeWakeHub()
+	var presence runtime.RuntimePresenceStore
+	if provider, ok := signalBus.(runtime.RuntimePresenceStoreProvider); ok {
+		presence, err = provider.RuntimePresenceStore()
+		if err != nil {
+			log.Warn().Err(err).Msg("runtime v2 Redis presence is unavailable")
+		}
+	}
 	handler.SetRuntimeV2Dependencies(runtime.RuntimeV2HTTPDependencies{
 		TokenValidator:      runtimeService,
 		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
 		Sessions:            sessions,
 		Leases:              leases,
-		EventStore:          runtime.NewRuntimeEventStore(pool),
+		EventProjector:      runtimeService,
 		Finalizer:           runtime.NewResultFinalizer(pool, nil, nil),
 		Resume:              runtime.NewRuntimeResumeService(pool, coreInstanceID, 0),
 		Delegation:          delegation,
 		Cancellations:       cancellations,
+		WakeHub:             wakeHub,
+		Presence:            presence,
+		CoreInstanceID:      coreInstanceID,
 	})
 	go runtime.StartRuntimeV2MaintenanceWorker(
 		rootCtx,
@@ -296,6 +299,7 @@ func configureRuntimeV2(
 		runtime.RuntimeV2MaintenanceWorkerConfig{},
 	)
 	if signalBus != nil {
+		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)
 		go runtime.StartRuntimeSignalOutboxWorker(
 			rootCtx,
 			runtime.NewRuntimeSignalOutboxWorker(db.New(pool), signalBus),

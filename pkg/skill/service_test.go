@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,10 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 )
 
-const truncateSkillTables = "TRUNCATE webhook_deliveries, runs, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
+const truncateSkillTables = "TRUNCATE runtime_session_attachments, runtime_sessions, runtime_nodes, webhook_deliveries, runs, task_queries, agent_tokens, agent_availability_snapshots, agent_skills, agents, users RESTART IDENTITY CASCADE"
 
 func setupSkillTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
@@ -86,8 +88,8 @@ func insertSkillRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, creatorID uui
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, price_per_call_cents,
 			tags, lifecycle_status, visibility, certification_status, total_calls, connection_mode
-		) VALUES ($1, $2, $3, $4, 'Skill test runtime agent', $5, 100, '{data}', 'active', 'public', 'unreviewed', $6, 'runtime_pull')`,
-		id, creatorID, slug, "Skill Runtime "+slug, "openlinker-runtime-pull://"+slug, totalCalls)
+		) VALUES ($1, $2, $3, $4, 'Skill test runtime agent', $5, 100, '{data}', 'active', 'public', 'unreviewed', $6, 'agent_node')`,
+		id, creatorID, slug, "Skill Runtime "+slug, "openlinker-agent-node://"+slug, totalCalls)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),
 		`INSERT INTO agent_tokens (
@@ -96,6 +98,54 @@ func insertSkillRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, creatorID uui
 		uuid.New(), id, creatorID, "ol_agent_"+uuid.NewString()[:8], lastUsedAt)
 	require.NoError(t, err)
 	return id
+}
+
+func insertSkillRuntimeV2Session(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, heartbeatAt time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	var credentialID uuid.UUID
+	require.NoError(t, tx.QueryRow(ctx, `
+SELECT id FROM agent_tokens
+WHERE agent_id = $1 AND status = 'active_runtime'
+ORDER BY created_at DESC LIMIT 1`, agentID).Scan(&credentialID))
+	nodeID := uuid.New()
+	sessionID := uuid.New()
+	coreID := uuid.New()
+	serial := strings.ReplaceAll(nodeID.String(), "-", "")
+	_, err = tx.Exec(ctx, `
+INSERT INTO runtime_nodes (
+    node_id, display_name, device_certificate_serial,
+    device_public_key_thumbprint, node_version, protocol_version,
+    runtime_contract_id, runtime_contract_digest, features,
+    capacity, inflight, status, last_seen_at
+) VALUES ($1, 'Skill Runtime Node', $2, $3, 'skill-v2', 2,
+          $4, $5, $6, 1, 0, 'active', $7)`,
+		nodeID, serial, serial+serial, runtime.RuntimeContractID,
+		runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(), heartbeatAt)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+INSERT INTO runtime_sessions (
+    runtime_session_id, node_id, agent_id, credential_id, worker_id,
+    session_epoch, device_certificate_serial, node_version,
+    protocol_version, runtime_contract_id, runtime_contract_digest,
+    features, capacity, inflight, status, attached_core_instance_id,
+    heartbeat_at
+) VALUES ($1, $2, $3, $4, 'skill-worker', 1, $5, 'skill-v2',
+          2, $6, $7, $8, 1, 0, 'active', $9, $10)`,
+		sessionID, nodeID, agentID, credentialID, serial,
+		runtime.RuntimeContractID, runtime.RuntimeContractDigest,
+		runtime.RuntimeRequiredFeatures(), coreID, heartbeatAt)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+INSERT INTO runtime_session_attachments (
+    runtime_session_id, core_instance_id, attachment_kind
+) VALUES ($1, $2, 'connected')`, sessionID, coreID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 }
 
 func markSkillAgentAvailability(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, status string) {
@@ -169,46 +219,43 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	assert.Equal(t, best, limited[0].AgentID)
 }
 
-func TestRecommendAgentsBySkillsUsesReadinessForRuntimePullAgents(t *testing.T) {
+func TestRecommendAgentsBySkillsUsesCurrentRuntimeV2SessionsForAgentNodes(t *testing.T) {
 	pool := setupSkillTestDB(t)
 	svc := skill.NewService(pool)
 	creatorID := insertSkillCreator(t, pool)
 	ctx := context.Background()
-	recent := time.Now().Add(-2 * time.Minute)
-	stale := time.Now().Add(-10 * time.Minute)
+	recentTokenUse := time.Now().Add(-time.Minute)
 
-	activeRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-active-"+uuid.NewString()[:8], 100, &recent)
-	staleRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-stale-"+uuid.NewString()[:8], 1000, &stale)
-	freshRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-fresh-"+uuid.NewString()[:8], 500, &recent)
-	neverHeartbeat := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-never-"+uuid.NewString()[:8], 1000, nil)
-	unreachableRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-down-"+uuid.NewString()[:8], 2000, &recent)
+	readyRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-ready-"+uuid.NewString()[:8], 100, nil)
+	tokenOnlyRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-token-only-"+uuid.NewString()[:8], 1000, &recentTokenUse)
+	staleSessionRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-stale-session-"+uuid.NewString()[:8], 500, &recentTokenUse)
+	unreachableRuntime := insertSkillRuntimePullAgent(t, pool, creatorID, "skill-runtime-down-"+uuid.NewString()[:8], 2000, nil)
 	betterDirect := insertSkillAgent(t, pool, creatorID, "skill-direct-better-"+uuid.NewString()[:8], "approved", 1)
 	direct := insertSkillAgent(t, pool, creatorID, "skill-direct-"+uuid.NewString()[:8], "approved", 1)
-	markSkillAgentAvailability(t, pool, activeRuntime, "healthy")
-	markSkillAgentAvailability(t, pool, staleRuntime, "healthy")
 	markSkillAgentAvailability(t, pool, unreachableRuntime, "unreachable")
 	markSkillAgentAvailability(t, pool, betterDirect, "healthy")
 	markSkillAgentAvailability(t, pool, direct, "healthy")
+	insertSkillRuntimeV2Session(t, pool, readyRuntime, time.Now())
+	insertSkillRuntimeV2Session(t, pool, staleSessionRuntime, time.Now().Add(-time.Minute))
+	insertSkillRuntimeV2Session(t, pool, unreachableRuntime, time.Now())
 
 	require.NoError(t, svc.SetAgentSkills(ctx, betterDirect, []string{"data/sql-query", "data/analysis"}))
-	require.NoError(t, svc.SetAgentSkills(ctx, activeRuntime, []string{"data/sql-query"}))
-	require.NoError(t, svc.SetAgentSkills(ctx, staleRuntime, []string{"data/sql-query"}))
-	require.NoError(t, svc.SetAgentSkills(ctx, freshRuntime, []string{"data/sql-query"}))
-	require.NoError(t, svc.SetAgentSkills(ctx, neverHeartbeat, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, readyRuntime, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, tokenOnlyRuntime, []string{"data/sql-query"}))
+	require.NoError(t, svc.SetAgentSkills(ctx, staleSessionRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, unreachableRuntime, []string{"data/sql-query"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, direct, []string{"data/sql-query"}))
 
 	matches, err := svc.RecommendAgentsBySkills(ctx, []string{"data/sql-query", "data/analysis"}, 10)
 	require.NoError(t, err)
-	require.Len(t, matches, 5)
+	require.Len(t, matches, 3)
 	assert.Equal(t, betterDirect, matches[0].AgentID)
 	assert.Equal(t, int32(2), matches[0].MatchCount)
-	assert.Equal(t, activeRuntime, matches[1].AgentID)
-	assert.Equal(t, staleRuntime, matches[2].AgentID)
-	assert.Equal(t, direct, matches[3].AgentID)
-	assert.Equal(t, freshRuntime, matches[4].AgentID)
-	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID, matches[3].AgentID, matches[4].AgentID}
-	assert.NotContains(t, recommendedIDs, neverHeartbeat)
+	assert.Equal(t, direct, matches[1].AgentID)
+	assert.Equal(t, readyRuntime, matches[2].AgentID, "a current ready Session must qualify even when Agent Token last_used_at is NULL")
+	recommendedIDs := []uuid.UUID{matches[0].AgentID, matches[1].AgentID, matches[2].AgentID}
+	assert.NotContains(t, recommendedIDs, tokenOnlyRuntime, "recent Agent Token use is not online evidence")
+	assert.NotContains(t, recommendedIDs, staleSessionRuntime)
 	assert.NotContains(t, recommendedIDs, unreachableRuntime)
 }
 

@@ -35,9 +35,6 @@ var permissionResourceTypes = map[string]string{
 	"tasks:read":          "task",
 	"tasks:create":        "task",
 	"tasks:run":           "task",
-	"tasks:publish":       "task",
-	"tasks:work":          "task",
-	"tasks:review":        "task",
 	"workflows:read":      "workflow",
 	"workflows:manage":    "workflow",
 	"workflows:run":       "workflow",
@@ -475,9 +472,6 @@ func grantsFromLegacyScopes(scopes []string) ([]auth.Grant, error) {
 	requests := make([]GrantRequest, 0, len(scopes))
 	for _, raw := range scopes {
 		permission := strings.TrimSpace(raw)
-		if permission == "tasks:write" {
-			permission = "tasks:create"
-		}
 		requests = append(requests, GrantRequest{Permission: permission})
 	}
 	return normalizeGrantRequests(requests)
