@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,41 +24,11 @@ func TestAPIClientDoWithHeadersSkipsContextCancellationMetric(t *testing.T) {
 	ctx, cancel := context.WithCancel(withMetrics(context.Background(), m))
 	cancel()
 
-	if _, _, err := api.doWithHeaders(ctx, "runtime-claim", http.MethodGet, "/agent-runtime/runs/claim", nil, "", nil); err == nil {
+	if _, _, err := api.doWithHeaders(ctx, "runtime-v2-claim", http.MethodPost, "/agent-runtime/v2/runs/claim", nil, "", nil); err == nil {
 		t.Fatal("expected context cancellation error")
 	}
 	if got := len(m.httpOps); got != 0 {
 		t.Fatalf("http metric count = %d, want 0", got)
-	}
-}
-
-func TestWebSocketDialErrorIncludesResponseDetails(t *testing.T) {
-	err := websocketDialError(errors.New("websocket: bad handshake"), &http.Response{
-		Status: "429 Too Many Requests",
-		Header: http.Header{
-			"Content-Type": []string{"application/json"},
-			"Retry-After":  []string{"5"},
-		},
-		Body: io.NopCloser(strings.NewReader(`{"code":"RATE_LIMITED","message":"slow down"}`)),
-	})
-	got := err.Error()
-	for _, want := range []string{
-		"websocket: bad handshake",
-		"status=429 Too Many Requests",
-		"retry_after=5",
-		"content_type=application/json",
-		`body={"code":"RATE_LIMITED","message":"slow down"}`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("websocketDialError = %q, missing %q", got, want)
-		}
-	}
-}
-
-func TestRetryAfterDurationAllowsImmediateRetry(t *testing.T) {
-	got := retryAfterDuration(http.Header{"Retry-After": []string{"0"}}, 30*time.Second)
-	if got != 0 {
-		t.Fatalf("retryAfterDuration = %s, want 0", got)
 	}
 }
 
@@ -128,51 +98,27 @@ func TestEnsureAccountUsesVerificationCodeAndLoginAfterRegister(t *testing.T) {
 	}
 }
 
-func TestWaitForWSHeartbeatAcksReturnsWhenCountsMatch(t *testing.T) {
-	m := &metrics{}
-	m.c.wsHeartbeats.Store(2)
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		m.c.wsHeartbeatAcks.Store(2)
-	}()
-
-	if err := waitForWSHeartbeatAcks(context.Background(), m, time.Second); err != nil {
-		t.Fatalf("waitForWSHeartbeatAcks error = %v", err)
-	}
-}
-
-func TestWaitForWSHeartbeatAcksTimesOutWhenCountsMismatch(t *testing.T) {
-	m := &metrics{}
-	m.c.wsHeartbeats.Store(2)
-	m.c.wsHeartbeatAcks.Store(1)
-
-	if err := waitForWSHeartbeatAcks(context.Background(), m, 20*time.Millisecond); err == nil {
-		t.Fatal("expected heartbeat ack wait timeout")
-	}
-}
-
-func TestEffectivePullClaimWaitLeavesRequestTimeoutBuffer(t *testing.T) {
-	got := effectivePullClaimWait(config{
-		PullClaimWait:  19 * time.Second,
-		RequestTimeout: 20 * time.Second,
-	})
-	if got != 5*time.Second {
-		t.Fatalf("effectivePullClaimWait = %s, want 5s", got)
-	}
-}
-
 func TestConfigValidateDerivesSetupConcurrency(t *testing.T) {
+	directory := t.TempDir()
+	cert := filepath.Join(directory, "node.crt")
+	key := filepath.Join(directory, "node.key")
+	ca := filepath.Join(directory, "server-ca.crt")
+	for _, path := range []string{cert, key, ca} {
+		if err := os.WriteFile(path, []byte("test"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := config{
-		APIRoot:          "http://127.0.0.1:8080/api/v1",
-		Mode:             "runtime_ws",
-		Users:            1,
-		Agents:           1,
-		WorkersPerAgent:  1,
-		Runs:             1,
-		RunConcurrency:   1,
-		SetupConcurrency: 16,
-		Timeout:          time.Second,
-		RequestTimeout:   time.Second,
+		APIRoot: "http://127.0.0.1:8080/api/v1", RuntimeURL: "https://runtime.example.test",
+		Transport: transportAuto, Scenarios: []string{"baseline"},
+		NodeID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", NodeVersion: runtimeLoadtestNodeVersion,
+		MTLSCertFile: cert, MTLSKeyFile: key, MTLSCAFile: ca, StateDir: directory,
+		Users: 1, Agents: 1, WorkersPerAgent: 1, Runs: 1,
+		RunConcurrency: 1, SetupConcurrency: 16,
+		Timeout: time.Second, RequestTimeout: time.Second, ReadyTimeout: time.Second,
+		PullWait: time.Second, CommandWait: time.Second,
+		HeartbeatInterval: time.Second, WSProbeInterval: time.Second,
+		CancelConcurrency: 1,
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -350,30 +296,6 @@ func TestMeasuredTimelineCountsCreateFailuresWithoutCreatedAt(t *testing.T) {
 	buckets := timeline["buckets"].([]map[string]any)
 	if got := buckets[0]["failed"]; got != 1 {
 		t.Fatalf("bucket failed = %v, want 1", got)
-	}
-}
-
-func TestWSReadyReportBuildsLatencyStatsAndTimeline(t *testing.T) {
-	start := time.Date(2026, 7, 5, 8, 0, 0, 0, time.UTC)
-	m := &metrics{startedAt: start}
-	m.startWSReadyWindow(start)
-	m.recordWSReady(start.Add(100 * time.Millisecond))
-	m.recordWSReady(start.Add(1500 * time.Millisecond))
-
-	durations, timeline := wsReadyReport(m)
-	stats := summaryStats(durations)
-	if got := stats["count"]; got != 2 {
-		t.Fatalf("ready count = %v, want 2", got)
-	}
-	if got := stats["max"]; got != 1500.0 {
-		t.Fatalf("ready max = %v, want 1500", got)
-	}
-	buckets := timeline["buckets"].([]map[string]any)
-	if len(buckets) != 2 {
-		t.Fatalf("ready bucket count = %d, want 2", len(buckets))
-	}
-	if got := buckets[1]["cumulative"]; got != 2 {
-		t.Fatalf("ready final cumulative = %v, want 2", got)
 	}
 }
 

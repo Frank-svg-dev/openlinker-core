@@ -23,16 +23,27 @@ import (
 	"sync/atomic"
 	"time"
 
+	openlinker "github.com/OpenLinker-ai/openlinker-go"
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type config struct {
 	APIRoot               string
+	RuntimeURL            string
+	RuntimeURLSecondary   string
 	DatabaseURL           string
-	Mode                  string
+	Transport             string
+	Scenarios             []string
+	NodeID                string
+	NodeVersion           string
+	NodeCapacity          int
+	MTLSCertFile          string
+	MTLSKeyFile           string
+	MTLSCAFile            string
+	MTLSServerName        string
+	StateDir              string
 	Users                 int
 	Agents                int
 	WorkersPerAgent       int
@@ -50,12 +61,23 @@ type config struct {
 	Timeout               time.Duration
 	ReadyTimeout          time.Duration
 	RequestTimeout        time.Duration
-	PullClaimWait         time.Duration
-	WSHeartbeat           time.Duration
-	WSConnectStagger      time.Duration
+	PullWait              time.Duration
+	CommandWait           time.Duration
+	HeartbeatInterval     time.Duration
+	WSProbeInterval       time.Duration
+	ConnectStagger        time.Duration
+	SwitchAfter           time.Duration
+	SwitchBackAfter       time.Duration
+	CancelCount           int
+	CancelConcurrency     int
+	CancelDelay           time.Duration
+	DropACKResponses      []string
+	DuplicateAssignments  int
+	StaleFenceProbes      int
+	RedisOutageObserve    time.Duration
 	HoldAfter             time.Duration
 	Output                string
-	InsecureTLS           bool
+	APIInsecureTLS        bool
 	FailOnIncomplete      bool
 }
 
@@ -91,18 +113,22 @@ type httpMetric struct {
 }
 
 type runRecord struct {
-	ClientID    string
-	RunID       string
-	AgentID     string
-	UserID      string
-	RootContext string
-	Phase       string
-	SubmittedAt time.Time
-	CreatedAt   time.Time
-	AssignedAt  time.Time
-	CompletedAt time.Time
-	CreateErr   string
-	ResultErr   string
+	ClientID          string
+	RunID             string
+	AgentID           string
+	UserID            string
+	RootContext       string
+	Phase             string
+	SubmittedAt       time.Time
+	CreatedAt         time.Time
+	AssignedAt        time.Time
+	CompletedAt       time.Time
+	CancelRequestedAt time.Time
+	CancelCommandAt   time.Time
+	CancelAckAt       time.Time
+	Outcome           string
+	CreateErr         string
+	ResultErr         string
 }
 
 type runTracker struct {
@@ -200,6 +226,69 @@ func (t *runTracker) markCompleted(runID string, at time.Time, errText string) {
 	r.ResultErr = errText
 }
 
+func (t *runTracker) markOutcome(runID, outcome string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.byRun[runID]; r != nil {
+		r.Outcome = outcome
+	}
+}
+
+func (t *runTracker) markCancelRequested(runID string, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.byRun[runID]; r != nil && r.CancelRequestedAt.IsZero() {
+		r.CancelRequestedAt = at
+	}
+}
+
+func (t *runTracker) markCancelCommand(runID string, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.byRun[runID]; r != nil && r.CancelCommandAt.IsZero() {
+		r.CancelCommandAt = at
+	}
+}
+
+func (t *runTracker) markCancelAck(runID string, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.byRun[runID]; r != nil && r.CancelAckAt.IsZero() {
+		r.CancelAckAt = at
+	}
+}
+
+func (t *runTracker) cancelRequestedAt(runID string) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.byRun[runID]; r != nil {
+		return r.CancelRequestedAt
+	}
+	return time.Time{}
+}
+
+func (t *runTracker) submittedAt(clientID, runID string) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if r := t.byRun[runID]; r != nil && !r.SubmittedAt.IsZero() {
+		return r.SubmittedAt
+	}
+	if r := t.byClient[clientID]; r != nil {
+		return r.SubmittedAt
+	}
+	return time.Time{}
+}
+
+func (t *runTracker) runSnapshot(runID string) (runRecord, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r := t.byRun[runID]
+	if r == nil {
+		return runRecord{}, false
+	}
+	return *r, true
+}
+
 func (t *runTracker) snapshot() []*runRecord {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -246,20 +335,8 @@ func (t *runTracker) phaseRunIDs(phase string) []string {
 }
 
 type counters struct {
-	wsConnected       atomic.Int64
-	wsReady           atomic.Int64
-	wsReconnects      atomic.Int64
-	wsDisconnects     atomic.Int64
-	wsPings           atomic.Int64
-	wsHeartbeats      atomic.Int64
-	wsHeartbeatAcks   atomic.Int64
-	wsMessages        atomic.Int64
-	wsErrors          atomic.Int64
-	pullClaims        atomic.Int64
-	pullEmpty         atomic.Int64
+	workersReady      atomic.Int64
 	assignments       atomic.Int64
-	resultAttempts    atomic.Int64
-	resultAccepted    atomic.Int64
 	workerErrors      atomic.Int64
 	unknownAssignment atomic.Int64
 }
@@ -268,12 +345,11 @@ type metrics struct {
 	startedAt time.Time
 	endedAt   time.Time
 
-	mu               sync.Mutex
-	httpOps          []httpMetric
-	wsReadyStartedAt time.Time
-	wsReadyAt        []time.Time
-	wsErrorSamples   []string
-	c                counters
+	mu           sync.Mutex
+	httpOps      []httpMetric
+	errorSamples []string
+	c            counters
+	runtime      *runtimeV2Metrics
 }
 
 type phaseTimestamps struct {
@@ -590,50 +666,23 @@ func (m *metrics) recordHTTP(op string, status int, d time.Duration, err error) 
 	m.mu.Unlock()
 }
 
-func (m *metrics) startWSReadyWindow(at time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.wsReadyStartedAt = at
-}
-
-func (m *metrics) recordWSReady(at time.Time) {
-	m.c.wsReady.Add(1)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.wsReadyStartedAt.IsZero() {
-		m.wsReadyStartedAt = m.startedAt
-	}
-	m.wsReadyAt = append(m.wsReadyAt, at)
-}
-
-func (m *metrics) wsReadySnapshot() (time.Time, []time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	start := m.wsReadyStartedAt
-	if start.IsZero() {
-		start = m.startedAt
-	}
-	out := append([]time.Time{}, m.wsReadyAt...)
-	return start, out
-}
-
-func (m *metrics) recordWSError(err error) {
-	m.c.wsErrors.Add(1)
+func (m *metrics) recordWorkerError(err error) {
+	m.c.workerErrors.Add(1)
 	if err == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if len(m.wsErrorSamples) >= 10 {
+	if len(m.errorSamples) >= 10 {
 		return
 	}
-	m.wsErrorSamples = append(m.wsErrorSamples, err.Error())
+	m.errorSamples = append(m.errorSamples, err.Error())
 }
 
-func (m *metrics) wsErrorSampleSnapshot() []string {
+func (m *metrics) errorSampleSnapshot() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]string{}, m.wsErrorSamples...)
+	return append([]string{}, m.errorSamples...)
 }
 
 func main() {
@@ -642,11 +691,15 @@ func main() {
 		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
 		os.Exit(2)
 	}
+	if err := preflightRuntimeV2Credentials(cfg); err != nil {
+		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
+		os.Exit(2)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
-	m := &metrics{startedAt: time.Now()}
+	m := &metrics{startedAt: time.Now(), runtime: newRuntimeV2Metrics()}
 	ctx = withMetrics(ctx, m)
 	tracker := newRunTracker()
 	api := newAPIClient(cfg)
@@ -677,38 +730,33 @@ func main() {
 	}
 
 	workerCtx, stopWorkers := context.WithCancel(ctx)
-	var stopWSHeartbeats chan struct{}
-	if cfg.Mode == "runtime_ws" && cfg.WSHeartbeat > 0 {
-		stopWSHeartbeats = make(chan struct{})
-	}
 	var workerWG sync.WaitGroup
-	if cfg.Mode == "runtime_ws" {
-		m.startWSReadyWindow(time.Now())
-	}
 	phases.workersStart = time.Now()
 	workerOrdinal := 0
 	for _, agent := range agents {
 		for i, token := range agent.RuntimeKeys {
 			connectDelay := time.Duration(0)
-			if cfg.Mode == "runtime_ws" && cfg.WSConnectStagger > 0 {
-				connectDelay = time.Duration(workerOrdinal) * cfg.WSConnectStagger
+			if cfg.ConnectStagger > 0 {
+				connectDelay = time.Duration(workerOrdinal) * cfg.ConnectStagger
 			}
 			workerOrdinal++
+			worker, workerErr := newRuntimeV2Worker(cfg, agent, token, i, tracker, m)
+			if workerErr != nil {
+				stopWorkers()
+				workerWG.Wait()
+				fail(workerErr)
+			}
 			workerWG.Add(1)
-			go func(agent agentRef, token string, workerIndex int, connectDelay time.Duration) {
+			go func(worker *runtimeV2Worker, connectDelay time.Duration) {
 				defer workerWG.Done()
-				if cfg.Mode == "runtime_pull" {
-					runPullWorker(workerCtx, api, cfg, agent, token, workerIndex, tracker, m)
-					return
-				}
 				if connectDelay > 0 {
 					sleepContext(workerCtx, connectDelay)
 					if workerCtx.Err() != nil {
 						return
 					}
 				}
-				runWebSocketWorker(workerCtx, api, cfg, agent, token, workerIndex, tracker, m, stopWSHeartbeats)
-			}(agent, token, i, connectDelay)
+				worker.run(workerCtx)
+			}(worker, connectDelay)
 		}
 	}
 
@@ -718,6 +766,13 @@ func main() {
 		fail(err)
 	}
 	phases.workersReady = time.Now()
+	if cfg.hasScenario("redis-signal-outage") {
+		if err := waitForRedisSignalOutage(ctx, api, cfg.RedisOutageObserve, m.runtime); err != nil {
+			stopWorkers()
+			workerWG.Wait()
+			fail(err)
+		}
+	}
 	if cfg.HistoryPerAgent > 0 {
 		phases.historyStart = time.Now()
 		if err := submitRuns(ctx, api, cfg, agents, tracker, m, "history", cfg.HistoryPerAgent*len(agents), 1); err != nil {
@@ -740,7 +795,14 @@ func main() {
 		workerWG.Wait()
 		fail(err)
 	}
+	var cancelErr error
+	if cfg.CancelCount > 0 {
+		cancelErr = driveRuntimeV2Cancellations(ctx, api, cfg, accounts, tracker, m)
+	}
 	waitErr := waitForMeasuredPhase(ctx, cfg, tracker, cfg.Runs, cfg.Timeout)
+	if waitErr == nil && cancelErr != nil {
+		waitErr = cancelErr
+	}
 	measuredEnd := time.Now()
 	phases.measuredEnd = measuredEnd
 
@@ -753,11 +815,6 @@ func main() {
 		holdEnd = time.Now()
 		phases.holdEnd = holdEnd
 	}
-	if stopWSHeartbeats != nil {
-		close(stopWSHeartbeats)
-		_ = waitForWSHeartbeatAcks(ctx, m, 5*time.Second)
-	}
-
 	stopWorkers()
 	workerWG.Wait()
 	m.endedAt = time.Now()
@@ -788,93 +845,162 @@ func main() {
 
 func parseFlags() config {
 	cfg := config{}
-	flag.StringVar(&cfg.APIRoot, "api", envDefault("OPENLINKER_API_ROOT", "http://127.0.0.1:8080/api/v1"), "OpenLinker Core API root")
+	var scenarios string
+	var dropACKResponses string
+	flag.StringVar(&cfg.APIRoot, "api", envDefault("OPENLINKER_API_ROOT", "http://127.0.0.1:8080/api/v1"), "OpenLinker Core user/API root")
+	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_CORE_V2_URL"), "required dedicated Runtime v2 mTLS origin (https)")
+	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_CORE_V2_URL_SECONDARY"), "second Runtime v2 mTLS origin for Core A→B resume")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
-	flag.StringVar(&cfg.Mode, "mode", envDefault("OPENLINKER_RUNTIME_LOADTEST_MODE", "runtime_ws"), "runtime_ws or runtime_pull")
+	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime v2 transport: ws, pull, or auto")
+	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime v2 scenarios; see cmd/runtime-loadtest/README.md")
+	flag.StringVar(&cfg.NodeID, "node-id", os.Getenv("OPENLINKER_NODE_ID"), "required enrolled Runtime Node UUID from the client certificate")
+	flag.StringVar(&cfg.NodeVersion, "node-version", envDefault("OPENLINKER_RUNTIME_LOADTEST_NODE_VERSION", runtimeLoadtestNodeVersion), "exact version registered for the Runtime Node")
+	flag.IntVar(&cfg.NodeCapacity, "node-capacity", intEnv("OPENLINKER_RUNTIME_LOADTEST_NODE_CAPACITY", 0), "Node capacity; defaults to agents × workers-per-agent")
+	flag.StringVar(&cfg.MTLSCertFile, "runtime-mtls-cert", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_CERT_FILE"), "required Runtime Node client certificate PEM")
+	flag.StringVar(&cfg.MTLSKeyFile, "runtime-mtls-key", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_KEY_FILE"), "required Runtime Node private key PEM")
+	flag.StringVar(&cfg.MTLSCAFile, "runtime-mtls-ca", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_CA_FILE"), "required Runtime server trust CA PEM")
+	flag.StringVar(&cfg.MTLSServerName, "runtime-mtls-server-name", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_SERVER_NAME"), "optional Runtime TLS server-name override")
+	flag.StringVar(&cfg.StateDir, "state-dir", envDefault("OPENLINKER_RUNTIME_LOADTEST_STATE_DIR", filepath.Join(defaultReportBaseDir(), ".openlinker-dev", "performance", "runtime-loadtest-state")), "durable Runtime v2 Attempt/Event/Result journal directory")
 	flag.IntVar(&cfg.Users, "users", intEnv("OPENLINKER_RUNTIME_LOADTEST_USERS", 1), "number of creator/caller users")
 	flag.IntVar(&cfg.Agents, "agents", intEnv("OPENLINKER_RUNTIME_LOADTEST_AGENTS", 10), "number of runtime agents")
-	flag.IntVar(&cfg.WorkersPerAgent, "workers-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_WORKERS_PER_AGENT", 1), "runtime tokens and WS/pull workers per agent")
+	flag.IntVar(&cfg.WorkersPerAgent, "workers-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_WORKERS_PER_AGENT", 1), "Runtime v2 Agent Token workers per Agent")
 	flag.IntVar(&cfg.Runs, "runs", intEnv("OPENLINKER_RUNTIME_LOADTEST_RUNS", 100), "measured runs to submit")
 	flag.IntVar(&cfg.RunConcurrency, "run-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_RUN_CONCURRENCY", 20), "concurrent run submissions")
 	flag.IntVar(&cfg.SetupConcurrency, "setup-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_SETUP_CONCURRENCY", 16), "concurrent disposable user/agent setup operations")
 	flag.IntVar(&cfg.SetupUserConcurrency, "setup-user-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_SETUP_USER_CONCURRENCY", 0), "concurrent disposable user setup operations; default min(setup-concurrency, 8)")
 	flag.IntVar(&cfg.SetupAgentConcurrency, "setup-agent-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_SETUP_AGENT_CONCURRENCY", 0), "concurrent disposable agent setup operations; default setup-concurrency")
-	flag.IntVar(&cfg.EventsPerRun, "events-per-run", intEnv("OPENLINKER_RUNTIME_LOADTEST_EVENTS_PER_RUN", 1), "progress events each worker writes before result")
-	flag.DurationVar(&cfg.ResultDelay, "result-delay", durationEnv("OPENLINKER_RUNTIME_LOADTEST_RESULT_DELAY", 0), "artificial worker delay before result, e.g. 50ms")
-	flag.DurationVar(&cfg.SubmitDuration, "submit-duration", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SUBMIT_DURATION", 0), "spread measured run submissions across this duration instead of submitting as fast as possible")
-	flag.IntVar(&cfg.HistoryPerAgent, "history-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_HISTORY_PER_AGENT", 0), "completed prior A2A-context runs per agent before measured phase")
-	flag.BoolVar(&cfg.ContextMode, "a2a-context", boolEnv("OPENLINKER_RUNTIME_LOADTEST_A2A_CONTEXT", true), "include A2A context ids so assignment builds conversation context")
-	flag.StringVar(&cfg.AccountRunID, "account-run-id", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_ACCOUNT_RUN_ID"), "reuse accounts from a previous run id while creating fresh agents/runs")
+	flag.IntVar(&cfg.EventsPerRun, "events-per-run", intEnv("OPENLINKER_RUNTIME_LOADTEST_EVENTS_PER_RUN", 1), "durable Runtime v2 Events per Run")
+	flag.DurationVar(&cfg.ResultDelay, "result-delay", durationEnv("OPENLINKER_RUNTIME_LOADTEST_RESULT_DELAY", 0), "artificial execution delay before Result")
+	flag.DurationVar(&cfg.SubmitDuration, "submit-duration", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SUBMIT_DURATION", 0), "spread measured run submissions across this duration")
+	flag.IntVar(&cfg.HistoryPerAgent, "history-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_HISTORY_PER_AGENT", 0), "completed prior A2A-context runs per Agent")
+	flag.BoolVar(&cfg.ContextMode, "a2a-context", boolEnv("OPENLINKER_RUNTIME_LOADTEST_A2A_CONTEXT", true), "include A2A context IDs")
+	flag.StringVar(&cfg.AccountRunID, "account-run-id", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_ACCOUNT_RUN_ID"), "reuse accounts from a previous run ID")
 	flag.DurationVar(&cfg.Timeout, "timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_TIMEOUT", 2*time.Minute), "overall timeout")
-	flag.DurationVar(&cfg.ReadyTimeout, "ready-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_READY_TIMEOUT", 30*time.Second), "timeout for runtime_ws workers to report runtime.ready")
-	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_REQUEST_TIMEOUT", 20*time.Second), "per HTTP request timeout")
-	flag.DurationVar(&cfg.PullClaimWait, "pull-claim-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_PULL_CLAIM_WAIT", 25*time.Second), "runtime_pull long-poll wait; capped below request-timeout")
-	flag.DurationVar(&cfg.WSHeartbeat, "ws-heartbeat", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_HEARTBEAT", 60*time.Second), "runtime_ws application heartbeat interval; set 0 to disable")
-	flag.DurationVar(&cfg.WSConnectStagger, "ws-connect-stagger", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_CONNECT_STAGGER", 0), "delay increment between runtime_ws worker connection attempts, e.g. 100ms")
-	flag.DurationVar(&cfg.HoldAfter, "hold-after-completion", durationEnv("OPENLINKER_RUNTIME_LOADTEST_HOLD_AFTER_COMPLETION", 0), "keep runtime workers connected after measured runs complete, for soak checks")
-	flag.StringVar(&cfg.Output, "output", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_OUTPUT"), "JSON report path; default .openlinker-dev/performance/runtime-loadtest-<timestamp>.json")
-	flag.BoolVar(&cfg.InsecureTLS, "insecure-tls", boolEnv("OPENLINKER_RUNTIME_LOADTEST_INSECURE_TLS", false), "skip TLS verification for test hosts")
-	flag.BoolVar(&cfg.FailOnIncomplete, "fail-on-incomplete", boolEnv("OPENLINKER_RUNTIME_LOADTEST_FAIL_ON_INCOMPLETE", true), "exit non-zero when measured runs do not complete")
+	flag.DurationVar(&cfg.ReadyTimeout, "ready-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_READY_TIMEOUT", 30*time.Second), "timeout for authenticated Runtime v2 hello/ready")
+	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_REQUEST_TIMEOUT", 20*time.Second), "per user/API request timeout")
+	flag.DurationVar(&cfg.PullWait, "pull-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_PULL_WAIT", 5*time.Second), "Runtime v2 assignment long-poll wait (1s-30s)")
+	flag.DurationVar(&cfg.CommandWait, "command-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_COMMAND_WAIT", time.Second), "Runtime v2 command long-poll wait (1s-30s)")
+	flag.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_HEARTBEAT_INTERVAL", 15*time.Second), "Pull session heartbeat / WS liveness interval")
+	flag.DurationVar(&cfg.WSProbeInterval, "ws-probe-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_PROBE_INTERVAL", 10*time.Second), "auto-mode interval before probing WebSocket recovery")
+	flag.DurationVar(&cfg.ConnectStagger, "connect-stagger", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECT_STAGGER", 0), "delay increment between Runtime v2 worker connections")
+	flag.DurationVar(&cfg.SwitchAfter, "switch-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_AFTER", 5*time.Second), "planned first transport/Core switch after worker start")
+	flag.DurationVar(&cfg.SwitchBackAfter, "switch-back-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_BACK_AFTER", 10*time.Second), "planned Pull→WebSocket switch after worker start")
+	flag.IntVar(&cfg.CancelCount, "cancel-count", intEnv("OPENLINKER_RUNTIME_LOADTEST_CANCEL_COUNT", 0), "number of measured Runs to cancel; cancel-race defaults to 1000")
+	flag.IntVar(&cfg.CancelConcurrency, "cancel-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_CANCEL_CONCURRENCY", 200), "concurrent owner cancellation requests")
+	flag.DurationVar(&cfg.CancelDelay, "cancel-delay", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CANCEL_DELAY", 0), "delay from assignment to owner cancellation")
+	flag.StringVar(&dropACKResponses, "drop-ack-responses", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_DROP_ACK_RESPONSES"), "comma-separated Pull ACK responses to lose once: assignment,event,result,cancel")
+	flag.IntVar(&cfg.DuplicateAssignments, "duplicate-assignments", intEnv("OPENLINKER_RUNTIME_LOADTEST_DUPLICATE_ASSIGNMENTS", 0), "client duplicate-delivery injections per offer")
+	flag.IntVar(&cfg.StaleFenceProbes, "stale-fence-probes", intEnv("OPENLINKER_RUNTIME_LOADTEST_STALE_FENCE_PROBES", 0), "bad fencing-token renew probes per Attempt")
+	flag.DurationVar(&cfg.RedisOutageObserve, "redis-outage-observe", durationEnv("OPENLINKER_RUNTIME_LOADTEST_REDIS_OUTAGE_OBSERVE", 0), "timeout waiting for /readyz to prove the operator-controlled Redis signal outage")
+	flag.DurationVar(&cfg.HoldAfter, "hold-after-completion", durationEnv("OPENLINKER_RUNTIME_LOADTEST_HOLD_AFTER_COMPLETION", 0), "keep Runtime workers connected after completion")
+	flag.StringVar(&cfg.Output, "output", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_OUTPUT"), "JSON report path")
+	flag.BoolVar(&cfg.APIInsecureTLS, "api-insecure-tls", boolEnv("OPENLINKER_RUNTIME_LOADTEST_API_INSECURE_TLS", false), "skip TLS verification only for disposable user/API setup")
+	flag.BoolVar(&cfg.FailOnIncomplete, "fail-on-incomplete", boolEnv("OPENLINKER_RUNTIME_LOADTEST_FAIL_ON_INCOMPLETE", true), "exit non-zero when measured Runs do not complete")
 	flag.Parse()
+	cfg.Scenarios = parseCSV(scenarios)
+	cfg.DropACKResponses = parseCSV(dropACKResponses)
 	return cfg
 }
 
 func (c *config) validate() error {
-	c.Mode = strings.TrimSpace(c.Mode)
-	if c.Mode != "runtime_ws" && c.Mode != "runtime_pull" {
-		return fmt.Errorf("unsupported mode %q", c.Mode)
+	c.Transport = strings.ToLower(strings.TrimSpace(c.Transport))
+	if c.Transport != transportAuto && c.Transport != transportWS && c.Transport != transportPull {
+		return fmt.Errorf("unsupported transport %q", c.Transport)
 	}
 	if c.Users <= 0 || c.Agents <= 0 || c.WorkersPerAgent <= 0 || c.Runs <= 0 {
-		return fmt.Errorf("users, agents, workers-per-agent, and runs must be positive")
+		return errors.New("users, agents, workers-per-agent, and runs must be positive")
 	}
 	if c.WorkersPerAgent > 10 {
-		return fmt.Errorf("workers-per-agent cannot exceed 10 because agent runtime tokens are capped per agent")
+		return errors.New("workers-per-agent cannot exceed the 10 Agent Token limit")
 	}
-	if c.RunConcurrency <= 0 {
-		return fmt.Errorf("run-concurrency must be positive")
+	if c.NodeCapacity == 0 {
+		c.NodeCapacity = c.Agents * c.WorkersPerAgent
 	}
-	if c.SetupConcurrency <= 0 {
-		return fmt.Errorf("setup-concurrency must be positive")
+	if c.NodeCapacity < 1 || c.NodeCapacity > openlinker.RuntimeV2MaxNodeCapacity {
+		return fmt.Errorf("node-capacity must be between 1 and %d", openlinker.RuntimeV2MaxNodeCapacity)
+	}
+	if c.RunConcurrency <= 0 || c.SetupConcurrency <= 0 {
+		return errors.New("run/setup concurrency must be positive")
 	}
 	if c.SetupUserConcurrency < 0 || c.SetupAgentConcurrency < 0 {
-		return fmt.Errorf("setup user/agent concurrency cannot be negative")
+		return errors.New("setup user/agent concurrency cannot be negative")
 	}
 	if c.SetupUserConcurrency == 0 {
-		c.SetupUserConcurrency = c.SetupConcurrency
-		if c.SetupUserConcurrency > 8 {
-			c.SetupUserConcurrency = 8
-		}
+		c.SetupUserConcurrency = min(c.SetupConcurrency, 8)
 	}
 	if c.SetupAgentConcurrency == 0 {
 		c.SetupAgentConcurrency = c.SetupConcurrency
 	}
-	if c.SetupUserConcurrency <= 0 || c.SetupAgentConcurrency <= 0 {
-		return fmt.Errorf("setup user/agent concurrency must be positive")
+	if c.Timeout <= 0 || c.RequestTimeout <= 0 || c.ReadyTimeout <= 0 {
+		return errors.New("timeouts must be positive")
 	}
-	if c.Timeout <= 0 || c.RequestTimeout <= 0 {
-		return fmt.Errorf("timeouts must be positive")
+	if c.HoldAfter < 0 || c.SubmitDuration < 0 || c.ConnectStagger < 0 {
+		return errors.New("hold/submit/connect durations cannot be negative")
 	}
-	if c.HoldAfter < 0 {
-		return fmt.Errorf("hold-after-completion cannot be negative")
+	if c.PullWait < time.Second || c.PullWait > time.Duration(openlinker.RuntimeV2MaxPullWaitSeconds)*time.Second {
+		return fmt.Errorf("pull-wait must be between 1s and %ds", openlinker.RuntimeV2MaxPullWaitSeconds)
 	}
-	if c.SubmitDuration < 0 {
-		return fmt.Errorf("submit-duration cannot be negative")
+	if c.CommandWait < time.Second || c.CommandWait > time.Duration(openlinker.RuntimeV2MaxPullWaitSeconds)*time.Second {
+		return fmt.Errorf("command-wait must be between 1s and %ds", openlinker.RuntimeV2MaxPullWaitSeconds)
 	}
-	if c.WSHeartbeat < 0 {
-		return fmt.Errorf("ws-heartbeat cannot be negative")
-	}
-	if c.WSConnectStagger < 0 {
-		return fmt.Errorf("ws-connect-stagger cannot be negative")
+	if c.HeartbeatInterval <= 0 || c.WSProbeInterval <= 0 {
+		return errors.New("heartbeat and WebSocket probe intervals must be positive")
 	}
 	if _, err := url.ParseRequestURI(c.APIRoot); err != nil {
 		return fmt.Errorf("invalid api root: %w", err)
+	}
+	if err := validateRuntimeOrigin(c.RuntimeURL, "runtime-url"); err != nil {
+		return err
+	}
+	if c.RuntimeURLSecondary != "" {
+		if err := validateRuntimeOrigin(c.RuntimeURLSecondary, "runtime-url-secondary"); err != nil {
+			return err
+		}
+	}
+	if _, err := uuid.Parse(c.NodeID); err != nil {
+		return errors.New("node-id must be the enrolled Runtime Node UUID")
+	}
+	if strings.TrimSpace(c.NodeVersion) == "" {
+		return errors.New("node-version is required")
+	}
+	if strings.TrimSpace(c.StateDir) == "" {
+		return errors.New("state-dir is required for the persistent_spool contract feature")
+	}
+	for _, required := range []struct{ name, value string }{
+		{"runtime-mtls-cert", c.MTLSCertFile}, {"runtime-mtls-key", c.MTLSKeyFile}, {"runtime-mtls-ca", c.MTLSCAFile},
+	} {
+		if strings.TrimSpace(required.value) == "" {
+			return fmt.Errorf("%s is required; Runtime v2 never falls back to token-only transport", required.name)
+		}
+		if info, err := os.Stat(required.value); err != nil || info.IsDir() {
+			return fmt.Errorf("%s is not a readable file", required.name)
+		}
+	}
+	if err := c.applyScenarioDefaults(); err != nil {
+		return err
+	}
+	if c.CancelCount < 0 || c.CancelCount > c.Runs || c.CancelConcurrency <= 0 {
+		return errors.New("cancel-count must be within measured Runs and cancel-concurrency must be positive")
+	}
+	if c.DuplicateAssignments < 0 || c.StaleFenceProbes < 0 {
+		return errors.New("duplicate-assignment and stale-fence counts cannot be negative")
+	}
+	for _, op := range c.DropACKResponses {
+		switch op {
+		case "assignment", "event", "result", "cancel":
+		default:
+			return fmt.Errorf("unsupported dropped ACK response %q", op)
+		}
+	}
+	if len(c.DropACKResponses) > 0 && c.Transport != transportPull {
+		return errors.New("drop-ack-responses requires transport=pull; the strict SDK WebSocket dialer requires its direct TLS transport")
 	}
 	return nil
 }
 
 func newAPIClient(cfg config) *apiClient {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if cfg.InsecureTLS {
+	if cfg.APIInsecureTLS {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit load-test flag for disposable test hosts.
 	}
 	return &apiClient{
@@ -929,7 +1055,7 @@ func setupAgents(ctx context.Context, api *apiClient, cfg config, runID string, 
 			"slug":            slug,
 			"name":            fmt.Sprintf("Perf Agent %s %03d", runID, i),
 			"description":     "Disposable runtime load-test agent",
-			"connection_mode": cfg.Mode,
+			"connection_mode": "agent_node",
 			"visibility":      "private",
 			"tags":            []string{"perf", "runtime"},
 		}, tokenResp.PlaintextToken, &reg); err != nil {
@@ -937,9 +1063,8 @@ func setupAgents(ctx context.Context, api *apiClient, cfg config, runID string, 
 		}
 		agent := reg.Agent
 		agent.Creator = creator
-		agent.RuntimeKeys = append(agent.RuntimeKeys, tokenResp.PlaintextToken)
 
-		for worker := 1; worker < cfg.WorkersPerAgent; worker++ {
+		for worker := 0; worker < cfg.WorkersPerAgent; worker++ {
 			extra := struct {
 				PlaintextToken string `json:"plaintext_token"`
 			}{}
@@ -1285,10 +1410,10 @@ func waitForMeasuredPhase(ctx context.Context, cfg config, tracker *runTracker, 
 			lastDBCheck = time.Now()
 			ids := tracker.phaseRunIDs("measured")
 			if len(ids) >= want {
-				success, statuses, err := countRunsByStatus(ctx, pool, ids)
-				if err == nil && success >= want {
-					return fmt.Errorf("client result ack incomplete after DB success: client_completed=%d db_success=%d want=%d statuses=%s",
-						tracker.phaseCompleted("measured"), success, want, formatStatusCounts(statuses))
+				terminal, statuses, err := countRunsByStatus(ctx, pool, ids)
+				if err == nil && terminal >= want {
+					return fmt.Errorf("client terminal ACK incomplete after DB terminal state: client_completed=%d db_terminal=%d want=%d statuses=%s",
+						tracker.phaseCompleted("measured"), terminal, want, formatStatusCounts(statuses))
 				}
 			}
 		}
@@ -1297,30 +1422,6 @@ func waitForMeasuredPhase(ctx context.Context, cfg config, tracker *runTracker, 
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("timeout waiting for measured completion: got=%d want=%d", tracker.phaseCompleted("measured"), want)
-		case <-ticker.C:
-		}
-	}
-}
-
-func waitForWSHeartbeatAcks(ctx context.Context, m *metrics, timeout time.Duration) error {
-	if m == nil || timeout <= 0 {
-		return nil
-	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(50 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		sent := m.c.wsHeartbeats.Load()
-		acked := m.c.wsHeartbeatAcks.Load()
-		if acked >= sent {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("timeout waiting for websocket heartbeat acks: sent=%d acked=%d", sent, acked)
 		case <-ticker.C:
 		}
 	}
@@ -1345,7 +1446,7 @@ GROUP BY status`, runIDs)
 		}
 		statuses[status] = count
 	}
-	return statuses["success"], statuses, rows.Err()
+	return statuses["success"] + statuses["failed"] + statuses["timeout"] + statuses["canceled"], statuses, rows.Err()
 }
 
 func formatStatusCounts(statuses map[string]int) string {
@@ -1364,361 +1465,13 @@ func formatStatusCounts(statuses map[string]int) string {
 	return strings.Join(parts, ",")
 }
 
-type loadtestWSConn struct {
-	conn *websocket.Conn
-	mu   sync.Mutex
-}
-
-func (c *loadtestWSConn) readJSON(v any) error {
-	return c.conn.ReadJSON(v)
-}
-
-func (c *loadtestWSConn) writeJSON(v any) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteJSON(v)
-}
-
-func (c *loadtestWSConn) writeControl(messageType int, data []byte, deadline time.Time) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.conn.WriteControl(messageType, data, deadline)
-}
-
-func (c *loadtestWSConn) close() error {
-	return c.conn.Close()
-}
-
-func runWebSocketWorker(ctx context.Context, api *apiClient, cfg config, agent agentRef, token string, workerIndex int, tracker *runTracker, m *metrics, heartbeatStop <-chan struct{}) {
-	reconnectDelay := time.Second
-	for ctx.Err() == nil {
-		err := runWebSocketSession(ctx, api, cfg, agent, token, workerIndex, tracker, m, heartbeatStop)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil {
-			m.recordWSError(err)
-			m.c.wsReconnects.Add(1)
-			sleepContext(ctx, reconnectDelay)
-			continue
-		}
-		return
-	}
-}
-
-func runWebSocketSession(ctx context.Context, api *apiClient, cfg config, agent agentRef, token string, workerIndex int, tracker *runTracker, m *metrics, heartbeatStop <-chan struct{}) error {
-	wsURL, err := websocketURL(api.root, "/agent-runtime/ws")
-	if err != nil {
-		m.c.workerErrors.Add(1)
-		return err
-	}
-	dialer := websocket.Dialer{}
-	if cfg.InsecureTLS {
-		dialer.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit load-test flag for disposable test hosts.
-	}
-	header := http.Header{"Authorization": []string{"Bearer " + token}}
-	rawConn, resp, err := dialer.DialContext(ctx, wsURL, header)
-	if err != nil {
-		return websocketDialError(err, resp)
-	}
-	conn := &loadtestWSConn{conn: rawConn}
-	defer func() {
-		m.c.wsDisconnects.Add(1)
-		_ = conn.close()
-	}()
-	rawConn.SetPingHandler(func(appData string) error {
-		m.c.wsPings.Add(1)
-		return conn.writeControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
-	})
-	go func() {
-		<-ctx.Done()
-		_ = conn.close()
-	}()
-	stopHeartbeat := make(chan struct{})
-	defer close(stopHeartbeat)
-	if cfg.WSHeartbeat > 0 {
-		go runWebSocketHeartbeatLoop(ctx, conn, cfg.WSHeartbeat, stopHeartbeat, heartbeatStop, m)
-	}
-	m.c.wsConnected.Add(1)
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		default:
-		}
-		var msg map[string]any
-		if err := conn.readJSON(&msg); err != nil {
-			return err
-		}
-		m.c.wsMessages.Add(1)
-		switch stringValue(msg["type"]) {
-		case "runtime.ready":
-			m.recordWSReady(time.Now())
-		case "runtime.heartbeat":
-			m.c.wsHeartbeatAcks.Add(1)
-		case "run.assigned":
-			m.c.assignments.Add(1)
-			runID := stringValue(msg["run_id"])
-			if err := conn.writeJSON(map[string]any{
-				"type":   "run.assignment.accepted",
-				"id":     uuid.NewString(),
-				"run_id": runID,
-			}); err != nil {
-				m.c.workerErrors.Add(1)
-				tracker.markCompleted(runID, time.Now(), err.Error())
-				return err
-			}
-			input := mapValue(msg["input"])
-			clientID := stringValue(input["client_task_id"])
-			if clientID == "" {
-				m.c.unknownAssignment.Add(1)
-			}
-			tracker.markAssigned(runID, clientID, time.Now())
-			if err := completeViaWS(ctx, conn, cfg, runID, clientID, agent.ID, workerIndex); err != nil {
-				m.c.workerErrors.Add(1)
-				tracker.markCompleted(runID, time.Now(), err.Error())
-				return err
-			} else {
-				m.c.resultAttempts.Add(1)
-			}
-		case "run.result.accepted":
-			runID := stringValue(msg["run_id"])
-			m.c.resultAccepted.Add(1)
-			tracker.markCompleted(runID, time.Now(), "")
-		case "error":
-			raw, _ := json.Marshal(msg["error"])
-			m.recordWSError(fmt.Errorf("server error message: %s", raw))
-		}
-	}
-}
-
-func websocketDialError(err error, resp *http.Response) error {
-	if err == nil || resp == nil {
-		return err
-	}
-	parts := []string{"status=" + resp.Status}
-	if retryAfter := strings.TrimSpace(resp.Header.Get("Retry-After")); retryAfter != "" {
-		parts = append(parts, "retry_after="+retryAfter)
-	}
-	if contentType := strings.TrimSpace(resp.Header.Get("Content-Type")); contentType != "" {
-		parts = append(parts, "content_type="+contentType)
-	}
-	if resp.Body != nil {
-		defer resp.Body.Close()
-		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if readErr == nil {
-			if trimmed := strings.Join(strings.Fields(string(body)), " "); trimmed != "" {
-				parts = append(parts, "body="+trimmed)
-			}
-		}
-	}
-	return fmt.Errorf("%w (%s)", err, strings.Join(parts, ", "))
-}
-
-func runWebSocketHeartbeatLoop(ctx context.Context, conn *loadtestWSConn, interval time.Duration, sessionStop <-chan struct{}, globalStop <-chan struct{}, m *metrics) {
-	if interval <= 0 {
-		return
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-sessionStop:
-			return
-		case <-globalStop:
-			return
-		case <-ticker.C:
-			if err := conn.writeJSON(map[string]any{
-				"type": "heartbeat",
-				"id":   "heartbeat-" + uuid.NewString(),
-			}); err != nil {
-				m.c.wsErrors.Add(1)
-				return
-			}
-			m.c.wsHeartbeats.Add(1)
-		}
-	}
-}
-
-func completeViaWS(ctx context.Context, conn *loadtestWSConn, cfg config, runID, clientID, agentID string, workerIndex int) error {
-	for i := 0; i < cfg.EventsPerRun; i++ {
-		if err := conn.writeJSON(map[string]any{
-			"type":       "run.event",
-			"id":         uuid.NewString(),
-			"run_id":     runID,
-			"event_type": "run.message.delta",
-			"payload": map[string]any{
-				"text":           fmt.Sprintf("worker %d progress %d for %s", workerIndex, i+1, clientID),
-				"client_task_id": clientID,
-			},
-		}); err != nil {
-			return err
-		}
-	}
-	if cfg.ResultDelay > 0 {
-		timer := time.NewTimer(cfg.ResultDelay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return conn.writeJSON(map[string]any{
-		"type":   "run.result",
-		"id":     uuid.NewString(),
-		"run_id": runID,
-		"status": "success",
-		"output": map[string]any{
-			"ok":             true,
-			"agent_id":       agentID,
-			"client_task_id": clientID,
-			"worker_index":   workerIndex,
-		},
-	})
-}
-
-func waitForWorkersReady(ctx context.Context, cfg config, m *metrics, want int) error {
-	if cfg.Mode == "runtime_pull" {
-		time.Sleep(750 * time.Millisecond)
-		return nil
-	}
-	timeout := cfg.ReadyTimeout
-	if timeout <= 0 {
-		timeout = 30 * time.Second
-	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		if int(m.c.wsReady.Load()) >= want {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-deadline.C:
-			return fmt.Errorf("timeout waiting for runtime.ready: got=%d want=%d", m.c.wsReady.Load(), want)
-		case <-ticker.C:
-		}
-	}
-}
-
-func runPullWorker(ctx context.Context, api *apiClient, cfg config, agent agentRef, token string, workerIndex int, tracker *runTracker, m *metrics) {
-	ctx = withMetrics(ctx, m)
-	claimWait := effectivePullClaimWait(cfg)
-	claimPath := fmt.Sprintf("/agent-runtime/runs/claim?wait=%d", int(claimWait.Seconds()))
-	for ctx.Err() == nil {
-		resp := struct {
-			RunID string         `json:"run_id"`
-			Input map[string]any `json:"input"`
-		}{}
-		status, headers, err := api.doWithHeaders(ctx, "runtime-claim", http.MethodGet, claimPath, nil, token, &resp)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			if status == http.StatusTooManyRequests {
-				m.c.pullEmpty.Add(1)
-				sleepContext(ctx, retryAfterDuration(headers, 5*time.Second))
-				continue
-			}
-			if status == http.StatusNoContent {
-				m.c.pullEmpty.Add(1)
-				sleepContext(ctx, retryAfterDuration(headers, 30*time.Second))
-				continue
-			}
-			m.c.workerErrors.Add(1)
-			sleepContext(ctx, time.Second)
-			continue
-		}
-		if status == http.StatusNoContent || resp.RunID == "" {
-			m.c.pullEmpty.Add(1)
-			sleepContext(ctx, retryAfterDuration(headers, 30*time.Second))
-			continue
-		}
-		m.c.pullClaims.Add(1)
-		m.c.assignments.Add(1)
-		clientID := stringValue(resp.Input["client_task_id"])
-		tracker.markAssigned(resp.RunID, clientID, time.Now())
-		sleepContext(ctx, cfg.ResultDelay)
-		m.c.resultAttempts.Add(1)
-		events := make([]map[string]any, 0, cfg.EventsPerRun)
-		for i := 0; i < cfg.EventsPerRun; i++ {
-			events = append(events, map[string]any{
-				"event_type": "run.message.delta",
-				"payload": map[string]any{
-					"text":           fmt.Sprintf("pull worker %d progress %d for %s", workerIndex, i+1, clientID),
-					"client_task_id": clientID,
-				},
-			})
-		}
-		if _, err := api.do(ctx, "runtime-result", http.MethodPost, "/agent-runtime/runs/"+resp.RunID+"/result", map[string]any{
-			"status": "success",
-			"output": map[string]any{
-				"ok":             true,
-				"agent_id":       agent.ID,
-				"client_task_id": clientID,
-				"worker_index":   workerIndex,
-			},
-			"events": events,
-		}, token, nil); err != nil {
-			tracker.markCompleted(resp.RunID, time.Now(), err.Error())
-			continue
-		}
-		m.c.resultAccepted.Add(1)
-		tracker.markCompleted(resp.RunID, time.Now(), "")
-	}
-}
-
-func effectivePullClaimWait(cfg config) time.Duration {
-	wait := cfg.PullClaimWait
-	if wait <= 0 {
-		wait = 25 * time.Second
-	}
-	if cfg.RequestTimeout > time.Second {
-		maxWait := cfg.RequestTimeout / 4
-		if maxWait < time.Second {
-			maxWait = time.Second
-		}
-		if wait > maxWait {
-			wait = maxWait
-		}
-	}
-	if wait < time.Second {
-		wait = time.Second
-	}
-	return wait.Truncate(time.Second)
-}
-
-func retryAfterDuration(headers http.Header, fallback time.Duration) time.Duration {
-	if headers != nil {
-		raw := strings.TrimSpace(headers.Get("Retry-After"))
-		if raw != "" {
-			if seconds, err := strconv.Atoi(raw); err == nil && seconds >= 0 {
-				return time.Duration(seconds) * time.Second
-			}
-			if at, err := http.ParseTime(raw); err == nil {
-				if wait := time.Until(at); wait > 0 {
-					return wait
-				}
-			}
-		}
-	}
-	if fallback <= 0 {
-		return time.Second
-	}
-	return fallback
-}
-
 func buildReport(cfg config, runID, accountRunID string, accounts []account, agents []agentRef, tracker *runTracker, m *metrics, phases phaseTimestamps, waitErr, holdErr error) map[string]any {
 	records := tracker.snapshot()
 	var measured []*runRecord
 	var allCreateDur, assignDur, completeDur, resultAckDur []float64
 	failed := 0
+	succeeded := 0
+	canceled := 0
 	submitted := 0
 	assigned := 0
 	completed := 0
@@ -1730,6 +1483,12 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		submitted++
 		if r.CreateErr != "" || r.ResultErr != "" {
 			failed++
+		}
+		switch r.Outcome {
+		case "success":
+			succeeded++
+		case "canceled":
+			canceled++
 		}
 		if !r.CreatedAt.IsZero() && !r.SubmittedAt.IsZero() {
 			allCreateDur = append(allCreateDur, ms(r.CreatedAt.Sub(r.SubmittedAt)))
@@ -1773,13 +1532,25 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		}
 		statusByOp[item.Op][key]++
 	}
-	wsReadyDur, wsReadyTimeline := wsReadyReport(m)
+	runtimeReport := m.runtime.report(cfg)
+	safety := runtimeReport["safety"].(map[string]any)
+	safetyOK := safety["duplicate_execution"].(int) == 0 && safety["stale_fence_accepts"].(int) == 0 && runtimeReport["all_assertions_passed"].(bool)
+	runtimeOrigins := []string{cfg.RuntimeURL}
+	if cfg.RuntimeURLSecondary != "" {
+		runtimeOrigins = append(runtimeOrigins, cfg.RuntimeURLSecondary)
+	}
 	report := map[string]any{
-		"ok":                      waitErr == nil && holdErr == nil && failed == 0 && completed == cfg.Runs,
+		"ok":                      waitErr == nil && holdErr == nil && failed == 0 && completed == cfg.Runs && safetyOK,
 		"run_id":                  runID,
 		"account_run_id":          accountRunID,
 		"api_root":                cfg.APIRoot,
-		"mode":                    cfg.Mode,
+		"runtime_origins":         runtimeOrigins,
+		"transport":               cfg.Transport,
+		"scenarios":               cfg.Scenarios,
+		"node_id":                 cfg.NodeID,
+		"node_version":            cfg.NodeVersion,
+		"node_capacity":           cfg.NodeCapacity,
+		"state_dir":               cfg.StateDir,
 		"users":                   len(accounts),
 		"agents":                  len(agents),
 		"workers_per_agent":       cfg.WorkersPerAgent,
@@ -1792,9 +1563,11 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"result_delay_ms":         ms(cfg.ResultDelay),
 		"submit_duration_ms":      ms(cfg.SubmitDuration),
 		"ready_timeout_ms":        ms(cfg.ReadyTimeout),
-		"pull_claim_wait_ms":      ms(effectivePullClaimWait(cfg)),
-		"ws_heartbeat_ms":         ms(cfg.WSHeartbeat),
-		"ws_connect_stagger_ms":   ms(cfg.WSConnectStagger),
+		"pull_wait_ms":            ms(cfg.PullWait),
+		"command_wait_ms":         ms(cfg.CommandWait),
+		"heartbeat_interval_ms":   ms(cfg.HeartbeatInterval),
+		"ws_probe_interval_ms":    ms(cfg.WSProbeInterval),
+		"connect_stagger_ms":      ms(cfg.ConnectStagger),
 		"hold_after_ms":           ms(cfg.HoldAfter),
 		"hold_actual_ms":          holdActual,
 		"a2a_context":             cfg.ContextMode,
@@ -1802,6 +1575,8 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"submitted":               submitted,
 		"assigned":                assigned,
 		"completed":               completed,
+		"succeeded":               succeeded,
+		"canceled":                canceled,
 		"failed":                  failed,
 		"throughput_rps":          float64(completed) / totalWindow,
 		"measured_seconds":        totalWindow,
@@ -1810,31 +1585,18 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"result_ack_ms":           summaryStats(resultAckDur),
 		"completion_ms":           summaryStats(completeDur),
 		"measured_timeline":       measuredTimeline(measured, phases.measuredStart, phases.measuredEnd),
-		"ws_ready_ms":             summaryStats(wsReadyDur),
-		"ws_ready_timeline":       wsReadyTimeline,
+		"runtime_v2":              runtimeReport,
 		"http_ms_by_op":           httpByOp,
 		"http_status_by_op":       statusByOp,
 		"worker_counts": map[string]int64{
-			"ws_connected":       m.c.wsConnected.Load(),
-			"ws_ready":           m.c.wsReady.Load(),
-			"ws_reconnects":      m.c.wsReconnects.Load(),
-			"ws_disconnects":     m.c.wsDisconnects.Load(),
-			"ws_pings":           m.c.wsPings.Load(),
-			"ws_heartbeats":      m.c.wsHeartbeats.Load(),
-			"ws_heartbeat_acks":  m.c.wsHeartbeatAcks.Load(),
-			"ws_messages":        m.c.wsMessages.Load(),
-			"ws_errors":          m.c.wsErrors.Load(),
-			"pull_claims":        m.c.pullClaims.Load(),
-			"pull_empty":         m.c.pullEmpty.Load(),
+			"ready":              m.c.workersReady.Load(),
 			"assignments":        m.c.assignments.Load(),
-			"result_attempts":    m.c.resultAttempts.Load(),
-			"result_accepted":    m.c.resultAccepted.Load(),
 			"worker_errors":      m.c.workerErrors.Load(),
 			"unknown_assignment": m.c.unknownAssignment.Load(),
 		},
-		"ws_error_samples": m.wsErrorSampleSnapshot(),
-		"started_at":       m.startedAt.UTC().Format(time.RFC3339Nano),
-		"ended_at":         m.endedAt.UTC().Format(time.RFC3339Nano),
+		"worker_error_samples": m.errorSampleSnapshot(),
+		"started_at":           m.startedAt.UTC().Format(time.RFC3339Nano),
+		"ended_at":             m.endedAt.UTC().Format(time.RFC3339Nano),
 	}
 	if waitErr != nil {
 		report["wait_error"] = waitErr.Error()
@@ -2050,8 +1812,8 @@ func defaultReportBaseDir() string {
 }
 
 func printSummary(report map[string]any) {
-	fmt.Printf("runtime-loadtest ok=%v mode=%v users=%v agents=%v workers_per_agent=%v runs=%v completed=%v failed=%v throughput=%.2f rps\n",
-		report["ok"], report["mode"], report["users"], report["agents"], report["workers_per_agent"],
+	fmt.Printf("runtime-loadtest ok=%v transport=%v users=%v agents=%v workers_per_agent=%v runs=%v completed=%v failed=%v throughput=%.2f rps\n",
+		report["ok"], report["transport"], report["users"], report["agents"], report["workers_per_agent"],
 		report["measured_runs_target"], report["completed"], report["failed"], number(report["throughput_rps"]))
 	fmt.Printf("latency_ms create=%s assign=%s result_ack=%s complete=%s\n",
 		shortStats(report["create_run_ms"]), shortStats(report["assign_delay_ms"]), shortStats(report["result_ack_ms"]), shortStats(report["completion_ms"]))
@@ -2280,75 +2042,6 @@ func timelineBucketSize(duration time.Duration) time.Duration {
 		size *= 2
 	}
 	return size
-}
-
-func wsReadyReport(m *metrics) ([]float64, map[string]any) {
-	start, readyAt := m.wsReadySnapshot()
-	if len(readyAt) == 0 || start.IsZero() {
-		return nil, map[string]any{
-			"bucket_ms": 0,
-			"buckets":   []map[string]any{},
-		}
-	}
-	sort.Slice(readyAt, func(i, j int) bool {
-		return readyAt[i].Before(readyAt[j])
-	})
-	durations := make([]float64, 0, len(readyAt))
-	end := readyAt[len(readyAt)-1]
-	for _, at := range readyAt {
-		durations = append(durations, ms(at.Sub(start)))
-	}
-	bucketSize := timelineBucketSize(end.Sub(start) + time.Nanosecond)
-	bucketCount := int(math.Ceil(float64(end.Sub(start)+time.Nanosecond) / float64(bucketSize)))
-	if bucketCount <= 0 {
-		bucketCount = 1
-	}
-	counts := make([]int, bucketCount)
-	for _, at := range readyAt {
-		idx := int(at.Sub(start) / bucketSize)
-		if idx < 0 {
-			idx = 0
-		}
-		if idx >= len(counts) {
-			idx = len(counts) - 1
-		}
-		counts[idx]++
-	}
-	buckets := make([]map[string]any, 0, len(counts))
-	cumulative := 0
-	for i, count := range counts {
-		cumulative += count
-		bucketStart := time.Duration(i) * bucketSize
-		bucketEnd := bucketStart + bucketSize
-		buckets = append(buckets, map[string]any{
-			"start_ms":   round(ms(bucketStart)),
-			"end_ms":     round(ms(bucketEnd)),
-			"ready":      count,
-			"cumulative": cumulative,
-		})
-	}
-	return durations, map[string]any{
-		"bucket_ms": round(ms(bucketSize)),
-		"buckets":   buckets,
-	}
-}
-
-func websocketURL(apiRoot, path string) (string, error) {
-	parsed, err := url.Parse(apiRoot)
-	if err != nil {
-		return "", err
-	}
-	switch parsed.Scheme {
-	case "http":
-		parsed.Scheme = "ws"
-	case "https":
-		parsed.Scheme = "wss"
-	default:
-		return "", fmt.Errorf("unsupported api scheme %q", parsed.Scheme)
-	}
-	parsed.Path = strings.TrimRight(parsed.Path, "/") + path
-	parsed.RawQuery = ""
-	return parsed.String(), nil
 }
 
 func stringValue(v any) string {
