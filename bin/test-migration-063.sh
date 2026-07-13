@@ -114,6 +114,30 @@ expect_sql_failure() {
     || fail "SQL failed for the wrong reason; expected '$expected', got: $output"
 }
 
+assert_set_based_historical_validation() {
+  local migration="$MIGRATIONS_DIR/063_reliable_runtime_v2.up.sql"
+  local fragment
+
+  if grep -Fq "SET status = status;" "$migration"; then
+    fail "063 must not validate historical Runs with a no-op row update"
+  fi
+  if grep -Fq "SET CONSTRAINTS ALL IMMEDIATE;" "$migration"; then
+    fail "063 must not flush a per-row deferred validation queue"
+  fi
+
+  for fragment in \
+    "VALIDATE CONSTRAINT run_accounting_ledger_terminal_event_fk" \
+    "VALIDATE CONSTRAINT run_accounting_ledger_run_agent_fk" \
+    "migration 063 historical Run backfill is inconsistent" \
+    "migration 063 historical terminal artifacts are inconsistent" \
+    "CREATE CONSTRAINT TRIGGER runs_active_attempt_consistency" \
+    "CREATE CONSTRAINT TRIGGER runs_terminal_artifacts_consistency" \
+    "CREATE CONSTRAINT TRIGGER runs_cancellation_summary_consistency"; do
+    grep -Fq "$fragment" "$migration" \
+      || fail "063 set-based validation or future-write guard is missing: $fragment"
+  done
+}
+
 assert_plan_uses() {
   local index_name="$1"
   local query="$2"
@@ -470,7 +494,7 @@ INSERT INTO runtime_nodes (
   '10000000-0000-4000-8000-000000000005',
   'Runtime V2 Node', 'serial-runtime-v2', 'thumbprint-runtime-v2',
   '0.2.0-test', 2, 'openlinker.runtime.v2',
-  'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+  '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
   ARRAY[
     'lease_fence', 'assignment_confirm', 'renew', 'resume',
     'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -491,7 +515,7 @@ INSERT INTO runtime_sessions (
   '10000000-0000-4000-8000-000000000004',
   'worker-runtime-v2', 1, 'serial-runtime-v2', '0.2.0-test', 2,
   'openlinker.runtime.v2',
-  'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+  '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
   ARRAY[
     'lease_fence', 'assignment_confirm', 'renew', 'resume',
     'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -979,7 +1003,7 @@ SQL
       '10000000-0000-4000-8000-000000000091',
       'Runtime V2 Race Node', 'serial-runtime-race', 'thumbprint-runtime-race',
       '0.2.0-test', 2, 'openlinker.runtime.v2',
-      'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+      '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
       ARRAY[
         'lease_fence', 'assignment_confirm', 'renew', 'resume',
         'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -1004,7 +1028,7 @@ SQL
         '10000000-0000-4000-8000-000000000090',
         'worker-runtime-race', 1, 'serial-runtime-race', '0.2.0-test', 2,
         'openlinker.runtime.v2',
-        'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+        '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
         ARRAY[
           'lease_fence', 'assignment_confirm', 'renew', 'resume',
           'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -1157,7 +1181,7 @@ SQL
       '10000000-0000-4000-8000-000000000004',
       'wrong-principal', 1, 'serial-runtime-v2', '0.2.0-test', 2,
       'openlinker.runtime.v2',
-      'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+      '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
       ARRAY[
         'lease_fence', 'assignment_confirm', 'renew', 'resume',
         'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -1193,7 +1217,7 @@ SQL
       '10000000-0000-4000-8000-000000000004',
       'wrong-contract-session', 2, 'serial-runtime-v2', '0.2.0-test', 1,
       'openlinker.runtime.v2',
-      'd83e011870cf40bf67723fac1c58ca785d37954bf83638b8f67f69240d20dd4f',
+      '60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61',
       ARRAY[
         'lease_fence', 'assignment_confirm', 'renew', 'resume',
         'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -1911,6 +1935,7 @@ SQL
     || fail "down migration failed for the wrong reason: $down_output"
 }
 
+assert_set_based_historical_validation
 run_fresh_database_scenario
 run_historical_upgrade_scenario
 run_preflight_scenarios

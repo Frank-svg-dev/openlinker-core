@@ -1006,16 +1006,6 @@ CREATE TABLE run_accounting_ledger (
     success_delta INTEGER NOT NULL,
     revenue_delta_cents BIGINT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT run_accounting_ledger_terminal_event_fk
-        FOREIGN KEY (run_id, terminal_event_id)
-        REFERENCES run_events (run_id, id)
-        ON DELETE NO ACTION
-        DEFERRABLE INITIALLY DEFERRED,
-    CONSTRAINT run_accounting_ledger_run_agent_fk
-        FOREIGN KEY (run_id, agent_id)
-        REFERENCES runs (id, agent_id)
-        ON DELETE NO ACTION
-        DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT run_accounting_ledger_success_delta
         CHECK (success_delta IN (0, 1)),
     CONSTRAINT run_accounting_ledger_revenue_nonnegative
@@ -1165,6 +1155,31 @@ SELECT
     CASE WHEN r.status = 'success' THEN r.creator_revenue_cents::bigint ELSE 0 END,
     COALESCE(r.finished_at, clock_timestamp())
 FROM runs r;
+
+-- Add the deferred ledger foreign keys after the bulk backfill. Creating them
+-- NOT VALID and validating them explicitly lets PostgreSQL check the historical
+-- rows set-wise instead of queuing one deferred RI trigger per inserted row.
+-- The validated constraints remain DEFERRABLE INITIALLY DEFERRED for all future
+-- runtime writes.
+ALTER TABLE run_accounting_ledger
+    ADD CONSTRAINT run_accounting_ledger_terminal_event_fk
+        FOREIGN KEY (run_id, terminal_event_id)
+        REFERENCES run_events (run_id, id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
+        NOT VALID,
+    ADD CONSTRAINT run_accounting_ledger_run_agent_fk
+        FOREIGN KEY (run_id, agent_id)
+        REFERENCES runs (id, agent_id)
+        ON DELETE NO ACTION
+        DEFERRABLE INITIALLY DEFERRED
+        NOT VALID;
+
+ALTER TABLE run_accounting_ledger
+    VALIDATE CONSTRAINT run_accounting_ledger_terminal_event_fk;
+
+ALTER TABLE run_accounting_ledger
+    VALIDATE CONSTRAINT run_accounting_ledger_run_agent_fk;
 
 ALTER TABLE run_events
     ADD CONSTRAINT run_events_client_identity_consistent
@@ -3159,11 +3174,130 @@ CREATE CONSTRAINT TRIGGER run_cancellations_run_summary_consistency
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION enforce_run_cancellation_summary_consistency();
 
-UPDATE runs
-SET status = status;
+-- Validate the migration's historical result with set-based queries. A no-op
+-- UPDATE of every Run used to enqueue the three deferred consistency triggers
+-- above once per historical row; forcing those triggers immediate then turned
+-- this check into millions of small PL/pgSQL queries. The triggers remain in
+-- place and continue to protect every write made after the migration.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM runs
+        WHERE runtime_contract_id <> 'legacy.pre-v2'
+           OR dispatch_state <> 'terminal'
+           OR idempotency_key_hash IS NOT NULL
+           OR idempotency_fingerprint IS NOT NULL
+           OR request_metadata <> '{}'::jsonb
+           OR connection_mode_snapshot IS NOT NULL
+           OR endpoint_idempotency_snapshot IS NOT NULL
+           OR offer_count <> 0
+           OR attempt_count <> 0
+           OR next_attempt_at IS NOT NULL
+           OR dispatch_deadline_at IS NOT NULL
+           OR run_deadline_at IS NOT NULL
+           OR latest_attempt_id IS NOT NULL
+           OR active_attempt_id IS NOT NULL
+           OR lease_id IS NOT NULL
+           OR fencing_token <> 0
+           OR executor_type IS NOT NULL
+           OR active_core_instance_id IS NOT NULL
+           OR runtime_node_id IS NOT NULL
+           OR runtime_worker_id IS NOT NULL
+           OR runtime_session_id IS NOT NULL
+           OR lease_token_id IS NOT NULL
+           OR lease_offered_at IS NOT NULL
+           OR lease_accepted_at IS NOT NULL
+           OR lease_expires_at IS NOT NULL
+           OR attempt_deadline_at IS NOT NULL
+           OR cancel_request_id IS NOT NULL
+           OR cancel_state IS NOT NULL
+           OR cancel_requested_at IS NOT NULL
+           OR cancel_acknowledged_at IS NOT NULL
+           OR cancel_reason IS NOT NULL
+           OR result_id IS NOT NULL
+           OR result_fingerprint IS NOT NULL
+           OR terminal_event_id IS NULL
+           OR dead_lettered_at IS NOT NULL
+           OR replay_of_run_id IS NOT NULL
+    ) THEN
+        RAISE EXCEPTION 'migration 063 historical Run backfill is inconsistent';
+    END IF;
 
-SET CONSTRAINTS ALL IMMEDIATE;
-SET CONSTRAINTS ALL DEFERRED;
+    IF EXISTS (
+        SELECT 1
+        FROM runs r
+        LEFT JOIN run_accounting_ledger l ON l.run_id = r.id
+        LEFT JOIN run_events e
+          ON e.run_id = r.id
+         AND e.id = r.terminal_event_id
+        WHERE l.run_id IS NULL
+           OR l.terminal_event_id IS DISTINCT FROM r.terminal_event_id
+           OR l.agent_id IS DISTINCT FROM r.agent_id
+           OR l.success_delta IS DISTINCT FROM (
+                CASE WHEN r.status = 'success' THEN 1 ELSE 0 END
+           )
+           OR l.revenue_delta_cents IS DISTINCT FROM (
+                CASE
+                    WHEN r.status = 'success'
+                        THEN r.creator_revenue_cents::BIGINT
+                    ELSE 0::BIGINT
+                END
+           )
+           OR e.id IS NULL
+           OR NOT (
+                (
+                    e.event_type = 'run.status.changed'
+                    AND e.payload @> '{"terminal":true,"migrated":true,"migration":"063_reliable_runtime_v2"}'::jsonb
+                    AND e.payload->>'status' = r.status
+                )
+                OR (
+                    r.status = 'success'
+                    AND e.event_type = 'run.completed'
+                    AND (e.payload->>'status' IS NULL OR e.payload->>'status' = 'success')
+                )
+                OR (
+                    r.status = 'failed'
+                    AND e.event_type = 'run.failed'
+                    AND (e.payload->>'status' IS NULL OR e.payload->>'status' = 'failed')
+                )
+                OR (
+                    r.status = 'timeout'
+                    AND e.event_type = 'run.failed'
+                    AND (
+                        e.payload->>'status' IS NULL
+                        OR e.payload->>'status' IN ('timeout', 'failed')
+                    )
+                )
+                OR (
+                    r.status = 'canceled'
+                    AND e.event_type = 'run.canceled'
+                    AND (e.payload->>'status' IS NULL OR e.payload->>'status' = 'canceled')
+                )
+           )
+    ) THEN
+        RAISE EXCEPTION 'migration 063 historical terminal artifacts are inconsistent';
+    END IF;
+
+    IF EXISTS (
+        SELECT run_id
+        FROM run_events
+        WHERE payload @> '{"terminal":true,"migrated":true,"migration":"063_reliable_runtime_v2"}'::jsonb
+        GROUP BY run_id
+        HAVING COUNT(*) <> 1
+    ) THEN
+        RAISE EXCEPTION 'migration 063 created duplicate historical terminal marker events';
+    END IF;
+
+    IF EXISTS (SELECT 1 FROM run_attempts)
+       OR EXISTS (SELECT 1 FROM run_cancellations)
+       OR EXISTS (SELECT 1 FROM run_dead_letters)
+       OR EXISTS (SELECT 1 FROM run_effect_outbox)
+       OR EXISTS (SELECT 1 FROM run_effect_replays) THEN
+        RAISE EXCEPTION 'migration 063 fabricated runtime v2 Run history';
+    END IF;
+END
+$$;
 
 ALTER TABLE runs
     DROP COLUMN claimed_by_runtime_token_id,
