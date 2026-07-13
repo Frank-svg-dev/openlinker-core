@@ -1312,6 +1312,24 @@ func hasReservedWorkflowAgentTag(tags []string) bool {
 }
 
 func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
+	if agentRow.ConnectionMode == "runtime" {
+		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
+		if err != nil {
+			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeSessionForAgent")
+			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")
+		}
+		// Runtime Session is the current source of truth. A newly registered
+		// Runtime Agent has no historical availability snapshot yet, while an
+		// active Session already proves that it can accept work. Likewise, a
+		// recovered Session supersedes an older unreachable snapshot.
+		if hasActiveSession {
+			return true, nil
+		}
+		if requireRuntimeOnline {
+			return false, nil
+		}
+	}
+
 	snapshot, err := s.queries.GetAgentAvailabilitySnapshot(ctx, agentRow.ID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1322,16 +1340,6 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 	}
 	if snapshot.AvailabilityStatus == "unreachable" {
 		return false, nil
-	}
-	if requireRuntimeOnline && agentRow.ConnectionMode == "runtime" {
-		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
-		if err != nil {
-			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeSessionForAgent")
-			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")
-		}
-		if !hasActiveSession {
-			return false, nil
-		}
 	}
 	return true, nil
 }

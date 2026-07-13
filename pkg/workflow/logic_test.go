@@ -728,6 +728,76 @@ func TestWorkflowQueueAndDefinitionErrorEdges(t *testing.T) {
 	requireWorkflowHTTPStatus(t, err, http.StatusInternalServerError)
 }
 
+func TestWorkflowRuntimeAgentCallableUsesActiveSessionAsCurrentTruth(t *testing.T) {
+	agentID := uuid.New()
+
+	for _, tc := range []struct {
+		name                 string
+		requireRuntimeOnline bool
+		rows                 []workflowFakeRow
+		want                 bool
+		wantStatus           int
+	}{
+		{
+			name: "new Runtime Agent with active Session needs no historical snapshot",
+			rows: []workflowFakeRow{{values: []any{true}}},
+			want: true,
+		},
+		{
+			name:                 "active Session satisfies strict online validation",
+			requireRuntimeOnline: true,
+			rows:                 []workflowFakeRow{{values: []any{true}}},
+			want:                 true,
+		},
+		{
+			name:                 "strict online validation rejects an inactive Session",
+			requireRuntimeOnline: true,
+			rows:                 []workflowFakeRow{{values: []any{false}}},
+			want:                 false,
+		},
+		{
+			name: "definition validation may use a healthy historical snapshot while offline",
+			rows: []workflowFakeRow{
+				{values: []any{false}},
+				{values: workflowFakeAvailabilityValues(agentID, "healthy")},
+			},
+			want: true,
+		},
+		{
+			name: "inactive Runtime Agent without history is not callable",
+			rows: []workflowFakeRow{
+				{values: []any{false}},
+				{err: pgx.ErrNoRows},
+			},
+			want: false,
+		},
+		{
+			name:       "Runtime presence query failure fails closed",
+			rows:       []workflowFakeRow{{err: errors.New("runtime presence unavailable")}},
+			wantStatus: http.StatusInternalServerError,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &Service{queries: db.New(&workflowFakeDBTX{queryRowRows: tc.rows})}
+			got, err := svc.workflowAgentCallable(context.Background(), db.Agent{
+				ID:             agentID,
+				ConnectionMode: "runtime",
+			}, tc.requireRuntimeOnline)
+			if tc.wantStatus != 0 {
+				requireWorkflowHTTPStatus(t, err, tc.wantStatus)
+				return
+			}
+			if err != nil || got != tc.want {
+				t.Fatalf("workflowAgentCallable = %v, %v; want %v", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func workflowFakeAvailabilityValues(agentID uuid.UUID, status string) []any {
+	return []any{agentID, status, nil, nil, nil, int32(0), time.Now()}
+}
+
 func TestWorkflowListCompareAndPrepareErrorEdges(t *testing.T) {
 	workflowID := uuid.New()
 	userID := uuid.New()
