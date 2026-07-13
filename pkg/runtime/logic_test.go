@@ -859,7 +859,7 @@ func TestRuntimeReadServiceQueryErrorEdges(t *testing.T) {
 func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	size := int64(123)
 	fileSHA := strings.Repeat("b", 64)
-	require.Error(t, (&Service{}).createRunArtifacts(context.Background(), nil, uuid.New(), map[string]interface{}{
+	require.Error(t, createRunArtifacts(context.Background(), nil, uuid.New(), map[string]interface{}{
 		"artifact": map[string]interface{}{
 			"title":   "Bad artifact",
 			"content": map[string]interface{}{"bad": func() {}},

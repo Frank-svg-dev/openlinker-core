@@ -626,6 +626,13 @@ func (f *ResultFinalizer) finalizeTx(
 		return RuntimeResultAck{}, err
 	}
 	if runStatus == "success" {
+		// Result materialization belongs to the transport-neutral Core commit
+		// boundary. Keeping it in this transaction ensures Runtime, direct HTTP,
+		// and MCP executions expose the same artifacts as soon as success is
+		// visible, without relying on an Agent Node or post-commit worker.
+		if err := createRunArtifacts(ctx, queries, run.id, request.Output); err != nil {
+			return RuntimeResultAck{}, err
+		}
 		_, taskErr := queries.CompletePrivateTaskFromSuccessfulRun(ctx, db.CompletePrivateTaskFromSuccessfulRunParams{
 			RunID:             run.id,
 			CompletionSummary: privateTaskCompletionSummary(request.Output),

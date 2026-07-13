@@ -24,6 +24,12 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 	finalizer := runtime.NewResultFinalizer(pool, nil, nil)
 	request := successfulRuntimeResult(fixture, map[string]any{
 		"answer": "one terminal transaction",
+		"artifacts": []any{map[string]any{
+			"artifact_type": "json",
+			"title":         "Runtime result evidence",
+			"visibility":    "public_example",
+			"content":       map[string]any{"source": "runtime-result"},
+		}},
 	})
 
 	const workers = 100
@@ -86,6 +92,15 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 		FROM agents a WHERE a.id = $1`, fixture.identity.AgentID).Scan(&totalCalls, &availabilitySuccesses))
 	require.Equal(t, int32(1), totalCalls)
 	require.Equal(t, 1, availabilitySuccesses)
+	var artifactCount int
+	var artifactTitle, artifactVisibility string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT COUNT(*), MIN(title), MIN(visibility)
+		FROM run_artifacts WHERE run_id = $1`, fixture.identity.RunID).
+		Scan(&artifactCount, &artifactTitle, &artifactVisibility))
+	require.Equal(t, 1, artifactCount)
+	require.Equal(t, "Runtime result evidence", artifactTitle)
+	require.Equal(t, "public_example", artifactVisibility)
 
 	rows, err := pool.Query(context.Background(), `
 		SELECT effect_type, max_attempts, metadata::text

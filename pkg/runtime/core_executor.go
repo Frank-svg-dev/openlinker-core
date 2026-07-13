@@ -339,13 +339,6 @@ func (s *Service) executeCoreAttempt(ctx context.Context, invocation *runInvocat
 			log.Error().Err(finalizeErr).Str("run_id", invocation.runID.String()).
 				Msg("runtime: finalize Core Result")
 		}
-	} else if request.Status == "success" {
-		artifactCtx, cancel := context.WithTimeout(context.Background(), coreFinalizationTimeout)
-		if artifactErr := s.createRunArtifacts(artifactCtx, s.queries, invocation.runID, output); artifactErr != nil {
-			log.Error().Err(artifactErr).Str("run_id", invocation.runID.String()).
-				Msg("runtime: materialize Core result artifacts")
-		}
-		cancel()
 	}
 	return s.readRunResponseAfterExecution(invocation)
 }

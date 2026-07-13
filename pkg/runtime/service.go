@@ -2048,7 +2048,7 @@ type runArtifactDeltaDraft struct {
 	Payload          map[string]interface{}
 }
 
-func (s *Service) createRunArtifacts(ctx context.Context, q *db.Queries, runID uuid.UUID, output map[string]interface{}) error {
+func createRunArtifacts(ctx context.Context, q *db.Queries, runID uuid.UUID, output map[string]interface{}) error {
 	for _, artifact := range runArtifactsFromOutput(output) {
 		raw, err := json.Marshal(artifact.Content)
 		if err != nil {
