@@ -7,8 +7,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
+)
+
+var (
+	runtimeBoundaryVersionedIdentifier = regexp.MustCompile(`\b[A-Za-z_][A-Za-z0-9_]*V[0-9]+[A-Za-z0-9_]*\b`)
+	runtimeBoundaryVersionedFile       = regexp.MustCompile(`_v[0-9]+(?:_|\.|$)`)
 )
 
 func TestRuntimePublicBoundaryUsesCanonicalNamesAndPaths(t *testing.T) {
@@ -35,6 +41,9 @@ func TestRuntimePublicBoundaryUsesCanonicalNamesAndPaths(t *testing.T) {
 			return nil
 		}
 		relativePath := relativeRuntimeBoundaryPath(repositoryRoot, path)
+		if runtimeBoundaryVersionedRuntimeFile(relativePath) {
+			t.Errorf("active Runtime path %s contains a generation suffix", relativePath)
+		}
 		for _, value := range forbidden {
 			if strings.Contains(relativePath, value) {
 				t.Errorf("active path %s contains retired public boundary %q", relativePath, value)
@@ -48,6 +57,11 @@ func TestRuntimePublicBoundaryUsesCanonicalNamesAndPaths(t *testing.T) {
 			return readErr
 		}
 		text := string(body)
+		if extension := strings.ToLower(filepath.Ext(path)); extension == ".sql" && runtimeBoundaryRuntimeSource(relativePath) {
+			if identifier := runtimeBoundaryVersionedIdentifier.FindString(text); identifier != "" {
+				t.Errorf("active source %s contains generation-labeled identifier %s", relativePath, identifier)
+			}
+		}
 		for _, value := range forbidden {
 			if strings.Contains(text, value) {
 				t.Errorf("active source %s contains retired public boundary %q", relativePath, value)
@@ -63,10 +77,10 @@ func TestRuntimePublicBoundaryUsesCanonicalNamesAndPaths(t *testing.T) {
 		t.Fatalf("scan Runtime public boundary: %v", err)
 	}
 
-	assertNoVersionedRuntimeExports(t, repositoryRoot)
+	assertNoVersionedRuntimeIdentifiers(t, repositoryRoot)
 }
 
-func assertNoVersionedRuntimeExports(t *testing.T, repositoryRoot string) {
+func assertNoVersionedRuntimeIdentifiers(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	fileSet := token.NewFileSet()
 	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -77,61 +91,65 @@ func assertNoVersionedRuntimeExports(t *testing.T, repositoryRoot string) {
 			if path != repositoryRoot && runtimeBoundaryIgnoredDirectory(entry.Name()) {
 				return filepath.SkipDir
 			}
-			if relativeRuntimeBoundaryPath(repositoryRoot, path) == "pkg/db/generated" {
-				return filepath.SkipDir
-			}
 			return nil
 		}
-		if filepath.Ext(path) != ".go" || strings.HasSuffix(path, "_test.go") {
+		if filepath.Ext(path) != ".go" {
 			return nil
 		}
 		parsed, parseErr := parser.ParseFile(fileSet, path, nil, 0)
 		if parseErr != nil {
 			return parseErr
 		}
-		for _, declaration := range parsed.Decls {
-			switch value := declaration.(type) {
-			case *ast.FuncDecl:
-				if value.Recv == nil && ast.IsExported(value.Name.Name) && strings.Contains(value.Name.Name, "V2") {
-					t.Errorf("public function %s in %s contains a Runtime version label", value.Name.Name, relativeRuntimeBoundaryPath(repositoryRoot, path))
-				}
-			case *ast.GenDecl:
-				for _, spec := range value.Specs {
-					switch item := spec.(type) {
-					case *ast.ValueSpec:
-						for _, name := range item.Names {
-							if ast.IsExported(name.Name) && strings.Contains(name.Name, "V2") {
-								t.Errorf("public value %s in %s contains a Runtime version label", name.Name, relativeRuntimeBoundaryPath(repositoryRoot, path))
-							}
-						}
-					case *ast.TypeSpec:
-						if !ast.IsExported(item.Name.Name) {
-							continue
-						}
-						if strings.Contains(item.Name.Name, "V2") {
-							t.Errorf("public type %s in %s contains a Runtime version label", item.Name.Name, relativeRuntimeBoundaryPath(repositoryRoot, path))
-						}
-						ast.Inspect(item.Type, func(node ast.Node) bool {
-							field, ok := node.(*ast.Field)
-							if !ok {
-								return true
-							}
-							for _, name := range field.Names {
-								if ast.IsExported(name.Name) && strings.Contains(name.Name, "V2") {
-									t.Errorf("public field %s.%s in %s contains a Runtime version label", item.Name.Name, name.Name, relativeRuntimeBoundaryPath(repositoryRoot, path))
-								}
-							}
-							return true
-						})
-					}
-				}
+		relativePath := relativeRuntimeBoundaryPath(repositoryRoot, path)
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			identifier, ok := node.(*ast.Ident)
+			if !ok {
+				return true
 			}
-		}
+			if runtimeBoundaryVersionedRuntimeIdentifier(relativePath, identifier.Name) {
+				t.Errorf(
+					"active identifier %s in %s contains a Runtime generation label",
+					identifier.Name,
+					relativePath,
+				)
+			}
+			return true
+		})
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("inspect Runtime public Go exports: %v", err)
 	}
+}
+
+func runtimeBoundaryVersionedRuntimeFile(path string) bool {
+	if !strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, ".sql") {
+		return false
+	}
+	if !runtimeBoundaryVersionedFile.MatchString(filepath.Base(path)) {
+		return false
+	}
+	return runtimeBoundaryRuntimeSource(path)
+}
+
+func runtimeBoundaryVersionedRuntimeIdentifier(path, identifier string) bool {
+	if !runtimeBoundaryVersionedIdentifier.MatchString(identifier) {
+		return false
+	}
+	// This is a stable fingerprint-envelope schema version, not a Runtime
+	// implementation generation.
+	if identifier == "RunFingerprintSchemaV1" {
+		return false
+	}
+	return runtimeBoundaryRuntimeSource(path) ||
+		strings.Contains(identifier, "Runtime") || strings.Contains(identifier, "runtime")
+}
+
+func runtimeBoundaryRuntimeSource(path string) bool {
+	return strings.HasPrefix(path, "pkg/runtime/") ||
+		strings.HasPrefix(path, "cmd/runtime-loadtest/") ||
+		strings.HasPrefix(path, "pkg/db/queries/runtime") ||
+		strings.HasPrefix(path, "pkg/db/generated/runtime")
 }
 
 func runtimeRepositoryRoot(t *testing.T) string {

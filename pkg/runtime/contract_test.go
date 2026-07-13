@@ -64,7 +64,7 @@ type runtimeContractManifest struct {
 	Definitions      map[string]json.RawMessage `json:"$defs"`
 }
 
-func TestRuntimeV2ContractMatchesExportedConstants(t *testing.T) {
+func TestRuntimeContractMatchesExportedConstants(t *testing.T) {
 	contract := decodeRuntimeContract(t)
 
 	require.Equal(t, "https://json-schema.org/draft/2020-12/schema", contract.Schema)
@@ -86,7 +86,7 @@ func TestRuntimeV2ContractMatchesExportedConstants(t *testing.T) {
 	require.Equal(t, RuntimeContractDigest, fmt.Sprintf("%x", digest))
 }
 
-func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
+func TestRuntimeContractCoversWireProtocol(t *testing.T) {
 	contract := decodeRuntimeContract(t)
 	versionedRuntimePath := regexp.MustCompile(`/agent-runtime/v[0-9]+/`)
 
@@ -188,7 +188,7 @@ func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	}, endpointKeys)
 }
 
-func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
+func TestRuntimeContractDefinesRecoveryAndCancellation(t *testing.T) {
 	contract := decodeRuntimeContract(t)
 	for _, definition := range []string{
 		"AttemptIdentity",
@@ -292,7 +292,7 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 	require.True(t, sessionQuery.Required)
 }
 
-func TestRuntimeV2ContractReferencesExistingDefinitions(t *testing.T) {
+func TestRuntimeContractReferencesExistingDefinitions(t *testing.T) {
 	contract := decodeRuntimeContract(t)
 	var document any
 	require.NoError(t, json.Unmarshal(corecontracts.RuntimeContract, &document))

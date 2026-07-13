@@ -119,7 +119,7 @@ func scanRuntimeSessionAttachment(row runtimeNodeScanner, a *RuntimeSessionAttac
 	)
 }
 
-const hasActiveRuntimeV2SessionForAgent = `-- name: HasActiveRuntimeV2SessionForAgent :one
+const hasActiveRuntimeSessionForAgent = `-- name: HasActiveRuntimeSessionForAgent :one
 SELECT EXISTS (
     SELECT 1
     FROM runtime_sessions s
@@ -168,9 +168,9 @@ SELECT EXISTS (
       )
 )`
 
-func (q *Queries) HasActiveRuntimeV2SessionForAgent(ctx context.Context, agentID uuid.UUID) (bool, error) {
+func (q *Queries) HasActiveRuntimeSessionForAgent(ctx context.Context, agentID uuid.UUID) (bool, error) {
 	var active bool
-	err := q.db.QueryRow(ctx, hasActiveRuntimeV2SessionForAgent, agentID).Scan(&active)
+	err := q.db.QueryRow(ctx, hasActiveRuntimeSessionForAgent, agentID).Scan(&active)
 	return active, err
 }
 

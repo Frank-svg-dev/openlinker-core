@@ -184,6 +184,11 @@ func main() {
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
+	if services != nil && services.RuntimeController != nil {
+		if err := services.RuntimeController.Shutdown(shutdownCtx); err != nil {
+			log.Error().Err(err).Msg("runtime websocket shutdown failed")
+		}
+	}
 	if err := e.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("shutdown failed")
 	}

@@ -76,7 +76,7 @@ type Service struct {
 	taskCallbackSvc TaskCallbackEnqueuer
 	eventStore      *EventStore
 	resultFinalizer *ResultFinalizer
-	cancellationV2  *RuntimeCancellationCoordinator
+	cancellation    *RuntimeCancellationCoordinator
 	coreInstanceID  uuid.UUID
 	coreExecutions  *coreAttemptRegistry
 	effectWorker    *RunEffectWorker
@@ -162,7 +162,7 @@ func NewService(pool *pgxpool.Pool, cfg *config.Config) *Service {
 		httpClient: endpointurl.NewHTTPClient(timeout, cfg.AllowLocalHTTPEndpoints),
 	}
 	svc.resultFinalizer = NewResultFinalizer(pool, nil, nil)
-	svc.cancellationV2 = NewRuntimeCancellationCoordinator(pool)
+	svc.cancellation = NewRuntimeCancellationCoordinator(pool)
 	svc.coreExecutions = newCoreAttemptRegistry(queries, defaultCoreCancellationPollInterval)
 	svc.effectWorker = NewRunEffectWorker(queries, nil, nil)
 	return svc
@@ -821,9 +821,9 @@ func (s *Service) createRunningRun(
 			return nil, nil, httpx.Forbidden("Agent endpoint 当前不可调用")
 		}
 	} else {
-		available, checkErr := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agent.ID)
+		available, checkErr := s.queries.HasActiveRuntimeSessionForAgent(ctx, agent.ID)
 		if checkErr != nil {
-			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeV2SessionForAgent")
+			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeSessionForAgent")
 			return nil, nil, httpx.Internal("检查 Runtime Worker 连接状态失败")
 		}
 		if !available && !opts.allowOfflineQueuedRuntime {
@@ -1501,14 +1501,14 @@ func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID,
 
 // CancelRun cancels an owned Runtime Run through the durable coordinator.
 func (s *Service) CancelRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
-	return s.cancelRuntimeV2(ctx, userID, runID)
+	return s.cancelRuntime(ctx, userID, runID)
 }
 
-func (s *Service) cancelRuntimeV2(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
-	if s.cancellationV2 == nil {
+func (s *Service) cancelRuntime(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
+	if s.cancellation == nil {
 		return nil, httpx.Internal("取消服务暂不可用")
 	}
-	result, err := s.cancellationV2.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
+	result, err := s.cancellation.CancelOwnedRun(ctx, userID, runID, "run canceled by user")
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrRuntimeCancellationNotFound):

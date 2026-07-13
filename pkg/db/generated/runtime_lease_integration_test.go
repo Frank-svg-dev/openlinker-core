@@ -15,9 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-const runtimeV2ContractDigest = "3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9"
+const runtimeContractDigest = "3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9"
 
-var runtimeV2RequiredFeatures = []string{
+var runtimeRequiredFeatures = []string{
 	"lease_fence",
 	"assignment_confirm",
 	"renew",
@@ -139,7 +139,7 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		candidate, err := q.LockNextClaimableRuntimeV2RunForAgent(ctx, fixture.agentID)
+		candidate, err := q.LockNextClaimableRuntimeRunForAgent(ctx, fixture.agentID)
 		if err != nil || candidate.ID != fixture.runID || candidate.DatabaseNow.IsZero() {
 			t.Fatalf("claim candidate = %#v, %v", candidate, err)
 		}
@@ -457,7 +457,7 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			     capacity, last_seen_at
 			 ) VALUES ($1, 'Runtime Lease Test', $2, $3, 'test-v2', 2,
 			           'openlinker.runtime.v2', $4, $5, 2, clock_timestamp())`,
-			[]any{f.nodeID, f.certificateSerial, f.thumbprint, runtimeV2ContractDigest, runtimeV2RequiredFeatures},
+			[]any{f.nodeID, f.certificateSerial, f.thumbprint, runtimeContractDigest, runtimeRequiredFeatures},
 		},
 		{
 			`INSERT INTO runtime_sessions (
@@ -467,7 +467,7 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			     features, capacity, attached_core_instance_id
 			 ) VALUES ($1, $2, $3, $4, $5, 1, $6, 'test-v2', 2,
 			           'openlinker.runtime.v2', $7, $8, 2, $9)`,
-			[]any{f.sourceSessionID, f.nodeID, f.agentID, f.tokenID, f.workerID, f.certificateSerial, runtimeV2ContractDigest, runtimeV2RequiredFeatures, f.coreID},
+			[]any{f.sourceSessionID, f.nodeID, f.agentID, f.tokenID, f.workerID, f.certificateSerial, runtimeContractDigest, runtimeRequiredFeatures, f.coreID},
 		},
 		{
 			`INSERT INTO runtime_session_attachments (
@@ -576,7 +576,7 @@ func moveRuntimeFixtureToReplacementSession(t *testing.T, ctx context.Context, p
 		) VALUES ($1, $2, $3, $4, $5, 2, $6, 'test-v2', 2,
 		          'openlinker.runtime.v2', $7, $8, 2, $9)`,
 		f.targetSessionID, f.nodeID, f.agentID, f.tokenID, f.workerID,
-		f.certificateSerial, runtimeV2ContractDigest, runtimeV2RequiredFeatures,
+		f.certificateSerial, runtimeContractDigest, runtimeRequiredFeatures,
 		f.coreID,
 	); err != nil {
 		t.Fatal(err)
@@ -630,7 +630,7 @@ func TestRuntimeSessionScopeTriggerRejectsCallOnlyCredential(t *testing.T) {
 		      runtime_contract_id, runtime_contract_digest, features, capacity,
 		      last_seen_at)
 		  VALUES ($1, 'Scope Test', $2, $3, 'test-v2', 2,
-		      'openlinker.runtime.v2', $4, $5, 1, clock_timestamp())`, []any{f.nodeID, f.certificateSerial, f.thumbprint, runtimeV2ContractDigest, runtimeV2RequiredFeatures}},
+		      'openlinker.runtime.v2', $4, $5, 1, clock_timestamp())`, []any{f.nodeID, f.certificateSerial, f.thumbprint, runtimeContractDigest, runtimeRequiredFeatures}},
 	}
 	for _, statement := range setup {
 		if _, err := tx.Exec(ctx, statement.sql, statement.args...); err != nil {
@@ -646,7 +646,7 @@ func TestRuntimeSessionScopeTriggerRejectsCallOnlyCredential(t *testing.T) {
 		) VALUES ($1, $2, $3, $4, $5, 1, $6, 'test-v2', 2,
 		          'openlinker.runtime.v2', $7, $8, 1, $9)`,
 		f.sourceSessionID, f.nodeID, f.agentID, f.tokenID, f.workerID,
-		f.certificateSerial, runtimeV2ContractDigest, runtimeV2RequiredFeatures,
+		f.certificateSerial, runtimeContractDigest, runtimeRequiredFeatures,
 		f.coreID,
 	)
 	if err == nil || !containsPostgresMessage(err, "inactive runtime credential") {

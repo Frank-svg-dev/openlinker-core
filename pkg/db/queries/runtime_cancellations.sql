@@ -37,7 +37,7 @@ ORDER BY c.updated_at ASC, c.id ASC
 LIMIT 1
 FOR UPDATE OF r SKIP LOCKED;
 
--- name: FindNextDueRuntimeV2Cancellation :one
+-- name: FindNextDueRuntimeCancellation :one
 SELECT r.id AS run_id,
        r.agent_id,
        c.id AS cancellation_id,
@@ -81,7 +81,7 @@ FROM runtime_nodes
 WHERE node_id = sqlc.arg(node_id)
 FOR UPDATE;
 
--- name: LockDueRuntimeV2CancellationRun :one
+-- name: LockDueRuntimeCancellationRun :one
 SELECT r.id AS run_id,
        r.agent_id,
        c.id AS cancellation_id,
@@ -123,7 +123,7 @@ WHERE run_id = sqlc.arg(run_id)
   AND id = sqlc.arg(cancellation_id)
 FOR UPDATE;
 
--- name: AdvanceRuntimeV2RunCancellation :one
+-- name: AdvanceRuntimeRunCancellation :one
 UPDATE run_cancellations
 SET state = sqlc.arg(next_state),
     delivered_at = CASE
@@ -157,7 +157,7 @@ WHERE run_id = sqlc.arg(run_id)
   AND sqlc.arg(next_state) IN ('delivered', 'stopping', 'stopped', 'unsupported', 'failed', 'unconfirmed')
 RETURNING *;
 
--- name: FinalizeRuntimeV2RunCancellation :one
+-- name: FinalizeRuntimeRunCancellation :one
 UPDATE runs r
 SET status = 'canceled',
     dispatch_state = 'terminal',
@@ -242,7 +242,7 @@ RETURNING r.id, r.status, r.dispatch_state, r.error_code, r.error_message,
           r.cancel_acknowledged_at, r.cancel_reason,
           clock_timestamp() AS database_now;
 
--- name: MirrorRuntimeV2RunCancellationState :one
+-- name: MirrorRuntimeRunCancellationState :one
 UPDATE runs r
 SET cancel_state = c.state,
     cancel_acknowledged_at = c.acknowledged_at,
@@ -259,7 +259,7 @@ RETURNING r.id, r.cancel_request_id, r.cancel_state,
           r.cancel_acknowledged_at, r.cancel_reason,
           clock_timestamp() AS database_now;
 
--- name: FinishRuntimeV2CanceledAttempt :one
+-- name: FinishRuntimeCanceledAttempt :one
 UPDATE run_attempts a
 SET finished_at = clock_timestamp(),
     outcome = 'canceled',
@@ -288,7 +288,7 @@ WHERE a.run_id = sqlc.arg(run_id)
   )
 RETURNING *;
 
--- name: FinishRuntimeV2CoreCanceledAttempt :one
+-- name: FinishRuntimeCoreCanceledAttempt :one
 UPDATE run_attempts a
 SET finished_at = clock_timestamp(),
     outcome = 'canceled',
@@ -318,7 +318,7 @@ WHERE a.run_id = sqlc.arg(run_id)
   )
 RETURNING *;
 
--- name: FindNextDueRuntimeV2CoreCancellation :one
+-- name: FindNextDueRuntimeCoreCancellation :one
 SELECT r.id AS run_id,
        r.agent_id,
        c.id AS cancellation_id,
@@ -345,7 +345,7 @@ WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
 ORDER BY c.requested_at ASC, c.id ASC
 LIMIT 1;
 
--- name: LockDueRuntimeV2CoreCancellationRun :one
+-- name: LockDueRuntimeCoreCancellationRun :one
 SELECT r.id AS run_id,
        r.agent_id,
        c.id AS cancellation_id,
@@ -377,7 +377,7 @@ ORDER BY c.requested_at ASC, c.id ASC
 LIMIT 1
 FOR UPDATE OF r;
 
--- name: FinishRuntimeV2CoreUnconfirmedAttempt :one
+-- name: FinishRuntimeCoreUnconfirmedAttempt :one
 UPDATE run_attempts a
 SET finished_at = clock_timestamp(),
     outcome = 'canceled',

@@ -18,7 +18,7 @@ import (
 
 func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.completed")
 	finalizer := runtime.NewResultFinalizer(pool, nil, nil)
@@ -116,7 +116,7 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 
 func TestResultFinalizerLinksSuccessfulRunToPrivateTask(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 
 	var userID uuid.UUID
@@ -158,7 +158,7 @@ func TestResultFinalizerLinksSuccessfulRunToPrivateTask(t *testing.T) {
 
 func TestResultFinalizerNonRetryableFailureAndReplayOwnership(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	finalizer := runtime.NewResultFinalizer(pool, nil, nil)
 	request := runtime.RuntimeResultRequest{
@@ -215,7 +215,7 @@ func TestResultFinalizerNonRetryableFailureAndReplayOwnership(t *testing.T) {
 
 func TestResultFinalizerRequiresCompleteEventsInItsTransaction(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	store := runtime.NewEventStore(pool)
 	for _, sequence := range []int64{1, 3} {
@@ -245,7 +245,7 @@ func TestResultFinalizerRequiresCompleteEventsInItsTransaction(t *testing.T) {
 func TestResultFinalizerRetryScheduleAndRollbackAreAtomic(t *testing.T) {
 	t.Run("retry schedule is materialized once", func(t *testing.T) {
 		pool := setupTestDB(t)
-		requireReliableRuntimeV2Schema(t, pool)
+		requireReliableRuntimeSchema(t, pool)
 		fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 		finalizer := runtime.NewResultFinalizer(pool, nil, nil)
 		request := retryableRuntimeResult(fixture)
@@ -267,7 +267,7 @@ func TestResultFinalizerRetryScheduleAndRollbackAreAtomic(t *testing.T) {
 
 	t.Run("planner failure rolls back Attempt and Run writes", func(t *testing.T) {
 		pool := setupTestDB(t)
-		requireReliableRuntimeV2Schema(t, pool)
+		requireReliableRuntimeSchema(t, pool)
 		fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 		badPlanner := runtime.ResultRetryPlannerFunc(func(int32) time.Duration { return -time.Second })
 		finalizer := runtime.NewResultFinalizer(pool, nil, badPlanner)
@@ -279,7 +279,7 @@ func TestResultFinalizerRetryScheduleAndRollbackAreAtomic(t *testing.T) {
 
 	t.Run("effect insert failure rolls back the entire terminal transaction", func(t *testing.T) {
 		pool := setupTestDB(t)
-		requireReliableRuntimeV2Schema(t, pool)
+		requireReliableRuntimeSchema(t, pool)
 		fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 		seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.completed")
 		installFailingFinalizerEffectTrigger(t, pool)
@@ -305,7 +305,7 @@ func TestResultFinalizerRetryScheduleAndRollbackAreAtomic(t *testing.T) {
 
 func TestResultFinalizerRetryExhaustionCreatesOneDLQ(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	setFinalizerMaxAttempts(t, pool, fixture.identity.RunID, 1)
 	finalizer := runtime.NewResultFinalizer(pool, nil, nil)
@@ -329,7 +329,7 @@ func TestResultFinalizerRetryExhaustionCreatesOneDLQ(t *testing.T) {
 
 func TestResultFinalizerRunDeadlineWinsAndReplaysTimeout(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	expireFinalizerFixtureAtDatabaseClock(t, pool, fixture)
 	request := successfulRuntimeResult(fixture, map[string]any{"must_not_publish": true})
@@ -367,7 +367,7 @@ func TestResultFinalizerRunDeadlineWinsAndReplaysTimeout(t *testing.T) {
 
 func TestResultFinalizerFailedResultAfterDeadlineKeepsLateErrorPrivate(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	expireFinalizerFixtureAtDatabaseClock(t, pool, fixture)
 	request := retryableRuntimeResult(fixture)
@@ -410,7 +410,7 @@ func TestResultFinalizerFailedResultAfterDeadlineKeepsLateErrorPrivate(t *testin
 
 func TestResultFinalizerDelegatedChildPlansOnlyParentAndCallbackEffects(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	parent := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	child := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	seedFinalizerEffectTargets(t, pool, child.identity.RunID, child.identity.AgentID, "run.completed")

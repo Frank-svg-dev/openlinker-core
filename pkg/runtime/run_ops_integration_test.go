@@ -20,11 +20,11 @@ import (
 
 func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 20*time.Millisecond)
 	setFinalizerMaxAttempts(t, pool, fixture.identity.RunID, 1)
 	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.failed")
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 
 	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
 	require.NoError(t, err)

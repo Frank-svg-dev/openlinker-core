@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestRuntimeV2ReconcilerQueriesUseDatabaseClockAndCapacityFirstSkipLocks(t *testing.T) {
+func TestRuntimeReconcilerQueriesUseDatabaseClockAndCapacityFirstSkipLocks(t *testing.T) {
 	t.Parallel()
 
 	for _, fragment := range []string{
@@ -26,16 +26,16 @@ func TestRuntimeV2ReconcilerQueriesUseDatabaseClockAndCapacityFirstSkipLocks(t *
 		"r.run_deadline_at",
 		"LIMIT $1",
 	} {
-		if !strings.Contains(listDueRuntimeV2ReconcileCandidates, fragment) {
+		if !strings.Contains(listDueRuntimeReconcileCandidates, fragment) {
 			t.Fatalf("candidate discovery missing %q", fragment)
 		}
 	}
-	if strings.Contains(listDueRuntimeV2ReconcileCandidates, "FOR UPDATE") {
+	if strings.Contains(listDueRuntimeReconcileCandidates, "FOR UPDATE") {
 		t.Fatal("candidate discovery must not lock Run or Attempt before capacity owners")
 	}
 	for name, query := range map[string]string{
-		"Session": lockRuntimeSessionForV2Reconcile,
-		"Node":    lockRuntimeNodeForV2Reconcile,
+		"Session": lockRuntimeSessionForReconcile,
+		"Node":    lockRuntimeNodeForReconcile,
 	} {
 		if !strings.Contains(query, "FOR UPDATE SKIP LOCKED") {
 			t.Fatalf("%s capacity lock does not use SKIP LOCKED", name)
@@ -50,7 +50,7 @@ func TestRuntimeV2ReconcilerQueriesUseDatabaseClockAndCapacityFirstSkipLocks(t *
 		"r.fencing_token = a.fencing_token",
 		"FOR UPDATE OF r SKIP LOCKED",
 	} {
-		if !strings.Contains(lockDueRuntimeV2RunWithAttempt, fragment) {
+		if !strings.Contains(lockDueRuntimeRunWithAttempt, fragment) {
 			t.Fatalf("exact Attempt Run lock missing %q", fragment)
 		}
 	}
@@ -60,13 +60,13 @@ func TestRuntimeV2ReconcilerQueriesUseDatabaseClockAndCapacityFirstSkipLocks(t *
 		"LEAST(r.dispatch_deadline_at, r.run_deadline_at)",
 		"FOR UPDATE OF r SKIP LOCKED",
 	} {
-		if !strings.Contains(lockDueRuntimeV2RunWithoutAttempt, fragment) {
+		if !strings.Contains(lockDueRuntimeRunWithoutAttempt, fragment) {
 			t.Fatalf("deadline-only Run lock missing %q", fragment)
 		}
 	}
 }
 
-func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *testing.T) {
+func TestRuntimeReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *testing.T) {
 	t.Parallel()
 
 	for _, fragment := range []string{
@@ -75,7 +75,7 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 		"r.cancel_request_id IS NULL", "r.active_attempt_id = a.id",
 		"$1 = 'offer_expired'", "$1 IN ('lease_expired', 'timeout', 'result_unknown')",
 	} {
-		if !strings.Contains(finishRuntimeV2ReconciledAttempt, fragment) {
+		if !strings.Contains(finishRuntimeReconciledAttempt, fragment) {
 			t.Fatalf("Attempt finish query missing %q", fragment)
 		}
 	}
@@ -83,7 +83,7 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 		"dispatch_state = 'pending'", "r.offer_count < r.max_offer_count",
 		"r.dispatch_deadline_at > c.database_now", "r.run_deadline_at > c.database_now",
 	} {
-		if !strings.Contains(resetRuntimeV2RunAfterReconciledOffer, fragment) {
+		if !strings.Contains(resetRuntimeRunAfterReconciledOffer, fragment) {
 			t.Fatalf("offer reset query missing %q", fragment)
 		}
 	}
@@ -92,7 +92,7 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 		"$1::bigint BETWEEN 1 AND 60000", "a.outcome = 'lease_expired'",
 		"r.attempt_count < r.max_attempts",
 	} {
-		if !strings.Contains(transitionRuntimeV2RunAfterExpiredAttempt, fragment) {
+		if !strings.Contains(transitionRuntimeRunAfterExpiredAttempt, fragment) {
 			t.Fatalf("retry transition query missing %q", fragment)
 		}
 	}
@@ -103,13 +103,13 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 		"$1 = 'failed'", "$2 = 'dead_letter'",
 		"$3 = 'RUNTIME_RETRY_EXHAUSTED'", "r.attempt_count >= r.max_attempts",
 	} {
-		if !strings.Contains(finalizeRuntimeV2ReconciledRun, fragment) {
+		if !strings.Contains(finalizeRuntimeReconciledRun, fragment) {
 			t.Fatalf("terminal Run query missing %q", fragment)
 		}
 	}
 }
 
-func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
+func TestRuntimeReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 	now := time.Date(2026, 7, 11, 21, 0, 0, 0, time.UTC)
 	runID, attemptID, sessionID, nodeID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	executor := "runtime"
@@ -119,12 +119,12 @@ func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 	dbtx := &fakeDBTX{queryRows: rows}
 	queries := New(dbtx)
 
-	candidates, err := queries.ListDueRuntimeV2ReconcileCandidates(context.Background(), 25)
+	candidates, err := queries.ListDueRuntimeReconcileCandidates(context.Background(), 25)
 	if err != nil || len(candidates) != 1 || candidates[0].RunID != runID ||
 		candidates[0].AttemptID == nil || *candidates[0].AttemptID != attemptID {
-		t.Fatalf("ListDueRuntimeV2ReconcileCandidates = %#v, %v", candidates, err)
+		t.Fatalf("ListDueRuntimeReconcileCandidates = %#v, %v", candidates, err)
 	}
-	requireSQLName(t, dbtx.querySQL, "ListDueRuntimeV2ReconcileCandidates")
+	requireSQLName(t, dbtx.querySQL, "ListDueRuntimeReconcileCandidates")
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{int32(25)}) {
 		t.Fatalf("candidate query args = %#v", dbtx.queryArgs)
 	}
@@ -138,30 +138,30 @@ func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 		int32(0), now.Add(-time.Second), now,
 	}
 	dbtx.row = fakeRow{values: lockedValues}
-	locked, err := queries.LockDueRuntimeV2RunWithAttempt(context.Background(), LockDueRuntimeV2RunWithAttemptParams{
+	locked, err := queries.LockDueRuntimeRunWithAttempt(context.Background(), LockDueRuntimeRunWithAttemptParams{
 		RunID: runID, AttemptID: attemptID, ExecutorType: executor,
 		RuntimeSessionID: &sessionID, NodeID: &nodeID,
 	})
 	if err != nil || locked.ID != runID || locked.DatabaseNow != now {
-		t.Fatalf("LockDueRuntimeV2RunWithAttempt = %#v, %v", locked, err)
+		t.Fatalf("LockDueRuntimeRunWithAttempt = %#v, %v", locked, err)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, attemptID, executor, &sessionID, &nodeID}) {
 		t.Fatalf("exact Run lock args = %#v", dbtx.queryRowArgs)
 	}
 
 	dbtx.row = fakeRow{values: []any{sessionID}}
-	gotSessionID, err := queries.LockRuntimeSessionForV2Reconcile(context.Background(), sessionID)
+	gotSessionID, err := queries.LockRuntimeSessionForReconcile(context.Background(), sessionID)
 	if err != nil || gotSessionID != sessionID {
-		t.Fatalf("LockRuntimeSessionForV2Reconcile = %s, %v", gotSessionID, err)
+		t.Fatalf("LockRuntimeSessionForReconcile = %s, %v", gotSessionID, err)
 	}
 	dbtx.row = fakeRow{values: []any{nodeID}}
-	gotNodeID, err := queries.LockRuntimeNodeForV2Reconcile(context.Background(), nodeID)
+	gotNodeID, err := queries.LockRuntimeNodeForReconcile(context.Background(), nodeID)
 	if err != nil || gotNodeID != nodeID {
-		t.Fatalf("LockRuntimeNodeForV2Reconcile = %s, %v", gotNodeID, err)
+		t.Fatalf("LockRuntimeNodeForReconcile = %s, %v", gotNodeID, err)
 	}
 }
 
-func TestRuntimeV2ReconcilerMigration066Shape(t *testing.T) {
+func TestRuntimeReconcilerMigration066Shape(t *testing.T) {
 	t.Parallel()
 
 	up, err := os.ReadFile("../../../migrations/066_runtime_v2_deadline_reconciler.up.sql")

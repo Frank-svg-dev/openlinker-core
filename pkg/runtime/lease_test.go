@@ -369,7 +369,7 @@ func newRuntimeLeaseFixture(t *testing.T) *runtimeLeaseFixture {
 		principal:   principal,
 		databaseNow: databaseNow,
 		existingErr: pgx.ErrNoRows,
-		candidate: db.LockNextClaimableRuntimeV2RunForAgentRow{
+		candidate: db.LockNextClaimableRuntimeRunForAgentRow{
 			ID: uuid.New(), AgentID: principal.AgentID,
 			Input: []byte(`{"prompt":"hello"}`), RequestMetadata: []byte(`{"trace":"a"}`),
 			DispatchState: string(RuntimeDispatchPending), OfferCount: 0, MaxOfferCount: 5,
@@ -475,7 +475,7 @@ type runtimeLeaseTransactionFake struct {
 
 	existing     *db.GetExistingUnacceptedRunOfferForSessionRow
 	existingErr  error
-	candidate    db.LockNextClaimableRuntimeV2RunForAgentRow
+	candidate    db.LockNextClaimableRuntimeRunForAgentRow
 	candidateErr error
 
 	sessionSlotParams db.ClaimRuntimeSessionSlotParams
@@ -584,7 +584,7 @@ func (f *runtimeLeaseTransactionFake) GetExistingUnacceptedRunOfferForSession(_ 
 	return db.GetExistingUnacceptedRunOfferForSessionRow{}, f.existingErr
 }
 
-func (f *runtimeLeaseTransactionFake) LockNextClaimableRuntimeV2RunForAgent(_ context.Context, _ uuid.UUID) (db.LockNextClaimableRuntimeV2RunForAgentRow, error) {
+func (f *runtimeLeaseTransactionFake) LockNextClaimableRuntimeRunForAgent(_ context.Context, _ uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
 	f.call("lock_candidate")
 	return f.candidate, f.candidateErr
 }

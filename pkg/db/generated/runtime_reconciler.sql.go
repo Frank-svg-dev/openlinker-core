@@ -1,4 +1,4 @@
-// Code generated from pkg/db/queries/runtime_reconciler_v2.sql. DO NOT EDIT.
+// Code generated from pkg/db/queries/runtime_reconciler.sql. DO NOT EDIT.
 
 package db
 
@@ -9,7 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const listDueRuntimeV2ReconcileCandidates = `-- name: ListDueRuntimeV2ReconcileCandidates :many
+const listDueRuntimeReconcileCandidates = `-- name: ListDueRuntimeReconcileCandidates :many
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 ), candidates AS (
@@ -85,7 +85,7 @@ FROM candidates
 ORDER BY due_at ASC, run_id ASC
 LIMIT $1`
 
-type ListDueRuntimeV2ReconcileCandidatesRow struct {
+type ListDueRuntimeReconcileCandidatesRow struct {
 	RunID            uuid.UUID  `db:"run_id" json:"run_id"`
 	AttemptID        *uuid.UUID `db:"attempt_id" json:"attempt_id"`
 	ExecutorType     *string    `db:"executor_type" json:"executor_type"`
@@ -95,15 +95,15 @@ type ListDueRuntimeV2ReconcileCandidatesRow struct {
 	DatabaseNow      time.Time  `db:"database_now" json:"database_now"`
 }
 
-func (q *Queries) ListDueRuntimeV2ReconcileCandidates(ctx context.Context, batchLimit int32) ([]ListDueRuntimeV2ReconcileCandidatesRow, error) {
-	rows, err := q.db.Query(ctx, listDueRuntimeV2ReconcileCandidates, batchLimit)
+func (q *Queries) ListDueRuntimeReconcileCandidates(ctx context.Context, batchLimit int32) ([]ListDueRuntimeReconcileCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, listDueRuntimeReconcileCandidates, batchLimit)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]ListDueRuntimeV2ReconcileCandidatesRow, 0)
+	items := make([]ListDueRuntimeReconcileCandidatesRow, 0)
 	for rows.Next() {
-		var item ListDueRuntimeV2ReconcileCandidatesRow
+		var item ListDueRuntimeReconcileCandidatesRow
 		if err := rows.Scan(
 			&item.RunID, &item.AttemptID, &item.ExecutorType,
 			&item.RuntimeSessionID, &item.NodeID, &item.DueAt,
@@ -119,31 +119,31 @@ func (q *Queries) ListDueRuntimeV2ReconcileCandidates(ctx context.Context, batch
 	return items, nil
 }
 
-const lockRuntimeSessionForV2Reconcile = `-- name: LockRuntimeSessionForV2Reconcile :one
+const lockRuntimeSessionForReconcile = `-- name: LockRuntimeSessionForReconcile :one
 SELECT runtime_session_id
 FROM runtime_sessions
 WHERE runtime_session_id = $1
 FOR UPDATE SKIP LOCKED`
 
-func (q *Queries) LockRuntimeSessionForV2Reconcile(ctx context.Context, runtimeSessionID uuid.UUID) (uuid.UUID, error) {
+func (q *Queries) LockRuntimeSessionForReconcile(ctx context.Context, runtimeSessionID uuid.UUID) (uuid.UUID, error) {
 	var lockedID uuid.UUID
-	err := q.db.QueryRow(ctx, lockRuntimeSessionForV2Reconcile, runtimeSessionID).Scan(&lockedID)
+	err := q.db.QueryRow(ctx, lockRuntimeSessionForReconcile, runtimeSessionID).Scan(&lockedID)
 	return lockedID, err
 }
 
-const lockRuntimeNodeForV2Reconcile = `-- name: LockRuntimeNodeForV2Reconcile :one
+const lockRuntimeNodeForReconcile = `-- name: LockRuntimeNodeForReconcile :one
 SELECT node_id
 FROM runtime_nodes
 WHERE node_id = $1
 FOR UPDATE SKIP LOCKED`
 
-func (q *Queries) LockRuntimeNodeForV2Reconcile(ctx context.Context, nodeID uuid.UUID) (uuid.UUID, error) {
+func (q *Queries) LockRuntimeNodeForReconcile(ctx context.Context, nodeID uuid.UUID) (uuid.UUID, error) {
 	var lockedID uuid.UUID
-	err := q.db.QueryRow(ctx, lockRuntimeNodeForV2Reconcile, nodeID).Scan(&lockedID)
+	err := q.db.QueryRow(ctx, lockRuntimeNodeForReconcile, nodeID).Scan(&lockedID)
 	return lockedID, err
 }
 
-const lockDueRuntimeV2RunWithAttempt = `-- name: LockDueRuntimeV2RunWithAttempt :one
+const lockDueRuntimeRunWithAttempt = `-- name: LockDueRuntimeRunWithAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -200,7 +200,7 @@ WHERE r.id = $1
   )
 FOR UPDATE OF r SKIP LOCKED`
 
-type LockDueRuntimeV2RunWithAttemptParams struct {
+type LockDueRuntimeRunWithAttemptParams struct {
 	RunID            uuid.UUID  `db:"run_id" json:"run_id"`
 	AttemptID        uuid.UUID  `db:"attempt_id" json:"attempt_id"`
 	ExecutorType     string     `db:"executor_type" json:"executor_type"`
@@ -208,7 +208,7 @@ type LockDueRuntimeV2RunWithAttemptParams struct {
 	NodeID           *uuid.UUID `db:"node_id" json:"node_id"`
 }
 
-type RuntimeV2ReconcileLockedRunRow struct {
+type RuntimeReconcileLockedRunRow struct {
 	ID                          uuid.UUID  `db:"id" json:"id"`
 	UserID                      uuid.UUID  `db:"user_id" json:"user_id"`
 	AgentID                     uuid.UUID  `db:"agent_id" json:"agent_id"`
@@ -236,9 +236,9 @@ type RuntimeV2ReconcileLockedRunRow struct {
 	DatabaseNow                 time.Time  `db:"database_now" json:"database_now"`
 }
 
-type LockDueRuntimeV2RunWithAttemptRow = RuntimeV2ReconcileLockedRunRow
+type LockDueRuntimeRunWithAttemptRow = RuntimeReconcileLockedRunRow
 
-func scanRuntimeV2ReconcileLockedRun(row interface{ Scan(...any) error }, run *RuntimeV2ReconcileLockedRunRow) error {
+func scanRuntimeReconcileLockedRun(row interface{ Scan(...any) error }, run *RuntimeReconcileLockedRunRow) error {
 	return row.Scan(
 		&run.ID, &run.UserID, &run.AgentID, &run.Status,
 		&run.DispatchState, &run.ConnectionModeSnapshot,
@@ -252,17 +252,17 @@ func scanRuntimeV2ReconcileLockedRun(row interface{ Scan(...any) error }, run *R
 	)
 }
 
-func (q *Queries) LockDueRuntimeV2RunWithAttempt(ctx context.Context, arg LockDueRuntimeV2RunWithAttemptParams) (LockDueRuntimeV2RunWithAttemptRow, error) {
-	var run LockDueRuntimeV2RunWithAttemptRow
-	err := scanRuntimeV2ReconcileLockedRun(q.db.QueryRow(
-		ctx, lockDueRuntimeV2RunWithAttempt,
+func (q *Queries) LockDueRuntimeRunWithAttempt(ctx context.Context, arg LockDueRuntimeRunWithAttemptParams) (LockDueRuntimeRunWithAttemptRow, error) {
+	var run LockDueRuntimeRunWithAttemptRow
+	err := scanRuntimeReconcileLockedRun(q.db.QueryRow(
+		ctx, lockDueRuntimeRunWithAttempt,
 		arg.RunID, arg.AttemptID, arg.ExecutorType,
 		arg.RuntimeSessionID, arg.NodeID,
 	), &run)
 	return run, err
 }
 
-const lockDueRuntimeV2RunWithoutAttempt = `-- name: LockDueRuntimeV2RunWithoutAttempt :one
+const lockDueRuntimeRunWithoutAttempt = `-- name: LockDueRuntimeRunWithoutAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -285,17 +285,17 @@ WHERE r.id = $1
   AND LEAST(r.dispatch_deadline_at, r.run_deadline_at) <= c.database_now
 FOR UPDATE OF r SKIP LOCKED`
 
-type LockDueRuntimeV2RunWithoutAttemptRow = RuntimeV2ReconcileLockedRunRow
+type LockDueRuntimeRunWithoutAttemptRow = RuntimeReconcileLockedRunRow
 
-func (q *Queries) LockDueRuntimeV2RunWithoutAttempt(ctx context.Context, runID uuid.UUID) (LockDueRuntimeV2RunWithoutAttemptRow, error) {
-	var run LockDueRuntimeV2RunWithoutAttemptRow
-	err := scanRuntimeV2ReconcileLockedRun(
-		q.db.QueryRow(ctx, lockDueRuntimeV2RunWithoutAttempt, runID), &run,
+func (q *Queries) LockDueRuntimeRunWithoutAttempt(ctx context.Context, runID uuid.UUID) (LockDueRuntimeRunWithoutAttemptRow, error) {
+	var run LockDueRuntimeRunWithoutAttemptRow
+	err := scanRuntimeReconcileLockedRun(
+		q.db.QueryRow(ctx, lockDueRuntimeRunWithoutAttempt, runID), &run,
 	)
 	return run, err
 }
 
-const finishRuntimeV2ReconciledAttempt = `-- name: FinishRuntimeV2ReconciledAttempt :one
+const finishRuntimeReconciledAttempt = `-- name: FinishRuntimeReconciledAttempt :one
 UPDATE run_attempts a
 SET finished_at = clock_timestamp(),
     outcome = $1,
@@ -343,7 +343,7 @@ RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no,
           a.created_at, a.slot_acquired_at, a.slot_released_at,
           a.active_runtime_session_id`
 
-type FinishRuntimeV2ReconciledAttemptParams struct {
+type FinishRuntimeReconciledAttemptParams struct {
 	Outcome      string    `db:"outcome" json:"outcome"`
 	ErrorCode    string    `db:"error_code" json:"error_code"`
 	RunID        uuid.UUID `db:"run_id" json:"run_id"`
@@ -352,17 +352,17 @@ type FinishRuntimeV2ReconciledAttemptParams struct {
 	FencingToken int64     `db:"fencing_token" json:"fencing_token"`
 }
 
-func (q *Queries) FinishRuntimeV2ReconciledAttempt(ctx context.Context, arg FinishRuntimeV2ReconciledAttemptParams) (RunAttempt, error) {
+func (q *Queries) FinishRuntimeReconciledAttempt(ctx context.Context, arg FinishRuntimeReconciledAttemptParams) (RunAttempt, error) {
 	var attempt RunAttempt
 	err := scanRunAttempt(q.db.QueryRow(
-		ctx, finishRuntimeV2ReconciledAttempt,
+		ctx, finishRuntimeReconciledAttempt,
 		arg.Outcome, arg.ErrorCode, arg.RunID, arg.AttemptID,
 		arg.LeaseID, arg.FencingToken,
 	), &attempt)
 	return attempt, err
 }
 
-const resetRuntimeV2RunAfterReconciledOffer = `-- name: ResetRuntimeV2RunAfterReconciledOffer :one
+const resetRuntimeRunAfterReconciledOffer = `-- name: ResetRuntimeRunAfterReconciledOffer :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -407,14 +407,14 @@ WHERE r.id = $1
 RETURNING r.id, r.status, r.dispatch_state, r.next_attempt_at,
           c.database_now`
 
-type ResetRuntimeV2RunAfterReconciledOfferParams struct {
+type ResetRuntimeRunAfterReconciledOfferParams struct {
 	RunID        uuid.UUID `db:"run_id" json:"run_id"`
 	AttemptID    uuid.UUID `db:"attempt_id" json:"attempt_id"`
 	LeaseID      uuid.UUID `db:"lease_id" json:"lease_id"`
 	FencingToken int64     `db:"fencing_token" json:"fencing_token"`
 }
 
-type RuntimeV2ReconcileTransitionRow struct {
+type RuntimeReconcileTransitionRow struct {
 	ID            uuid.UUID  `db:"id" json:"id"`
 	Status        string     `db:"status" json:"status"`
 	DispatchState string     `db:"dispatch_state" json:"dispatch_state"`
@@ -422,12 +422,12 @@ type RuntimeV2ReconcileTransitionRow struct {
 	DatabaseNow   time.Time  `db:"database_now" json:"database_now"`
 }
 
-type ResetRuntimeV2RunAfterReconciledOfferRow = RuntimeV2ReconcileTransitionRow
+type ResetRuntimeRunAfterReconciledOfferRow = RuntimeReconcileTransitionRow
 
-func (q *Queries) ResetRuntimeV2RunAfterReconciledOffer(ctx context.Context, arg ResetRuntimeV2RunAfterReconciledOfferParams) (ResetRuntimeV2RunAfterReconciledOfferRow, error) {
-	var run ResetRuntimeV2RunAfterReconciledOfferRow
+func (q *Queries) ResetRuntimeRunAfterReconciledOffer(ctx context.Context, arg ResetRuntimeRunAfterReconciledOfferParams) (ResetRuntimeRunAfterReconciledOfferRow, error) {
+	var run ResetRuntimeRunAfterReconciledOfferRow
 	err := q.db.QueryRow(
-		ctx, resetRuntimeV2RunAfterReconciledOffer,
+		ctx, resetRuntimeRunAfterReconciledOffer,
 		arg.RunID, arg.AttemptID, arg.LeaseID, arg.FencingToken,
 	).Scan(
 		&run.ID, &run.Status, &run.DispatchState,
@@ -436,7 +436,7 @@ func (q *Queries) ResetRuntimeV2RunAfterReconciledOffer(ctx context.Context, arg
 	return run, err
 }
 
-const transitionRuntimeV2RunAfterExpiredAttempt = `-- name: TransitionRuntimeV2RunAfterExpiredAttempt :one
+const transitionRuntimeRunAfterExpiredAttempt = `-- name: TransitionRuntimeRunAfterExpiredAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -486,7 +486,7 @@ WHERE r.id = $2
 RETURNING r.id, r.status, r.dispatch_state, r.next_attempt_at,
           c.database_now`
 
-type TransitionRuntimeV2RunAfterExpiredAttemptParams struct {
+type TransitionRuntimeRunAfterExpiredAttemptParams struct {
 	RetryAfterMs int64     `db:"retry_after_ms" json:"retry_after_ms"`
 	RunID        uuid.UUID `db:"run_id" json:"run_id"`
 	AttemptID    uuid.UUID `db:"attempt_id" json:"attempt_id"`
@@ -494,12 +494,12 @@ type TransitionRuntimeV2RunAfterExpiredAttemptParams struct {
 	FencingToken int64     `db:"fencing_token" json:"fencing_token"`
 }
 
-type TransitionRuntimeV2RunAfterExpiredAttemptRow = RuntimeV2ReconcileTransitionRow
+type TransitionRuntimeRunAfterExpiredAttemptRow = RuntimeReconcileTransitionRow
 
-func (q *Queries) TransitionRuntimeV2RunAfterExpiredAttempt(ctx context.Context, arg TransitionRuntimeV2RunAfterExpiredAttemptParams) (TransitionRuntimeV2RunAfterExpiredAttemptRow, error) {
-	var run TransitionRuntimeV2RunAfterExpiredAttemptRow
+func (q *Queries) TransitionRuntimeRunAfterExpiredAttempt(ctx context.Context, arg TransitionRuntimeRunAfterExpiredAttemptParams) (TransitionRuntimeRunAfterExpiredAttemptRow, error) {
+	var run TransitionRuntimeRunAfterExpiredAttemptRow
 	err := q.db.QueryRow(
-		ctx, transitionRuntimeV2RunAfterExpiredAttempt,
+		ctx, transitionRuntimeRunAfterExpiredAttempt,
 		arg.RetryAfterMs, arg.RunID, arg.AttemptID,
 		arg.LeaseID, arg.FencingToken,
 	).Scan(
@@ -509,7 +509,7 @@ func (q *Queries) TransitionRuntimeV2RunAfterExpiredAttempt(ctx context.Context,
 	return run, err
 }
 
-const finalizeRuntimeV2ReconciledRun = `-- name: FinalizeRuntimeV2ReconciledRun :one
+const finalizeRuntimeReconciledRun = `-- name: FinalizeRuntimeReconciledRun :one
 UPDATE runs r
 SET status = $1,
     dispatch_state = $2,
@@ -612,7 +612,7 @@ RETURNING r.id, r.status, r.dispatch_state, r.error_code,
           r.error_message, r.duration_ms, r.finished_at,
           r.terminal_event_id, r.dead_lettered_at`
 
-type FinalizeRuntimeV2ReconciledRunParams struct {
+type FinalizeRuntimeReconciledRunParams struct {
 	Status          string     `db:"status" json:"status"`
 	DispatchState   string     `db:"dispatch_state" json:"dispatch_state"`
 	ErrorCode       string     `db:"error_code" json:"error_code"`
@@ -623,7 +623,7 @@ type FinalizeRuntimeV2ReconciledRunParams struct {
 	AttemptID       *uuid.UUID `db:"attempt_id" json:"attempt_id"`
 }
 
-type FinalizeRuntimeV2ReconciledRunRow struct {
+type FinalizeRuntimeReconciledRunRow struct {
 	ID              uuid.UUID  `db:"id" json:"id"`
 	Status          string     `db:"status" json:"status"`
 	DispatchState   string     `db:"dispatch_state" json:"dispatch_state"`
@@ -635,10 +635,10 @@ type FinalizeRuntimeV2ReconciledRunRow struct {
 	DeadLetteredAt  *time.Time `db:"dead_lettered_at" json:"dead_lettered_at"`
 }
 
-func (q *Queries) FinalizeRuntimeV2ReconciledRun(ctx context.Context, arg FinalizeRuntimeV2ReconciledRunParams) (FinalizeRuntimeV2ReconciledRunRow, error) {
-	var run FinalizeRuntimeV2ReconciledRunRow
+func (q *Queries) FinalizeRuntimeReconciledRun(ctx context.Context, arg FinalizeRuntimeReconciledRunParams) (FinalizeRuntimeReconciledRunRow, error) {
+	var run FinalizeRuntimeReconciledRunRow
 	err := q.db.QueryRow(
-		ctx, finalizeRuntimeV2ReconciledRun,
+		ctx, finalizeRuntimeReconciledRun,
 		arg.Status, arg.DispatchState, arg.ErrorCode, arg.ErrorMessage,
 		arg.DurationMs, arg.TerminalEventID, arg.RunID, arg.AttemptID,
 	).Scan(
@@ -649,11 +649,11 @@ func (q *Queries) FinalizeRuntimeV2ReconciledRun(ctx context.Context, arg Finali
 	return run, err
 }
 
-const getRuntimeV2ReconcileDatabaseClock = `-- name: GetRuntimeV2ReconcileDatabaseClock :one
+const getRuntimeReconcileDatabaseClock = `-- name: GetRuntimeReconcileDatabaseClock :one
 SELECT clock_timestamp() AS database_now`
 
-func (q *Queries) GetRuntimeV2ReconcileDatabaseClock(ctx context.Context) (time.Time, error) {
+func (q *Queries) GetRuntimeReconcileDatabaseClock(ctx context.Context) (time.Time, error) {
 	var databaseNow time.Time
-	err := q.db.QueryRow(ctx, getRuntimeV2ReconcileDatabaseClock).Scan(&databaseNow)
+	err := q.db.QueryRow(ctx, getRuntimeReconcileDatabaseClock).Scan(&databaseNow)
 	return databaseNow, err
 }

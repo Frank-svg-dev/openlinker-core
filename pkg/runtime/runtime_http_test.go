@@ -19,9 +19,9 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-const runtimeV2TestAttachmentID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+const runtimeTestAttachmentID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
-func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
+func TestRuntimeControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	e := echo.New()
 	NewRuntimeHTTPController(RuntimeHTTPDependencies{}).Register(e.Group("/api/v1"))
 
@@ -49,14 +49,14 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2PullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
+func TestRuntimePullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 	agentID := uuid.New()
 	principal := RuntimeSessionPrincipal{AgentID: agentID}
 	wakeHub := NewRuntimeWakeHub()
 	firstPoll := make(chan struct{})
 	assignment := &RunAssignedPayload{}
 	var calls int
-	leases := &runtimeV2LeaseServiceFake{
+	leases := &runtimeLeaseServiceFake{
 		claim: func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
 			calls++
 			if calls == 1 {
@@ -87,8 +87,8 @@ func TestRuntimeV2PullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 	require.Less(t, time.Since(started), 190*time.Millisecond)
 }
 
-func TestRuntimeV2CreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeCreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	var created RuntimeSessionRequest
 	fixture.sessions.create = func(_ context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
 		require.Equal(t, fixture.authenticated, principal)
@@ -98,10 +98,10 @@ func TestRuntimeV2CreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	controller := fixture.controller()
 	hello := fixture.hello()
 
-	recorder := serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", hello)
+	recorder := serveRuntime(t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", hello)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.Equal(t, "runtime-secret", fixture.tokens.plaintext)
-	require.Equal(t, []string{runtimeV2TokenScope}, fixture.tokens.scopes)
+	require.Equal(t, []string{runtimeTokenScope}, fixture.tokens.scopes)
 	require.Equal(t, 1, fixture.devices.calls)
 	require.Equal(t, hello.RuntimeSessionID, created.RuntimeSessionID)
 	require.Equal(t, hello.NodeID, created.NodeID)
@@ -125,10 +125,10 @@ func TestRuntimeV2CreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	require.Equal(t, fixture.now, ready.DatabaseTime)
 }
 
-func TestRuntimeV2AuthenticationRunsBeforeBodyDecode(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeAuthenticationRunsBeforeBodyDecode(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	fixture.tokens.err = errors.New("revoked")
-	tracked := &runtimeV2TrackedReader{reader: strings.NewReader(`{"unknown":true}`)}
+	tracked := &runtimeTrackedReader{reader: strings.NewReader(`{"unknown":true}`)}
 	e := echo.New()
 	fixture.controller().Register(e.Group("/api/v1"))
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", tracked)
@@ -140,11 +140,11 @@ func TestRuntimeV2AuthenticationRunsBeforeBodyDecode(t *testing.T) {
 	require.Equal(t, 0, tracked.reads)
 	require.Equal(t, 0, fixture.devices.calls)
 	require.Equal(t, 0, fixture.sessions.createCalls)
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorUnauthorized)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorUnauthorized)
 }
 
-func TestRuntimeV2SessionHeartbeatAndClose(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeSessionHeartbeatAndClose(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	var heartbeat RuntimeSessionHeartbeatRequest
 	fixture.sessions.heartbeat = func(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
 		heartbeat = request
@@ -158,7 +158,7 @@ func TestRuntimeV2SessionHeartbeatAndClose(t *testing.T) {
 	controller := fixture.controller()
 	hello := fixture.hello()
 
-	heartbeatRecorder := serveRuntimeV2(
+	heartbeatRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/sessions/"+hello.RuntimeSessionID.String()+"/heartbeat", hello,
 	)
@@ -175,7 +175,7 @@ func TestRuntimeV2SessionHeartbeatAndClose(t *testing.T) {
 		Status:           "offline",
 		Reason:           "normal shutdown",
 	}
-	closeRecorder := serveRuntimeV2(
+	closeRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/sessions/"+hello.RuntimeSessionID.String()+"/close", closePayload,
 	)
@@ -185,8 +185,8 @@ func TestRuntimeV2SessionHeartbeatAndClose(t *testing.T) {
 	require.Equal(t, "normal shutdown", closeRequest.Reason)
 }
 
-func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeLeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
 	now := fixture.now
 	fixture.leases.ackResponse = RunAssignmentConfirmedPayload{
@@ -206,7 +206,7 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 	controller := fixture.controller()
 
 	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 2, Inflight: 1}
-	claimRecorder := serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim?wait=0", claim)
+	claimRecorder := serveRuntime(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim?wait=0", claim)
 	require.Equal(t, http.StatusNoContent, claimRecorder.Code, claimRecorder.Body.String())
 	require.Empty(t, claimRecorder.Body.String())
 	require.Equal(t, 1, fixture.leases.claimCalls)
@@ -220,11 +220,11 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 		NodeEnvelope:         "node-envelope",
 		AgentInvocationToken: "invocation-token",
 	}
-	claimRecorder = serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim", claim)
+	claimRecorder = serveRuntime(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim", claim)
 	require.Equal(t, http.StatusOK, claimRecorder.Code, claimRecorder.Body.String())
 	require.Equal(t, 2, fixture.leases.claimCalls)
 
-	ackRecorder := serveRuntimeV2(
+	ackRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-ack",
 		RunAssignmentAckPayload{AttemptIdentity: identity},
@@ -232,7 +232,7 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 	require.Equal(t, http.StatusOK, ackRecorder.Code, ackRecorder.Body.String())
 	require.Equal(t, 1, fixture.leases.ackCalls)
 
-	rejectRecorder := serveRuntimeV2(
+	rejectRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-reject",
 		RunAssignmentRejectPayload{
@@ -245,7 +245,7 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 	require.Equal(t, http.StatusOK, rejectRecorder.Code, rejectRecorder.Body.String())
 	require.Equal(t, 1, fixture.leases.rejectCalls)
 
-	renewRecorder := serveRuntimeV2(
+	renewRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/lease-renew",
 		RunLeaseRenewPayload{
@@ -261,8 +261,8 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.leases.lastPrincipal.RuntimeSessionID)
 }
 
-func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeEventAndResultResolveActingSessionByWorker(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
 	sourceSessionID := uuid.New()
 	require.NotEqual(t, fixture.acting.RuntimeSessionID, sourceSessionID)
@@ -276,7 +276,7 @@ func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
 		Sequence:       7,
 		Replayed:       true,
 	}
-	eventRecorder := serveRuntimeV2(
+	eventRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/events",
 		RunEventPayload{
@@ -306,7 +306,7 @@ func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
 		DispatchState:  string(RuntimeDispatchTerminal),
 		Replayed:       true,
 	}
-	resultRecorder := serveRuntimeV2(
+	resultRecorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/result",
 		RunResultPayload{
@@ -330,8 +330,8 @@ func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
 	require.True(t, resultAck.Replayed)
 }
 
-func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeResumeUsesAuthenticatedTargetSession(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
 	sourceSessionID := uuid.New()
 	identity.RuntimeSessionID = sourceSessionID
@@ -352,7 +352,7 @@ func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
 		AllowedActions:  []RuntimeResumeAction{RuntimeActionUploadEvents},
 	}}}
 
-	recorder := serveRuntimeV2(
+	recorder := serveRuntime(
 		t, fixture.controller(), http.MethodPost,
 		"/api/v1/agent-runtime/runs/resume", request,
 	)
@@ -366,17 +366,17 @@ func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
 
 	request.NodeID = uuid.New()
 	request.Attempts[0].AttemptIdentity.NodeID = request.NodeID
-	recorder = serveRuntimeV2(
+	recorder = serveRuntime(
 		t, fixture.controller(), http.MethodPost,
 		"/api/v1/agent-runtime/runs/resume", request,
 	)
 	require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorPermissionDenied)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorPermissionDenied)
 	require.Equal(t, 1, fixture.resume.calls)
 }
 
-func TestRuntimeV2CallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeCallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	childRunID := uuid.New()
 	fixture.delegation.summary = RunSummary{
 		RunID: childRunID, Status: RuntimeRunRunning, DispatchState: RuntimeDispatchPending,
@@ -384,7 +384,7 @@ func TestRuntimeV2CallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService
 	body := `{"target_agent_id":"` + uuid.NewString() + `","input":{"q":"delegate"}}`
 	e := echo.New()
 	fixture.controller().Register(e.Group("/api/v1"))
-	req := httptest.NewRequest(http.MethodPost, runtimeV2CallAgentPath, strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, runtimeCallAgentPath, strings.NewReader(body))
 	req.Header.Set(echo.HeaderAuthorization, "Bearer invocation-token")
 	req.Header.Set("Idempotency-Key", "delegate-once")
 	req.Header.Set("OpenLinker-Invocation-Context", "node-envelope")
@@ -402,15 +402,15 @@ func TestRuntimeV2CallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService
 	require.Equal(t, "request-proof", authorization.InvocationProof)
 	require.Equal(t, "delegate-once", authorization.IdempotencyKey)
 	require.Equal(t, http.MethodPost, authorization.ProofRequest.Method)
-	require.Equal(t, runtimeV2CallAgentPath, authorization.ProofRequest.Path)
+	require.Equal(t, runtimeCallAgentPath, authorization.ProofRequest.Path)
 	require.Equal(t, []byte(body), authorization.ProofRequest.Body)
 	var summary RunSummary
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &summary))
 	require.Equal(t, childRunID, summary.RunID)
 
 	fixture.devices.err = errors.New("revoked device")
-	tracked := &runtimeV2TrackedReader{reader: strings.NewReader(body)}
-	req = httptest.NewRequest(http.MethodPost, runtimeV2CallAgentPath, tracked)
+	tracked := &runtimeTrackedReader{reader: strings.NewReader(body)}
+	req = httptest.NewRequest(http.MethodPost, runtimeCallAgentPath, tracked)
 	req.Header.Set(echo.HeaderAuthorization, "Bearer invocation-token")
 	recorder = httptest.NewRecorder()
 	e.ServeHTTP(recorder, req)
@@ -419,8 +419,8 @@ func TestRuntimeV2CallAgentPreservesProofBodyAndAuthenticatesDeviceBeforeService
 	require.Equal(t, 1, fixture.delegation.calls)
 }
 
-func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeCommandsBindExplicitSessionAndCancelAck(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
 	cancellationID := uuid.New()
 	cancel := RunCancelPayload{
@@ -438,7 +438,7 @@ func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 
 	target := "/api/v1/agent-runtime/commands?runtime_session_id=" +
 		fixture.acting.RuntimeSessionID.String() + "&wait=0"
-	recorder := serveRuntimeV2Raw(t, fixture.controller(), http.MethodGet, target, "")
+	recorder := serveRuntimeRaw(t, fixture.controller(), http.MethodGet, target, "")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.sessions.resolvedSessionID)
 	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.cancellations.principal.RuntimeSessionID)
@@ -457,7 +457,7 @@ func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 		AttemptIdentity: identity,
 		CancelState:     RuntimeCancelStopped,
 	}
-	recorder = serveRuntimeV2(
+	recorder = serveRuntime(
 		t, fixture.controller(), http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/cancel-ack", ack,
 	)
@@ -471,53 +471,53 @@ func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 		"/api/v1/agent-runtime/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&unknown=1",
 		"/api/v1/agent-runtime/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&wait=0&wait=1",
 	} {
-		recorder = serveRuntimeV2Raw(t, fixture.controller(), http.MethodGet, invalidTarget, "")
+		recorder = serveRuntimeRaw(t, fixture.controller(), http.MethodGet, invalidTarget, "")
 		require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, invalidTarget)
-		requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+		requireRuntimeResponseCode(t, recorder, RuntimeErrorValidationFailed)
 	}
 	require.Equal(t, 1, fixture.cancellations.pollCalls)
 }
 
-func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeRejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	identity := fixture.attemptIdentity()
 	controller := fixture.controller()
 
 	nonCanonical := strings.ToUpper(identity.RunID.String())
-	recorder := serveRuntimeV2(
+	recorder := serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+nonCanonical+"/assignment-ack",
 		RunAssignmentAckPayload{AttemptIdentity: identity},
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorValidationFailed)
 	require.Equal(t, 0, fixture.leases.ackCalls)
 
 	conflicting := identity
 	conflicting.RunID = uuid.New()
-	recorder = serveRuntimeV2(
+	recorder = serveRuntime(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-ack",
 		RunAssignmentAckPayload{AttemptIdentity: conflicting},
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorValidationFailed)
 	require.Equal(t, 0, fixture.leases.ackCalls)
 
 	body, err := json.Marshal(RunAssignmentAckPayload{AttemptIdentity: identity})
 	require.NoError(t, err)
 	unknown := strings.TrimSuffix(string(body), "}") + `,"extra":true}`
-	recorder = serveRuntimeV2Raw(
+	recorder = serveRuntimeRaw(
 		t, controller, http.MethodPost,
 		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-ack", unknown,
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorValidationFailed)
 	require.Equal(t, 0, fixture.leases.ackCalls)
 }
 
-func TestRuntimeV2PullAttachmentHeaderIsCanonicalAndGenerationBound(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimePullAttachmentHeaderIsCanonicalAndGenerationBound(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	controller := fixture.controller()
 	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 1, Inflight: 0}
 	body, err := json.Marshal(claim)
@@ -537,32 +537,32 @@ func TestRuntimeV2PullAttachmentHeaderIsCanonicalAndGenerationBound(t *testing.T
 		return recorder
 	}
 
-	for _, header := range []string{"", " " + runtimeV2TestAttachmentID, strings.ToUpper(runtimeV2TestAttachmentID)} {
+	for _, header := range []string{"", " " + runtimeTestAttachmentID, strings.ToUpper(runtimeTestAttachmentID)} {
 		recorder := serve(header)
 		require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, recorder.Body.String())
-		requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+		requireRuntimeResponseCode(t, recorder, RuntimeErrorValidationFailed)
 	}
 	require.Zero(t, fixture.leases.claimCalls)
 
 	recorder := serve(uuid.NewString())
 	require.Equal(t, http.StatusConflict, recorder.Code, recorder.Body.String())
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorSessionConflict)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorSessionConflict)
 	require.Zero(t, fixture.leases.claimCalls)
 
-	recorder = serve(runtimeV2TestAttachmentID, uuid.NewString())
+	recorder = serve(runtimeTestAttachmentID, uuid.NewString())
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, recorder.Body.String())
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorValidationFailed)
 	require.Zero(t, fixture.leases.claimCalls)
 
-	recorder = serve(runtimeV2TestAttachmentID)
+	recorder = serve(runtimeTestAttachmentID)
 	require.Equal(t, http.StatusNoContent, recorder.Code, recorder.Body.String())
 	require.Equal(t, 1, fixture.leases.claimCalls)
 }
 
-func TestRuntimeV2WaitAndMissingDependenciesFailClosed(t *testing.T) {
-	fixture := newRuntimeV2HandlerFixture()
+func TestRuntimeWaitAndMissingDependenciesFailClosed(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
 	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 1, Inflight: 0}
-	recorder := serveRuntimeV2(
+	recorder := serveRuntime(
 		t, fixture.controller(), http.MethodPost,
 		"/api/v1/agent-runtime/runs/claim?wait=31", claim,
 	)
@@ -573,12 +573,12 @@ func TestRuntimeV2WaitAndMissingDependenciesFailClosed(t *testing.T) {
 		TokenValidator:      fixture.tokens,
 		DeviceAuthenticator: fixture.devices,
 	})
-	recorder = serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim", claim)
+	recorder = serveRuntime(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim", claim)
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
-	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorServiceUnavailable)
+	requireRuntimeResponseCode(t, recorder, RuntimeErrorServiceUnavailable)
 }
 
-func TestMapRuntimeV2HTTPErrorUsesStableSessionLeaseAndStoreCodes(t *testing.T) {
+func TestMapRuntimeHTTPErrorUsesStableSessionLeaseAndStoreCodes(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
@@ -597,29 +597,29 @@ func TestMapRuntimeV2HTTPErrorUsesStableSessionLeaseAndStoreCodes(t *testing.T) 
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			mapped := mapRuntimeV2HTTPError(test.err)
+			mapped := mapRuntimeHTTPError(test.err)
 			require.Equal(t, test.code, mapped.Body.Code)
 			require.Equal(t, runtimeErrorDefaultMessage(test.code), mapped.Body.Message)
 		})
 	}
 }
 
-type runtimeV2HandlerFixture struct {
+type runtimeHandlerFixture struct {
 	now           time.Time
 	authenticated AuthenticatedRuntimePrincipal
 	acting        RuntimeSessionPrincipal
-	tokens        *runtimeV2TokenValidatorFake
-	devices       *runtimeV2DeviceAuthenticatorFake
-	sessions      *runtimeV2SessionServiceFake
-	leases        *runtimeV2LeaseServiceFake
-	events        *runtimeV2EventStoreFake
-	finalizer     *runtimeV2ResultFinalizerFake
-	resume        *runtimeV2ResumeServiceFake
-	delegation    *runtimeV2DelegationServiceFake
-	cancellations *runtimeV2CancellationServiceFake
+	tokens        *runtimeTokenValidatorFake
+	devices       *runtimeDeviceAuthenticatorFake
+	sessions      *runtimeSessionServiceFake
+	leases        *runtimeLeaseServiceFake
+	events        *runtimeEventStoreFake
+	finalizer     *runtimeResultFinalizerFake
+	resume        *runtimeResumeServiceFake
+	delegation    *runtimeDelegationServiceFake
+	cancellations *runtimeCancellationServiceFake
 }
 
-func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
+func newRuntimeHandlerFixture() *runtimeHandlerFixture {
 	now := time.Date(2026, 7, 11, 8, 9, 10, 0, time.UTC)
 	authenticated := AuthenticatedRuntimePrincipal{
 		AgentID:      uuid.New(),
@@ -639,27 +639,27 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 		WorkerID:                        "worker-installation-1",
 		SessionEpoch:                    7,
 		CoreInstanceID:                  uuid.New(),
-		AttachmentID:                    uuid.MustParse(runtimeV2TestAttachmentID),
+		AttachmentID:                    uuid.MustParse(runtimeTestAttachmentID),
 		DeviceCertificateSerial:         authenticated.Device.CertificateSerial,
 		DevicePublicKeyThumbprintSHA256: authenticated.Device.PublicKeyThumbprintSHA256,
 		Status:                          "active",
 		DatabaseTime:                    now,
 	}
-	fixture := &runtimeV2HandlerFixture{
+	fixture := &runtimeHandlerFixture{
 		now:           now,
 		authenticated: authenticated,
 		acting:        acting,
-		tokens: &runtimeV2TokenValidatorFake{token: db.AgentRuntimeToken{
+		tokens: &runtimeTokenValidatorFake{token: db.AgentRuntimeToken{
 			ID: authenticated.CredentialID, AgentID: authenticated.AgentID,
 		}},
-		devices:    &runtimeV2DeviceAuthenticatorFake{device: authenticated.Device},
-		sessions:   &runtimeV2SessionServiceFake{},
-		leases:     &runtimeV2LeaseServiceFake{},
-		events:     &runtimeV2EventStoreFake{},
-		finalizer:  &runtimeV2ResultFinalizerFake{},
-		resume:     &runtimeV2ResumeServiceFake{},
-		delegation: &runtimeV2DelegationServiceFake{},
-		cancellations: &runtimeV2CancellationServiceFake{
+		devices:    &runtimeDeviceAuthenticatorFake{device: authenticated.Device},
+		sessions:   &runtimeSessionServiceFake{},
+		leases:     &runtimeLeaseServiceFake{},
+		events:     &runtimeEventStoreFake{},
+		finalizer:  &runtimeResultFinalizerFake{},
+		resume:     &runtimeResumeServiceFake{},
+		delegation: &runtimeDelegationServiceFake{},
+		cancellations: &runtimeCancellationServiceFake{
 			databaseTime: now,
 		},
 	}
@@ -668,7 +668,7 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 	return fixture
 }
 
-func (f *runtimeV2HandlerFixture) controller() *RuntimeHTTPController {
+func (f *runtimeHandlerFixture) controller() *RuntimeHTTPController {
 	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
@@ -682,7 +682,7 @@ func (f *runtimeV2HandlerFixture) controller() *RuntimeHTTPController {
 	})
 }
 
-func (f *runtimeV2HandlerFixture) hello() RuntimeHelloPayload {
+func (f *runtimeHandlerFixture) hello() RuntimeHelloPayload {
 	return RuntimeHelloPayload{
 		NodeID:           f.authenticated.Device.NodeID,
 		AgentID:          f.authenticated.AgentID,
@@ -696,7 +696,7 @@ func (f *runtimeV2HandlerFixture) hello() RuntimeHelloPayload {
 	}
 }
 
-func (f *runtimeV2HandlerFixture) sessionState() RuntimeSessionState {
+func (f *runtimeHandlerFixture) sessionState() RuntimeSessionState {
 	coreID := f.acting.CoreInstanceID
 	attachment := db.RuntimeSessionAttachment{
 		ID:               f.acting.AttachmentID,
@@ -722,7 +722,7 @@ func (f *runtimeV2HandlerFixture) sessionState() RuntimeSessionState {
 	}
 }
 
-func (f *runtimeV2HandlerFixture) attemptIdentity() AttemptIdentity {
+func (f *runtimeHandlerFixture) attemptIdentity() AttemptIdentity {
 	return AttemptIdentity{
 		RunID:            uuid.New(),
 		AttemptID:        uuid.New(),
@@ -735,14 +735,14 @@ func (f *runtimeV2HandlerFixture) attemptIdentity() AttemptIdentity {
 	}
 }
 
-func serveRuntimeV2(t *testing.T, controller *RuntimeHTTPController, method, target string, payload any) *httptest.ResponseRecorder {
+func serveRuntime(t *testing.T, controller *RuntimeHTTPController, method, target string, payload any) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(payload)
 	require.NoError(t, err)
-	return serveRuntimeV2Raw(t, controller, method, target, string(body))
+	return serveRuntimeRaw(t, controller, method, target, string(body))
 }
 
-func serveRuntimeV2Raw(t *testing.T, controller *RuntimeHTTPController, method, target, body string) *httptest.ResponseRecorder {
+func serveRuntimeRaw(t *testing.T, controller *RuntimeHTTPController, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	e := echo.New()
 	controller.Register(e.Group("/api/v1"))
@@ -750,56 +750,56 @@ func serveRuntimeV2Raw(t *testing.T, controller *RuntimeHTTPController, method, 
 	req.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	if strings.SplitN(target, "?", 2)[0] != "/api/v1/agent-runtime/sessions" &&
-		strings.SplitN(target, "?", 2)[0] != runtimeV2CallAgentPath {
-		req.Header.Set(RuntimeAttachmentIDHeader, runtimeV2TestAttachmentID)
+		strings.SplitN(target, "?", 2)[0] != runtimeCallAgentPath {
+		req.Header.Set(RuntimeAttachmentIDHeader, runtimeTestAttachmentID)
 	}
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, req)
 	return recorder
 }
 
-func requireRuntimeV2ResponseCode(t *testing.T, recorder *httptest.ResponseRecorder, code RuntimeErrorCode) {
+func requireRuntimeResponseCode(t *testing.T, recorder *httptest.ResponseRecorder, code RuntimeErrorCode) {
 	t.Helper()
 	var response RuntimeError
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response), recorder.Body.String())
 	require.Equal(t, code, response.Error.Code)
 }
 
-type runtimeV2TrackedReader struct {
+type runtimeTrackedReader struct {
 	reader io.Reader
 	reads  int
 }
 
-func (r *runtimeV2TrackedReader) Read(target []byte) (int, error) {
+func (r *runtimeTrackedReader) Read(target []byte) (int, error) {
 	r.reads++
 	return r.reader.Read(target)
 }
 
-type runtimeV2TokenValidatorFake struct {
+type runtimeTokenValidatorFake struct {
 	token     db.AgentRuntimeToken
 	err       error
 	plaintext string
 	scopes    []string
 }
 
-func (f *runtimeV2TokenValidatorFake) ValidateRuntimeToken(_ context.Context, plaintext string, scopes ...string) (db.AgentRuntimeToken, error) {
+func (f *runtimeTokenValidatorFake) ValidateRuntimeToken(_ context.Context, plaintext string, scopes ...string) (db.AgentRuntimeToken, error) {
 	f.plaintext = plaintext
 	f.scopes = append([]string(nil), scopes...)
 	return f.token, f.err
 }
 
-type runtimeV2DeviceAuthenticatorFake struct {
+type runtimeDeviceAuthenticatorFake struct {
 	device RuntimeDeviceIdentity
 	err    error
 	calls  int
 }
 
-func (f *runtimeV2DeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error) {
+func (f *runtimeDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error) {
 	f.calls++
 	return f.device, f.err
 }
 
-type runtimeV2SessionServiceFake struct {
+type runtimeSessionServiceFake struct {
 	create                func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error)
 	heartbeat             func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error)
 	close                 func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionCloseRequest) (RuntimeSessionState, error)
@@ -812,7 +812,7 @@ type runtimeV2SessionServiceFake struct {
 	resolvedWorkerID      string
 }
 
-func (f *runtimeV2SessionServiceFake) CreateOrAttachSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
+func (f *runtimeSessionServiceFake) CreateOrAttachSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
 	f.createCalls++
 	if f.create == nil {
 		return RuntimeSessionState{}, nil
@@ -820,31 +820,31 @@ func (f *runtimeV2SessionServiceFake) CreateOrAttachSession(ctx context.Context,
 	return f.create(ctx, principal, request)
 }
 
-func (f *runtimeV2SessionServiceFake) HeartbeatSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
+func (f *runtimeSessionServiceFake) HeartbeatSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
 	if f.heartbeat == nil {
 		return RuntimeSessionState{}, nil
 	}
 	return f.heartbeat(ctx, principal, request)
 }
 
-func (f *runtimeV2SessionServiceFake) CloseSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionCloseRequest) (RuntimeSessionState, error) {
+func (f *runtimeSessionServiceFake) CloseSession(ctx context.Context, principal AuthenticatedRuntimePrincipal, request RuntimeSessionCloseRequest) (RuntimeSessionState, error) {
 	if f.close == nil {
 		return RuntimeSessionState{}, nil
 	}
 	return f.close(ctx, principal, request)
 }
 
-func (f *runtimeV2SessionServiceFake) ResolveSessionPrincipal(_ context.Context, _ AuthenticatedRuntimePrincipal, sessionID uuid.UUID) (RuntimeSessionPrincipal, error) {
+func (f *runtimeSessionServiceFake) ResolveSessionPrincipal(_ context.Context, _ AuthenticatedRuntimePrincipal, sessionID uuid.UUID) (RuntimeSessionPrincipal, error) {
 	f.resolvedSessionID = sessionID
 	return f.resolveResponse, f.resolveErr
 }
 
-func (f *runtimeV2SessionServiceFake) ResolveWorkerSessionPrincipal(_ context.Context, _ AuthenticatedRuntimePrincipal, workerID string) (RuntimeSessionPrincipal, error) {
+func (f *runtimeSessionServiceFake) ResolveWorkerSessionPrincipal(_ context.Context, _ AuthenticatedRuntimePrincipal, workerID string) (RuntimeSessionPrincipal, error) {
 	f.resolvedWorkerID = workerID
 	return f.workerResolveResponse, f.workerResolveErr
 }
 
-type runtimeV2LeaseServiceFake struct {
+type runtimeLeaseServiceFake struct {
 	claim          func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error)
 	claimResponse  *RunAssignedPayload
 	claimErr       error
@@ -861,7 +861,7 @@ type runtimeV2LeaseServiceFake struct {
 	lastPrincipal  RuntimeSessionPrincipal
 }
 
-func (f *runtimeV2LeaseServiceFake) ClaimOffer(ctx context.Context, principal RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
+func (f *runtimeLeaseServiceFake) ClaimOffer(ctx context.Context, principal RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
 	f.claimCalls++
 	f.lastPrincipal = principal
 	if f.claim != nil {
@@ -870,30 +870,30 @@ func (f *runtimeV2LeaseServiceFake) ClaimOffer(ctx context.Context, principal Ru
 	return f.claimResponse, f.claimErr
 }
 
-func (f *runtimeV2LeaseServiceFake) AckAssignment(_ context.Context, principal RuntimeSessionPrincipal, _ RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error) {
+func (f *runtimeLeaseServiceFake) AckAssignment(_ context.Context, principal RuntimeSessionPrincipal, _ RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error) {
 	f.ackCalls++
 	f.lastPrincipal = principal
 	return f.ackResponse, f.ackErr
 }
 
-func (f *runtimeV2LeaseServiceFake) RejectAssignment(_ context.Context, principal RuntimeSessionPrincipal, _ RunAssignmentRejectPayload) (RunAssignmentRejectedPayload, error) {
+func (f *runtimeLeaseServiceFake) RejectAssignment(_ context.Context, principal RuntimeSessionPrincipal, _ RunAssignmentRejectPayload) (RunAssignmentRejectedPayload, error) {
 	f.rejectCalls++
 	f.lastPrincipal = principal
 	return f.rejectResponse, f.rejectErr
 }
 
-func (f *runtimeV2LeaseServiceFake) RenewLease(_ context.Context, principal RuntimeSessionPrincipal, _ RunLeaseRenewPayload) (RunLeaseRenewedPayload, error) {
+func (f *runtimeLeaseServiceFake) RenewLease(_ context.Context, principal RuntimeSessionPrincipal, _ RunLeaseRenewPayload) (RunLeaseRenewedPayload, error) {
 	f.renewCalls++
 	f.lastPrincipal = principal
 	return f.renewResponse, f.renewErr
 }
 
-func (f *runtimeV2LeaseServiceFake) ReleaseUnackedOffer(_ context.Context, principal RuntimeSessionPrincipal, _ ...string) error {
+func (f *runtimeLeaseServiceFake) ReleaseUnackedOffer(_ context.Context, principal RuntimeSessionPrincipal, _ ...string) error {
 	f.lastPrincipal = principal
 	return nil
 }
 
-type runtimeV2EventStoreFake struct {
+type runtimeEventStoreFake struct {
 	ack       RuntimeEventAck
 	err       error
 	principal RuntimeEventPrincipal
@@ -901,21 +901,21 @@ type runtimeV2EventStoreFake struct {
 	request   RuntimeEventRequest
 }
 
-func (f *runtimeV2EventStoreFake) AppendRuntimeEvent(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
+func (f *runtimeEventStoreFake) AppendRuntimeEvent(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
 	f.principal = principal
 	f.identity = identity
 	f.request = request
 	return f.ack, f.err
 }
 
-type runtimeV2ResultFinalizerFake struct {
+type runtimeResultFinalizerFake struct {
 	ack       RuntimeResultAck
 	err       error
 	principal RuntimeResultPrincipal
 	request   RuntimeResultRequest
 }
 
-type runtimeV2ResumeServiceFake struct {
+type runtimeResumeServiceFake struct {
 	response  RuntimeResumeResponse
 	err       error
 	principal RuntimeSessionPrincipal
@@ -923,14 +923,14 @@ type runtimeV2ResumeServiceFake struct {
 	calls     int
 }
 
-type runtimeV2DelegationServiceFake struct {
+type runtimeDelegationServiceFake struct {
 	summary       RunSummary
 	err           error
 	authorization RuntimeDelegationAuthorization
 	calls         int
 }
 
-type runtimeV2CancellationServiceFake struct {
+type runtimeCancellationServiceFake struct {
 	response     RuntimeCommandsResponse
 	databaseTime time.Time
 	err          error
@@ -941,7 +941,7 @@ type runtimeV2CancellationServiceFake struct {
 	ackCalls     int
 }
 
-func (f *runtimeV2CancellationServiceFake) NextCommand(
+func (f *runtimeCancellationServiceFake) NextCommand(
 	_ context.Context,
 	principal RuntimeSessionPrincipal,
 ) (*PendingCommand, time.Time, error) {
@@ -953,7 +953,7 @@ func (f *runtimeV2CancellationServiceFake) NextCommand(
 	return &command, f.response.DatabaseTime, f.err
 }
 
-func (f *runtimeV2CancellationServiceFake) PollCommands(
+func (f *runtimeCancellationServiceFake) PollCommands(
 	_ context.Context,
 	principal RuntimeSessionPrincipal,
 ) (RuntimeCommandsResponse, error) {
@@ -962,7 +962,7 @@ func (f *runtimeV2CancellationServiceFake) PollCommands(
 	return f.response, f.err
 }
 
-func (f *runtimeV2CancellationServiceFake) AckCancel(
+func (f *runtimeCancellationServiceFake) AckCancel(
 	_ context.Context,
 	principal RuntimeSessionPrincipal,
 	payload RunCancelAckPayload,
@@ -973,7 +973,7 @@ func (f *runtimeV2CancellationServiceFake) AckCancel(
 	return f.state, f.err
 }
 
-func (f *runtimeV2DelegationServiceFake) CallAgent(
+func (f *runtimeDelegationServiceFake) CallAgent(
 	_ context.Context,
 	authorization RuntimeDelegationAuthorization,
 ) (RunSummary, error) {
@@ -982,7 +982,7 @@ func (f *runtimeV2DelegationServiceFake) CallAgent(
 	return f.summary, f.err
 }
 
-func (f *runtimeV2ResumeServiceFake) Resume(
+func (f *runtimeResumeServiceFake) Resume(
 	_ context.Context,
 	principal RuntimeSessionPrincipal,
 	payload RuntimeResumePayload,
@@ -993,20 +993,20 @@ func (f *runtimeV2ResumeServiceFake) Resume(
 	return f.response, f.err
 }
 
-func (f *runtimeV2ResultFinalizerFake) Finalize(_ context.Context, principal RuntimeResultPrincipal, request RuntimeResultRequest) (RuntimeResultAck, error) {
+func (f *runtimeResultFinalizerFake) Finalize(_ context.Context, principal RuntimeResultPrincipal, request RuntimeResultRequest) (RuntimeResultAck, error) {
 	f.principal = principal
 	f.request = request
 	return f.ack, f.err
 }
 
 var (
-	_ RuntimeTokenValidator      = (*runtimeV2TokenValidatorFake)(nil)
-	_ RuntimeDeviceAuthenticator = (*runtimeV2DeviceAuthenticatorFake)(nil)
-	_ RuntimeSessionAPI          = (*runtimeV2SessionServiceFake)(nil)
-	_ RuntimeLeaseAPI            = (*runtimeV2LeaseServiceFake)(nil)
-	_ RuntimeEventProjector      = (*runtimeV2EventStoreFake)(nil)
-	_ RuntimeResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
-	_ RuntimeResumeAPI           = (*runtimeV2ResumeServiceFake)(nil)
-	_ RuntimeDelegationAPI       = (*runtimeV2DelegationServiceFake)(nil)
-	_ RuntimeCancellationAPI     = (*runtimeV2CancellationServiceFake)(nil)
+	_ RuntimeTokenValidator      = (*runtimeTokenValidatorFake)(nil)
+	_ RuntimeDeviceAuthenticator = (*runtimeDeviceAuthenticatorFake)(nil)
+	_ RuntimeSessionAPI          = (*runtimeSessionServiceFake)(nil)
+	_ RuntimeLeaseAPI            = (*runtimeLeaseServiceFake)(nil)
+	_ RuntimeEventProjector      = (*runtimeEventStoreFake)(nil)
+	_ RuntimeResultFinalizer     = (*runtimeResultFinalizerFake)(nil)
+	_ RuntimeResumeAPI           = (*runtimeResumeServiceFake)(nil)
+	_ RuntimeDelegationAPI       = (*runtimeDelegationServiceFake)(nil)
+	_ RuntimeCancellationAPI     = (*runtimeCancellationServiceFake)(nil)
 )

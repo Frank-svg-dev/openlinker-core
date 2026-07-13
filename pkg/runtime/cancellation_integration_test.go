@@ -15,9 +15,9 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
-func TestRuntimeCancellationV2AgentNodeLifecycle(t *testing.T) {
+func TestRuntimeCancellationAgentNodeLifecycle(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.canceled")
 
@@ -90,9 +90,9 @@ func TestRuntimeCancellationV2AgentNodeLifecycle(t *testing.T) {
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 3, 1)
 }
 
-func TestRuntimeCancellationV2RollsBackEveryTerminalFactTogether(t *testing.T) {
+func TestRuntimeCancellationRollsBackEveryTerminalFactTogether(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.canceled")
 	installFailingFinalizerEffectTrigger(t, pool)
@@ -134,9 +134,9 @@ func TestRuntimeCancellationV2RollsBackEveryTerminalFactTogether(t *testing.T) {
 	assertRuntimeCancellationAttemptCapacity(t, pool, fixture, false, 1, 1)
 }
 
-func TestServiceCancelRunRoutesRuntimeV2ToDurableCoordinator(t *testing.T) {
+func TestServiceCancelRunRoutesRuntimeToDurableCoordinator(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 
 	var ownerID uuid.UUID
@@ -152,9 +152,9 @@ func TestServiceCancelRunRoutesRuntimeV2ToDurableCoordinator(t *testing.T) {
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 
-func TestRuntimeCancellationV2DeadlineReaperStopsDeliveryAndReleasesAtomically(t *testing.T) {
+func TestRuntimeCancellationDeadlineReaperStopsDeliveryAndReleasesAtomically(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	coordinator := runtime.NewRuntimeCancellationCoordinator(pool)
 
@@ -197,9 +197,9 @@ func TestRuntimeCancellationV2DeadlineReaperStopsDeliveryAndReleasesAtomically(t
 	require.Equal(t, cancellationState, runCancelState)
 }
 
-func TestRuntimeCancellationV2CoreAttemptEndsOnlyAfterExecutionStops(t *testing.T) {
+func TestRuntimeCancellationCoreAttemptEndsOnlyAfterExecutionStops(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	convertRuntimeCancellationFixtureToCoreHTTP(t, pool, fixture)
 
@@ -235,9 +235,9 @@ func TestRuntimeCancellationV2CoreAttemptEndsOnlyAfterExecutionStops(t *testing.
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 
-func TestRuntimeCancellationV2CoreCrashBecomesUnconfirmedAtDatabaseDeadline(t *testing.T) {
+func TestRuntimeCancellationCoreCrashBecomesUnconfirmedAtDatabaseDeadline(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	convertRuntimeCancellationFixtureToCoreHTTP(t, pool, fixture)
 	var ownerID uuid.UUID
@@ -270,9 +270,9 @@ func TestRuntimeCancellationV2CoreCrashBecomesUnconfirmedAtDatabaseDeadline(t *t
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 
-func TestRuntimeCancellationV2ConcurrentOwnerRequestsHaveOneWinner(t *testing.T) {
+func TestRuntimeCancellationConcurrentOwnerRequestsHaveOneWinner(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	var ownerID uuid.UUID
 	require.NoError(t, pool.QueryRow(context.Background(),
@@ -322,9 +322,9 @@ func TestRuntimeCancellationV2ConcurrentOwnerRequestsHaveOneWinner(t *testing.T)
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 
-func TestRuntimeCancellationV2CancelResultRace1000Contenders(t *testing.T) {
+func TestRuntimeCancellationCancelResultRace1000Contenders(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	var ownerID uuid.UUID
 	require.NoError(t, pool.QueryRow(context.Background(),
@@ -385,9 +385,9 @@ func TestRuntimeCancellationV2CancelResultRace1000Contenders(t *testing.T) {
 	require.Equal(t, 1, ledgerRows)
 }
 
-func TestRuntimeCancellationV2CancelAckRace1000Contenders(t *testing.T) {
+func TestRuntimeCancellationCancelAckRace1000Contenders(t *testing.T) {
 	pool := setupTestDB(t)
-	requireRuntimeCancellationV2Schema(t, pool)
+	requireRuntimeCancellationSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	var ownerID uuid.UUID
 	require.NoError(t, pool.QueryRow(context.Background(),
@@ -450,7 +450,7 @@ func TestRuntimeCancellationV2CancelAckRace1000Contenders(t *testing.T) {
 	assertRuntimeCancellationTerminalFacts(t, pool, fixture.identity.RunID, 1, 1, 0, 1)
 }
 
-func requireRuntimeCancellationV2Schema(t *testing.T, pool *pgxpool.Pool) {
+func requireRuntimeCancellationSchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var version int32
 	var migration string

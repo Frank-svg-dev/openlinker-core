@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	runtimeV2CallAgentPath            = "/api/v1/agent-runtime/call-agent"
-	defaultRuntimeV2DelegationDepth   = 8
-	defaultRuntimeV2DelegationRunning = 500
+	runtimeCallAgentPath            = "/api/v1/agent-runtime/call-agent"
+	defaultRuntimeDelegationDepth   = 8
+	defaultRuntimeDelegationRunning = 500
 )
 
 // RuntimeInvocationVerifier verifies the two domain-separated capabilities
@@ -64,8 +64,8 @@ func NewRuntimeDelegationService(
 		pool:               pool,
 		runtime:            runtimeService,
 		verifier:           verifier,
-		maxDepth:           defaultRuntimeV2DelegationDepth,
-		maxRunningChildren: defaultRuntimeV2DelegationRunning,
+		maxDepth:           defaultRuntimeDelegationDepth,
+		maxRunningChildren: defaultRuntimeDelegationRunning,
 	}
 	if pool != nil {
 		service.queries = db.New(pool)
@@ -78,17 +78,17 @@ func (s *RuntimeDelegationService) CallAgent(
 	authorization RuntimeDelegationAuthorization,
 ) (RunSummary, error) {
 	if s == nil || s.pool == nil || s.queries == nil || s.runtime == nil || s.verifier == nil {
-		return RunSummary{}, runtimeV2UnavailableError()
+		return RunSummary{}, runtimeUnavailableError()
 	}
 	if !validRuntimeDelegationAuthorization(authorization) {
-		return RunSummary{}, runtimeV2UnauthorizedError(ErrInvalidRuntimeInvocation)
+		return RunSummary{}, runtimeUnauthorizedError(ErrInvalidRuntimeInvocation)
 	}
 
 	var databaseNow time.Time
 	if err := s.pool.QueryRow(ctx, "SELECT clock_timestamp()").Scan(&databaseNow); err != nil {
-		return RunSummary{}, runtimeV2DatabaseUnavailable(err)
+		return RunSummary{}, runtimeDatabaseUnavailable(err)
 	}
-	capability, err := verifyRuntimeV2DelegationCapabilityPair(
+	capability, err := verifyRuntimeDelegationCapabilityPair(
 		s.verifier,
 		authorization.InvocationContext,
 		authorization.InvocationToken,
@@ -98,7 +98,7 @@ func (s *RuntimeDelegationService) CallAgent(
 		if errors.Is(err, ErrExpiredRuntimeInvocation) {
 			return RunSummary{}, newRuntimeLeaseError(RuntimeLeaseErrorLeaseExpired, err)
 		}
-		return RunSummary{}, runtimeV2UnauthorizedError(err)
+		return RunSummary{}, runtimeUnauthorizedError(err)
 	}
 	if capability.NodeID != authorization.Device.NodeID {
 		return RunSummary{}, newRuntimeTransportError(
@@ -115,7 +115,7 @@ func (s *RuntimeDelegationService) CallAgent(
 		authorization.InvocationProof,
 		authorization.ProofRequest,
 	); err != nil {
-		return RunSummary{}, runtimeV2UnauthorizedError(err)
+		return RunSummary{}, runtimeUnauthorizedError(err)
 	}
 	var request CallAgentRequest
 	if err = decodeRuntimeJSON(authorization.ProofRequest.Body, &request); err != nil {
@@ -216,7 +216,7 @@ WHERE id = $1
 		return uuid.Nil, uuid.Nil, newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
 	}
 	if err != nil {
-		return uuid.Nil, uuid.Nil, runtimeV2DatabaseUnavailable(err)
+		return uuid.Nil, uuid.Nil, runtimeDatabaseUnavailable(err)
 	}
 	return userID, agentID, nil
 }
@@ -231,18 +231,18 @@ func (s *RuntimeDelegationService) validateDelegationTarget(
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, err)
 	}
 	if err != nil {
-		return runtimeV2DatabaseUnavailable(err)
+		return runtimeDatabaseUnavailable(err)
 	}
 	target, err := s.queries.GetAgentByID(ctx, targetAgentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return newRuntimeTransportError(RuntimeErrorNotFound, runtimeErrorDefaultMessage(RuntimeErrorNotFound), err)
 	}
 	if err != nil {
-		return runtimeV2DatabaseUnavailable(err)
+		return runtimeDatabaseUnavailable(err)
 	}
 	policy, err := s.queries.GetAgentCallPolicy(ctx, targetAgentID)
 	if err != nil {
-		return runtimeV2DatabaseUnavailable(err)
+		return runtimeDatabaseUnavailable(err)
 	}
 	if policy == "private" || (policy == "same_creator" && caller.CreatorID != target.CreatorID) {
 		return newRuntimeTransportError(
@@ -254,7 +254,7 @@ func (s *RuntimeDelegationService) validateDelegationTarget(
 			RunID: capability.RunID, MaxDepth: s.maxDepth + 1,
 		})
 		if lineageErr != nil {
-			return runtimeV2DatabaseUnavailable(lineageErr)
+			return runtimeDatabaseUnavailable(lineageErr)
 		}
 		for _, ancestorAgentID := range lineage {
 			if ancestorAgentID == targetAgentID {
@@ -272,7 +272,7 @@ func (s *RuntimeDelegationService) validateDelegationTarget(
 	if s.maxRunningChildren > 0 {
 		count, countErr := s.queries.CountRunningDelegations(ctx)
 		if countErr != nil {
-			return runtimeV2DatabaseUnavailable(countErr)
+			return runtimeDatabaseUnavailable(countErr)
 		}
 		if count >= s.maxRunningChildren {
 			err := newRuntimeTransportError(
@@ -322,7 +322,7 @@ func (s *RuntimeDelegationService) childA2AContext(
 		references = append(append([]string(nil), mapping.ReferenceTaskIDs...), parentTaskID)
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:
-		return nil, runtimeV2DatabaseUnavailable(err)
+		return nil, runtimeDatabaseUnavailable(err)
 	}
 
 	return &RunA2AContextRequest{
@@ -351,7 +351,7 @@ WHERE id = $1
 		return RunSummary{}, newRuntimeTransportError(RuntimeErrorNotFound, runtimeErrorDefaultMessage(RuntimeErrorNotFound), err)
 	}
 	if err != nil {
-		return RunSummary{}, runtimeV2DatabaseUnavailable(err)
+		return RunSummary{}, runtimeDatabaseUnavailable(err)
 	}
 	if err = ValidateRuntimePayload(summary); err != nil {
 		return RunSummary{}, newRuntimeTransportError(
@@ -392,7 +392,7 @@ FOR UPDATE OF s`,
 		authorization.Device.CertificateSerial,
 		RuntimeContractDigest,
 	).Scan(&sessionEpoch); err != nil {
-		return runtimeV2DelegationPrincipalLockError(err)
+		return runtimeDelegationPrincipalLockError(err)
 	}
 	if sessionEpoch < 1 {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
@@ -416,7 +416,7 @@ FOR UPDATE OF n`,
 		authorization.Device.PublicKeyThumbprintSHA256,
 		RuntimeContractDigest,
 	).Scan(&lockedNodeID); err != nil {
-		return runtimeV2DelegationPrincipalLockError(err)
+		return runtimeDelegationPrincipalLockError(err)
 	}
 	var lockedCredentialID uuid.UUID
 	var credentialExpiresAt *time.Time
@@ -432,13 +432,13 @@ WHERE t.id = $1
 FOR SHARE OF t`, capability.CredentialID, capability.AgentID).Scan(
 		&lockedCredentialID, &credentialExpiresAt,
 	); err != nil {
-		return runtimeV2DelegationPrincipalLockError(err)
+		return runtimeDelegationPrincipalLockError(err)
 	}
 	if lockedNodeID != capability.NodeID || lockedCredentialID != capability.CredentialID {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
 
-	lockedRun, err := lockRuntimeV2DelegatingRun(ctx, tx, capability.RunID)
+	lockedRun, err := lockRuntimeDelegatingRun(ctx, tx, capability.RunID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
@@ -461,14 +461,14 @@ FOR SHARE OF t`, capability.CredentialID, capability.AgentID).Scan(
 		return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 	}
 
-	attempt, err := lockRuntimeV2DelegatingAttempt(ctx, tx, capability)
+	attempt, err := lockRuntimeDelegatingAttempt(ctx, tx, capability)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
 		}
 		return err
 	}
-	verified, err := verifyRuntimeV2DelegationCapabilityPair(
+	verified, err := verifyRuntimeDelegationCapabilityPair(
 		s.verifier,
 		authorization.InvocationContext,
 		authorization.InvocationToken,
@@ -480,9 +480,9 @@ FOR SHARE OF t`, capability.CredentialID, capability.AgentID).Scan(
 		}
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, err)
 	}
-	if !runtimeV2InvocationCapabilitiesEqual(preliminary, verified) ||
+	if !runtimeInvocationCapabilitiesEqual(preliminary, verified) ||
 		verified.NodeID != authorization.Device.NodeID ||
-		!runtimeV2DelegatingRunOwnsCapability(lockedRun, verified) ||
+		!runtimeDelegatingRunOwnsCapability(lockedRun, verified) ||
 		attempt.acceptedAt == nil || attempt.finishedAt != nil || attempt.outcome != nil || attempt.resultID != nil ||
 		!attempt.offeredAt.Equal(verified.IssuedAt) ||
 		!attempt.attemptDeadlineAt.Equal(verified.ExpiresAt) ||
@@ -507,7 +507,7 @@ FOR SHARE OF t`, capability.CredentialID, capability.AgentID).Scan(
 	return nil
 }
 
-type runtimeV2DelegatingRun struct {
+type runtimeDelegatingRun struct {
 	userID            uuid.UUID
 	agentID           uuid.UUID
 	input             []byte
@@ -530,12 +530,12 @@ type runtimeV2DelegatingRun struct {
 	databaseNow       time.Time
 }
 
-func lockRuntimeV2DelegatingRun(
+func lockRuntimeDelegatingRun(
 	ctx context.Context,
 	tx pgx.Tx,
 	runID uuid.UUID,
-) (runtimeV2DelegatingRun, error) {
-	var run runtimeV2DelegatingRun
+) (runtimeDelegatingRun, error) {
+	var run runtimeDelegatingRun
 	err := tx.QueryRow(ctx, `
 SELECT r.user_id, r.agent_id, r.input, r.status, r.dispatch_state,
        r.active_attempt_id, r.lease_id, r.fencing_token,
@@ -557,7 +557,7 @@ FOR UPDATE OF r`, runID).Scan(
 	return run, err
 }
 
-type runtimeV2DelegatingAttempt struct {
+type runtimeDelegatingAttempt struct {
 	offeredAt         time.Time
 	acceptedAt        *time.Time
 	finishedAt        *time.Time
@@ -567,12 +567,12 @@ type runtimeV2DelegatingAttempt struct {
 	resultID          *uuid.UUID
 }
 
-func lockRuntimeV2DelegatingAttempt(
+func lockRuntimeDelegatingAttempt(
 	ctx context.Context,
 	tx pgx.Tx,
 	capability RuntimeInvocationCapability,
-) (runtimeV2DelegatingAttempt, error) {
-	var attempt runtimeV2DelegatingAttempt
+) (runtimeDelegatingAttempt, error) {
+	var attempt runtimeDelegatingAttempt
 	err := tx.QueryRow(ctx, `
 SELECT a.offered_at, a.accepted_at, a.finished_at, a.outcome,
        a.lease_expires_at, a.attempt_deadline_at, a.result_id
@@ -605,8 +605,8 @@ FOR UPDATE OF a`,
 	return attempt, err
 }
 
-func runtimeV2DelegatingRunOwnsCapability(
-	run runtimeV2DelegatingRun,
+func runtimeDelegatingRunOwnsCapability(
+	run runtimeDelegatingRun,
 	capability RuntimeInvocationCapability,
 ) bool {
 	return run.agentID == capability.AgentID &&
@@ -619,7 +619,7 @@ func runtimeV2DelegatingRunOwnsCapability(
 		uuidPointerEqual(run.leaseTokenID, capability.CredentialID)
 }
 
-func verifyRuntimeV2DelegationCapabilityPair(
+func verifyRuntimeDelegationCapabilityPair(
 	verifier RuntimeInvocationVerifier,
 	contextValue string,
 	token string,
@@ -636,13 +636,13 @@ func verifyRuntimeV2DelegationCapabilityPair(
 	if err != nil {
 		return RuntimeInvocationCapability{}, err
 	}
-	if !runtimeV2InvocationCapabilitiesEqual(fromContext, fromToken) {
+	if !runtimeInvocationCapabilitiesEqual(fromContext, fromToken) {
 		return RuntimeInvocationCapability{}, ErrInvalidRuntimeInvocation
 	}
 	return fromToken, nil
 }
 
-func runtimeV2InvocationCapabilitiesEqual(left, right RuntimeInvocationCapability) bool {
+func runtimeInvocationCapabilitiesEqual(left, right RuntimeInvocationCapability) bool {
 	return left.RunID == right.RunID && left.AttemptID == right.AttemptID &&
 		left.LeaseID == right.LeaseID && left.FencingToken == right.FencingToken &&
 		left.AgentID == right.AgentID && left.CredentialID == right.CredentialID &&
@@ -659,20 +659,20 @@ func validRuntimeDelegationAuthorization(value RuntimeDelegationAuthorization) b
 		validSHA256Hex(value.Device.PublicKeyThumbprintSHA256) &&
 		value.InvocationContext != "" && value.InvocationToken != "" && value.InvocationProof != "" &&
 		value.ProofRequest.Method == http.MethodPost &&
-		value.ProofRequest.Path == runtimeV2CallAgentPath &&
+		value.ProofRequest.Path == runtimeCallAgentPath &&
 		value.ProofRequest.IdempotencyKey == value.IdempotencyKey &&
 		value.ProofRequest.Context == value.InvocationContext &&
 		len(value.ProofRequest.Body) > 0 && int64(len(value.ProofRequest.Body)) <= MaxRuntimeMessageBytes
 }
 
-func runtimeV2DelegationPrincipalLockError(err error) error {
+func runtimeDelegationPrincipalLockError(err error) error {
 	if errors.Is(err, pgx.ErrNoRows) {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, err)
 	}
 	return err
 }
 
-func runtimeV2DatabaseUnavailable(cause error) *RuntimeTransportError {
+func runtimeDatabaseUnavailable(cause error) *RuntimeTransportError {
 	err := newRuntimeTransportError(
 		RuntimeErrorServiceUnavailable,
 		runtimeErrorDefaultMessage(RuntimeErrorServiceUnavailable),

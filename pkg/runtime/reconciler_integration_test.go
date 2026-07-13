@@ -20,7 +20,7 @@ func TestRuntimeDeadlineReconcilerConcurrentLeaseExpiryIsExactlyOnce(t *testing.
 	pool := setupTestDB(t)
 	requireRuntimeDeadlineReconcilerSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 20*time.Millisecond)
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 	reconciler := runtime.NewRuntimeDeadlineReconciler(pool, nil)
 	_, err := reconciler.ReconcileBatch(context.Background(), 0)
 	require.ErrorIs(t, err, runtime.ErrRuntimeReconcileBatchInvalid)
@@ -91,7 +91,7 @@ func TestRuntimeDeadlineReconcilerUsesSkipLockedCapacityOrder(t *testing.T) {
 	pool := setupTestDB(t)
 	requireRuntimeDeadlineReconcilerSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 20*time.Millisecond)
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 	require.NotNil(t, fixture.identity.RuntimeSessionID)
 
 	blocker, err := pool.Begin(context.Background())
@@ -145,7 +145,7 @@ func TestRuntimeDeadlineReconcilerReleasesCapacityFromClosedSession(t *testing.T
 		return err
 	})
 	require.NoError(t, err)
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 
 	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
 	require.NoError(t, err)
@@ -167,14 +167,14 @@ func TestRuntimeDeadlineReconcilerTerminalRollbackAndDeadLetterAreAtomic(t *test
 	setFinalizerMaxAttempts(t, pool, fixture.identity.RunID, 1)
 	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.failed")
 	installFailingFinalizerEffectTrigger(t, pool)
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 	reconciler := runtime.NewRuntimeDeadlineReconciler(pool, nil)
 
 	_, err := reconciler.ReconcileBatch(context.Background(), 1)
 	require.ErrorContains(t, err, "forced finalizer effect failure")
 	assertFinalizerAttemptStillExecuting(t, pool, fixture.identity.RunID, fixture.identity.AttemptID)
 	assertFinalizerTerminalCounts(t, pool, fixture.identity.RunID, 0, 0, 0)
-	assertRuntimeV2ReconcileCapacity(t, pool, fixture, 1, 1, false)
+	assertRuntimeReconcileCapacity(t, pool, fixture, 1, 1, false)
 
 	_, err = pool.Exec(context.Background(), `DROP TRIGGER fail_finalizer_effect_insert ON run_effect_outbox`)
 	require.NoError(t, err)
@@ -238,8 +238,8 @@ func TestRuntimeDeadlineReconcilerExpiresOffersToPendingOrTerminal(t *testing.T)
 		pool := setupTestDB(t)
 		requireRuntimeDeadlineReconcilerSchema(t, pool)
 		fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
-		convertRuntimeV2ReconcileFixtureToOffered(t, pool, fixture, 2)
-		waitForRuntimeV2OfferDue(t, pool, fixture.identity.AttemptID)
+		convertRuntimeReconcileFixtureToOffered(t, pool, fixture, 2)
+		waitForRuntimeOfferDue(t, pool, fixture.identity.AttemptID)
 
 		result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
 		require.NoError(t, err)
@@ -268,8 +268,8 @@ func TestRuntimeDeadlineReconcilerExpiresOffersToPendingOrTerminal(t *testing.T)
 		pool := setupTestDB(t)
 		requireRuntimeDeadlineReconcilerSchema(t, pool)
 		fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
-		convertRuntimeV2ReconcileFixtureToOffered(t, pool, fixture, 1)
-		waitForRuntimeV2OfferDue(t, pool, fixture.identity.AttemptID)
+		convertRuntimeReconcileFixtureToOffered(t, pool, fixture, 1)
+		waitForRuntimeOfferDue(t, pool, fixture.identity.AttemptID)
 
 		result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
 		require.NoError(t, err)
@@ -293,8 +293,8 @@ func TestRuntimeDeadlineReconcilerExpiresOffersToPendingOrTerminal(t *testing.T)
 func TestRuntimeDeadlineReconcilerTerminatesPendingWithoutAttempt(t *testing.T) {
 	pool := setupTestDB(t)
 	requireRuntimeDeadlineReconcilerSchema(t, pool)
-	runID := insertRuntimeV2PendingDeadlineRun(t, pool, 80*time.Millisecond)
-	waitForRuntimeV2RunDispatchDue(t, pool, runID)
+	runID := insertRuntimePendingDeadlineRun(t, pool, 80*time.Millisecond)
+	waitForRuntimeRunDispatchDue(t, pool, runID)
 
 	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 5)
 	require.NoError(t, err)
@@ -329,12 +329,12 @@ func TestRuntimeDeadlineReconcilerLeavesCancellationToCancellationReaper(t *test
 		context.Background(), ownerID, fixture.identity.RunID, "reconciler exclusion",
 	)
 	require.NoError(t, err)
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 
 	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 20)
 	require.NoError(t, err)
 	require.Zero(t, result.Reconciled)
-	assertRuntimeV2ReconcileCapacity(t, pool, fixture, 1, 1, false)
+	assertRuntimeReconcileCapacity(t, pool, fixture, 1, 1, false)
 
 	var cancelRequestID *uuid.UUID
 	var finishedAt *time.Time
@@ -362,7 +362,7 @@ func requireRuntimeDeadlineReconcilerSchema(t *testing.T, pool *pgxpool.Pool) {
 	}
 }
 
-func waitForRuntimeV2LeaseDue(t *testing.T, pool *pgxpool.Pool, attemptID uuid.UUID) {
+func waitForRuntimeLeaseDue(t *testing.T, pool *pgxpool.Pool, attemptID uuid.UUID) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		var due bool
@@ -373,7 +373,7 @@ func waitForRuntimeV2LeaseDue(t *testing.T, pool *pgxpool.Pool, attemptID uuid.U
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
-func waitForRuntimeV2OfferDue(t *testing.T, pool *pgxpool.Pool, attemptID uuid.UUID) {
+func waitForRuntimeOfferDue(t *testing.T, pool *pgxpool.Pool, attemptID uuid.UUID) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		var due bool
@@ -384,7 +384,7 @@ func waitForRuntimeV2OfferDue(t *testing.T, pool *pgxpool.Pool, attemptID uuid.U
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
-func waitForRuntimeV2RunDispatchDue(t *testing.T, pool *pgxpool.Pool, runID uuid.UUID) {
+func waitForRuntimeRunDispatchDue(t *testing.T, pool *pgxpool.Pool, runID uuid.UUID) {
 	t.Helper()
 	require.Eventually(t, func() bool {
 		var due bool
@@ -395,7 +395,7 @@ func waitForRuntimeV2RunDispatchDue(t *testing.T, pool *pgxpool.Pool, runID uuid
 	}, 2*time.Second, 5*time.Millisecond)
 }
 
-func convertRuntimeV2ReconcileFixtureToOffered(
+func convertRuntimeReconcileFixtureToOffered(
 	t *testing.T,
 	pool *pgxpool.Pool,
 	fixture eventStoreFixture,
@@ -436,7 +436,7 @@ func convertRuntimeV2ReconcileFixtureToOffered(
 	require.NoError(t, err)
 }
 
-func insertRuntimeV2PendingDeadlineRun(
+func insertRuntimePendingDeadlineRun(
 	t *testing.T,
 	pool *pgxpool.Pool,
 	dispatchTTL time.Duration,
@@ -471,7 +471,7 @@ func insertRuntimeV2PendingDeadlineRun(
 	return runID
 }
 
-func assertRuntimeV2ReconcileCapacity(
+func assertRuntimeReconcileCapacity(
 	t *testing.T,
 	pool *pgxpool.Pool,
 	fixture eventStoreFixture,
@@ -499,7 +499,7 @@ func TestRuntimeDeadlineReconcilerCoreAttemptDoesNotRequireCapacity(t *testing.T
 	requireRuntimeDeadlineReconcilerSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 20*time.Millisecond)
 	convertRuntimeCancellationFixtureToCoreHTTP(t, pool, fixture)
-	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
+	waitForRuntimeLeaseDue(t, pool, fixture.identity.AttemptID)
 
 	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
 	require.NoError(t, err)

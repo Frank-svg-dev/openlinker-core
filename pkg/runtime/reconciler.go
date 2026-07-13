@@ -13,7 +13,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-const maxRuntimeV2ReconcileBatch = 1000
+const maxRuntimeReconcileBatch = 1000
 
 var (
 	ErrRuntimeReconcilerNotConfigured = errors.New("Runtime deadline reconciler is not configured")
@@ -51,14 +51,14 @@ func NewRuntimeDeadlineReconciler(
 	return &RuntimeDeadlineReconciler{pool: pool, retryPlanner: retryPlanner}
 }
 
-type runtimeV2ReconcileDisposition uint8
+type runtimeReconcileDisposition uint8
 
 const (
-	runtimeV2ReconcileSkipped runtimeV2ReconcileDisposition = iota
-	runtimeV2ReconcileRequeued
-	runtimeV2ReconcileTimedOut
-	runtimeV2ReconcileDeadLettered
-	runtimeV2ReconcileResultUnknown
+	runtimeReconcileSkipped runtimeReconcileDisposition = iota
+	runtimeReconcileRequeued
+	runtimeReconcileTimedOut
+	runtimeReconcileDeadLettered
+	runtimeReconcileResultUnknown
 )
 
 // ReconcileBatch discovers at most limit due Runs with PostgreSQL's clock and
@@ -71,11 +71,11 @@ func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 	if r == nil || r.pool == nil || r.retryPlanner == nil {
 		return RuntimeReconcileBatchResult{}, ErrRuntimeReconcilerNotConfigured
 	}
-	if limit < 1 || limit > maxRuntimeV2ReconcileBatch {
+	if limit < 1 || limit > maxRuntimeReconcileBatch {
 		return RuntimeReconcileBatchResult{}, ErrRuntimeReconcileBatchInvalid
 	}
 
-	candidates, err := db.New(r.pool).ListDueRuntimeV2ReconcileCandidates(ctx, int32(limit))
+	candidates, err := db.New(r.pool).ListDueRuntimeReconcileCandidates(ctx, int32(limit))
 	if err != nil {
 		return RuntimeReconcileBatchResult{}, err
 	}
@@ -86,15 +86,15 @@ func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 			return result, reconcileErr
 		}
 		switch disposition {
-		case runtimeV2ReconcileSkipped:
+		case runtimeReconcileSkipped:
 			continue
-		case runtimeV2ReconcileRequeued:
+		case runtimeReconcileRequeued:
 			result.Requeued++
-		case runtimeV2ReconcileTimedOut:
+		case runtimeReconcileTimedOut:
 			result.TimedOut++
-		case runtimeV2ReconcileDeadLettered:
+		case runtimeReconcileDeadLettered:
 			result.DeadLettered++
-		case runtimeV2ReconcileResultUnknown:
+		case runtimeReconcileResultUnknown:
 			result.ResultUnknown++
 		default:
 			return result, errors.New("Runtime reconciler returned an unknown disposition")
@@ -106,40 +106,40 @@ func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 
 func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 	ctx context.Context,
-	candidate db.ListDueRuntimeV2ReconcileCandidatesRow,
-) (runtimeV2ReconcileDisposition, error) {
+	candidate db.ListDueRuntimeReconcileCandidatesRow,
+) (runtimeReconcileDisposition, error) {
 	if candidate.RunID == uuid.Nil || candidate.DatabaseNow.IsZero() || candidate.DueAt.IsZero() {
-		return runtimeV2ReconcileSkipped, errors.New("Runtime reconcile candidate is incomplete")
+		return runtimeReconcileSkipped, errors.New("Runtime reconcile candidate is incomplete")
 	}
 	if candidate.AttemptID == nil {
 		if candidate.ExecutorType != nil || candidate.RuntimeSessionID != nil || candidate.NodeID != nil {
-			return runtimeV2ReconcileSkipped, errors.New("Runtime deadline-only candidate has Attempt identity")
+			return runtimeReconcileSkipped, errors.New("Runtime deadline-only candidate has Attempt identity")
 		}
 	} else if candidate.ExecutorType == nil {
-		return runtimeV2ReconcileSkipped, errors.New("Runtime Attempt candidate has no executor type")
+		return runtimeReconcileSkipped, errors.New("Runtime Attempt candidate has no executor type")
 	}
 
-	disposition := runtimeV2ReconcileSkipped
+	disposition := runtimeReconcileSkipped
 	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{
 		IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite,
 	}, func(tx pgx.Tx) error {
 		queries := db.New(tx)
 		if candidate.AttemptID == nil {
-			locked, lockErr := queries.LockDueRuntimeV2RunWithoutAttempt(ctx, candidate.RunID)
+			locked, lockErr := queries.LockDueRuntimeRunWithoutAttempt(ctx, candidate.RunID)
 			if errors.Is(lockErr, pgx.ErrNoRows) {
 				return nil
 			}
 			if lockErr != nil {
 				return lockErr
 			}
-			terminal := runtimeV2DeadlineTerminalForRun(locked)
+			terminal := runtimeDeadlineTerminalForRun(locked)
 			if terminal == nil {
 				return errors.New("locked Runtime deadline-only Run is not due")
 			}
-			if err := finalizeRuntimeV2ReconciledTerminal(ctx, queries, locked, nil, *terminal); err != nil {
+			if err := finalizeRuntimeReconciledTerminal(ctx, queries, locked, nil, *terminal); err != nil {
 				return err
 			}
-			disposition = runtimeV2ReconcileTimedOut
+			disposition = runtimeReconcileTimedOut
 			return nil
 		}
 
@@ -148,7 +148,7 @@ func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 			if candidate.RuntimeSessionID == nil || candidate.NodeID == nil {
 				return errors.New("runtime reconcile candidate is missing capacity owner")
 			}
-			lockedSession, lockErr := queries.LockRuntimeSessionForV2Reconcile(ctx, *candidate.RuntimeSessionID)
+			lockedSession, lockErr := queries.LockRuntimeSessionForReconcile(ctx, *candidate.RuntimeSessionID)
 			if errors.Is(lockErr, pgx.ErrNoRows) {
 				return nil
 			}
@@ -158,7 +158,7 @@ func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 			if lockedSession != *candidate.RuntimeSessionID {
 				return errors.New("runtime reconcile Session lock returned a different owner")
 			}
-			lockedNode, lockErr := queries.LockRuntimeNodeForV2Reconcile(ctx, *candidate.NodeID)
+			lockedNode, lockErr := queries.LockRuntimeNodeForReconcile(ctx, *candidate.NodeID)
 			if errors.Is(lockErr, pgx.ErrNoRows) {
 				return nil
 			}
@@ -176,7 +176,7 @@ func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 			return fmt.Errorf("runtime reconcile candidate has unknown executor type %q", *candidate.ExecutorType)
 		}
 
-		locked, lockErr := queries.LockDueRuntimeV2RunWithAttempt(ctx, db.LockDueRuntimeV2RunWithAttemptParams{
+		locked, lockErr := queries.LockDueRuntimeRunWithAttempt(ctx, db.LockDueRuntimeRunWithAttemptParams{
 			RunID: candidate.RunID, AttemptID: *candidate.AttemptID,
 			ExecutorType:     *candidate.ExecutorType,
 			RuntimeSessionID: candidate.RuntimeSessionID, NodeID: candidate.NodeID,
@@ -193,7 +193,7 @@ func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 		if attemptErr != nil {
 			return attemptErr
 		}
-		if err := validateRuntimeV2ReconcileAttempt(locked, attempt, candidate); err != nil {
+		if err := validateRuntimeReconcileAttempt(locked, attempt, candidate); err != nil {
 			return err
 		}
 
@@ -211,7 +211,7 @@ func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 		}
 	})
 	if err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	return disposition, nil
 }
@@ -219,68 +219,68 @@ func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 func (r *RuntimeDeadlineReconciler) reconcileExpiredOffer(
 	ctx context.Context,
 	queries *db.Queries,
-	locked db.RuntimeV2ReconcileLockedRunRow,
+	locked db.RuntimeReconcileLockedRunRow,
 	attempt db.RunAttempt,
-) (runtimeV2ReconcileDisposition, error) {
-	terminal := runtimeV2OfferTerminalForRun(locked, attempt)
+) (runtimeReconcileDisposition, error) {
+	terminal := runtimeOfferTerminalForRun(locked, attempt)
 	attemptErrorCode := "RUNTIME_OFFER_EXPIRED"
 	if terminal != nil {
 		attemptErrorCode = terminal.errorCode
 	}
-	finished, err := queries.FinishRuntimeV2ReconciledAttempt(ctx, db.FinishRuntimeV2ReconciledAttemptParams{
+	finished, err := queries.FinishRuntimeReconciledAttempt(ctx, db.FinishRuntimeReconciledAttemptParams{
 		Outcome: "offer_expired", ErrorCode: attemptErrorCode,
 		RunID: attempt.RunID, AttemptID: attempt.ID,
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return runtimeV2ReconcileSkipped, errors.New("Runtime expired offer changed after Run lock")
+		return runtimeReconcileSkipped, errors.New("Runtime expired offer changed after Run lock")
 	}
 	if err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	if err = releaseRuntimeAttemptCapacity(ctx, queries, attempt); err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	if terminal != nil {
-		if err = finalizeRuntimeV2ReconciledTerminal(ctx, queries, locked, &finished, *terminal); err != nil {
-			return runtimeV2ReconcileSkipped, err
+		if err = finalizeRuntimeReconciledTerminal(ctx, queries, locked, &finished, *terminal); err != nil {
+			return runtimeReconcileSkipped, err
 		}
-		return runtimeV2ReconcileTimedOut, nil
+		return runtimeReconcileTimedOut, nil
 	}
 
-	transitioned, err := queries.ResetRuntimeV2RunAfterReconciledOffer(ctx, db.ResetRuntimeV2RunAfterReconciledOfferParams{
+	transitioned, err := queries.ResetRuntimeRunAfterReconciledOffer(ctx, db.ResetRuntimeRunAfterReconciledOfferParams{
 		RunID: attempt.RunID, AttemptID: attempt.ID,
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return reconcileRuntimeV2DeadlineCrossedAfterAttemptFinish(ctx, queries, locked, &finished)
+		return reconcileRuntimeDeadlineCrossedAfterAttemptFinish(ctx, queries, locked, &finished)
 	}
 	if err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	if transitioned.DispatchState != string(RuntimeDispatchPending) || transitioned.NextAttemptAt != nil {
-		return runtimeV2ReconcileSkipped, errors.New("expired offer did not return its Run to pending")
+		return runtimeReconcileSkipped, errors.New("expired offer did not return its Run to pending")
 	}
-	if err = createRuntimeV2AvailableSignal(ctx, queries, locked.AgentID, locked.ID, nil); err != nil {
-		return runtimeV2ReconcileSkipped, err
+	if err = createRuntimeAvailableSignal(ctx, queries, locked.AgentID, locked.ID, nil); err != nil {
+		return runtimeReconcileSkipped, err
 	}
-	return runtimeV2ReconcileRequeued, nil
+	return runtimeReconcileRequeued, nil
 }
 
 func (r *RuntimeDeadlineReconciler) reconcileExpiredExecution(
 	ctx context.Context,
 	queries *db.Queries,
-	locked db.RuntimeV2ReconcileLockedRunRow,
+	locked db.RuntimeReconcileLockedRunRow,
 	attempt db.RunAttempt,
-) (runtimeV2ReconcileDisposition, error) {
-	terminal := runtimeV2ExecutionTerminalForRun(locked)
+) (runtimeReconcileDisposition, error) {
+	terminal := runtimeExecutionTerminalForRun(locked)
 	outcome := "lease_expired"
 	attemptErrorCode := "LEASE_EXPIRED"
 	var retryDelay time.Duration
 	coreResultUnknown := (attempt.ExecutorType == "core_http" || attempt.ExecutorType == "core_mcp") &&
 		(locked.EndpointIdempotencySnapshot == nil || !*locked.EndpointIdempotencySnapshot)
 	if coreResultUnknown {
-		terminal = &runtimeV2ReconcileTerminal{
+		terminal = &runtimeReconcileTerminal{
 			status: string(RuntimeRunFailed), dispatchState: string(RuntimeDispatchTerminal),
 			classification: RuntimeResultClassificationNonRetryable,
 			errorCode:      "ENDPOINT_RESULT_UNKNOWN",
@@ -296,80 +296,80 @@ func (r *RuntimeDeadlineReconciler) reconcileExpiredExecution(
 	if terminal == nil {
 		retryDelay = r.retryPlanner.NextRetryDelay(locked.AttemptCount)
 		if retryDelay < time.Millisecond || retryDelay > 60*time.Second {
-			return runtimeV2ReconcileSkipped, fmt.Errorf("Runtime retry planner returned invalid delay %s", retryDelay)
+			return runtimeReconcileSkipped, fmt.Errorf("Runtime retry planner returned invalid delay %s", retryDelay)
 		}
 	}
-	finished, err := queries.FinishRuntimeV2ReconciledAttempt(ctx, db.FinishRuntimeV2ReconciledAttemptParams{
+	finished, err := queries.FinishRuntimeReconciledAttempt(ctx, db.FinishRuntimeReconciledAttemptParams{
 		Outcome: outcome, ErrorCode: attemptErrorCode,
 		RunID: attempt.RunID, AttemptID: attempt.ID,
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return runtimeV2ReconcileSkipped, errors.New("Runtime expired execution changed after Run lock")
+		return runtimeReconcileSkipped, errors.New("Runtime expired execution changed after Run lock")
 	}
 	if err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	if err = releaseRuntimeAttemptCapacity(ctx, queries, attempt); err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	if terminal != nil {
-		if err = finalizeRuntimeV2ReconciledTerminal(ctx, queries, locked, &finished, *terminal); err != nil {
-			return runtimeV2ReconcileSkipped, err
+		if err = finalizeRuntimeReconciledTerminal(ctx, queries, locked, &finished, *terminal); err != nil {
+			return runtimeReconcileSkipped, err
 		}
 		if terminal.dispatchState == string(RuntimeDispatchDeadLetter) {
-			return runtimeV2ReconcileDeadLettered, nil
+			return runtimeReconcileDeadLettered, nil
 		}
 		if coreResultUnknown {
-			return runtimeV2ReconcileResultUnknown, nil
+			return runtimeReconcileResultUnknown, nil
 		}
-		return runtimeV2ReconcileTimedOut, nil
+		return runtimeReconcileTimedOut, nil
 	}
 
-	transitioned, err := queries.TransitionRuntimeV2RunAfterExpiredAttempt(ctx, db.TransitionRuntimeV2RunAfterExpiredAttemptParams{
+	transitioned, err := queries.TransitionRuntimeRunAfterExpiredAttempt(ctx, db.TransitionRuntimeRunAfterExpiredAttemptParams{
 		RetryAfterMs: retryDelay.Milliseconds(), RunID: attempt.RunID,
 		AttemptID: attempt.ID, LeaseID: attempt.LeaseID,
 		FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return reconcileRuntimeV2DeadlineCrossedAfterAttemptFinish(ctx, queries, locked, &finished)
+		return reconcileRuntimeDeadlineCrossedAfterAttemptFinish(ctx, queries, locked, &finished)
 	}
 	if err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	if transitioned.DispatchState != string(RuntimeDispatchRetryWait) || transitioned.NextAttemptAt == nil {
-		return runtimeV2ReconcileSkipped, errors.New("expired runtime Attempt did not enter retry_wait")
+		return runtimeReconcileSkipped, errors.New("expired runtime Attempt did not enter retry_wait")
 	}
-	if err = createRuntimeV2AvailableSignal(
+	if err = createRuntimeAvailableSignal(
 		ctx, queries, locked.AgentID, locked.ID, transitioned.NextAttemptAt,
 	); err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
-	return runtimeV2ReconcileRequeued, nil
+	return runtimeReconcileRequeued, nil
 }
 
-func reconcileRuntimeV2DeadlineCrossedAfterAttemptFinish(
+func reconcileRuntimeDeadlineCrossedAfterAttemptFinish(
 	ctx context.Context,
 	queries *db.Queries,
-	locked db.RuntimeV2ReconcileLockedRunRow,
+	locked db.RuntimeReconcileLockedRunRow,
 	finished *db.RunAttempt,
-) (runtimeV2ReconcileDisposition, error) {
-	databaseNow, err := queries.GetRuntimeV2ReconcileDatabaseClock(ctx)
+) (runtimeReconcileDisposition, error) {
+	databaseNow, err := queries.GetRuntimeReconcileDatabaseClock(ctx)
 	if err != nil {
-		return runtimeV2ReconcileSkipped, err
+		return runtimeReconcileSkipped, err
 	}
 	locked.DatabaseNow = databaseNow
-	terminal := runtimeV2DeadlineTerminalForRun(locked)
+	terminal := runtimeDeadlineTerminalForRun(locked)
 	if terminal == nil {
-		return runtimeV2ReconcileSkipped, errors.New("Runtime reconcile transition lost its fenced Run")
+		return runtimeReconcileSkipped, errors.New("Runtime reconcile transition lost its fenced Run")
 	}
-	if err = finalizeRuntimeV2ReconciledTerminal(ctx, queries, locked, finished, *terminal); err != nil {
-		return runtimeV2ReconcileSkipped, err
+	if err = finalizeRuntimeReconciledTerminal(ctx, queries, locked, finished, *terminal); err != nil {
+		return runtimeReconcileSkipped, err
 	}
-	return runtimeV2ReconcileTimedOut, nil
+	return runtimeReconcileTimedOut, nil
 }
 
-type runtimeV2ReconcileTerminal struct {
+type runtimeReconcileTerminal struct {
 	status         string
 	dispatchState  string
 	classification RuntimeResultClassification
@@ -377,16 +377,16 @@ type runtimeV2ReconcileTerminal struct {
 	errorMessage   string
 }
 
-func runtimeV2DeadlineTerminalForRun(locked db.RuntimeV2ReconcileLockedRunRow) *runtimeV2ReconcileTerminal {
+func runtimeDeadlineTerminalForRun(locked db.RuntimeReconcileLockedRunRow) *runtimeReconcileTerminal {
 	if !locked.DatabaseNow.Before(locked.RunDeadlineAt) {
-		return &runtimeV2ReconcileTerminal{
+		return &runtimeReconcileTerminal{
 			status: string(RuntimeRunTimeout), dispatchState: string(RuntimeDispatchTerminal),
 			classification: RuntimeResultClassificationTimeout,
 			errorCode:      "RUN_DEADLINE_EXCEEDED", errorMessage: "Run deadline exceeded",
 		}
 	}
 	if !locked.DatabaseNow.Before(locked.DispatchDeadlineAt) {
-		return &runtimeV2ReconcileTerminal{
+		return &runtimeReconcileTerminal{
 			status: string(RuntimeRunTimeout), dispatchState: string(RuntimeDispatchTerminal),
 			classification: RuntimeResultClassificationTimeout,
 			errorCode:      "RUNTIME_DISPATCH_TIMEOUT", errorMessage: "Runtime dispatch deadline exceeded",
@@ -395,15 +395,15 @@ func runtimeV2DeadlineTerminalForRun(locked db.RuntimeV2ReconcileLockedRunRow) *
 	return nil
 }
 
-func runtimeV2OfferTerminalForRun(
-	locked db.RuntimeV2ReconcileLockedRunRow,
+func runtimeOfferTerminalForRun(
+	locked db.RuntimeReconcileLockedRunRow,
 	attempt db.RunAttempt,
-) *runtimeV2ReconcileTerminal {
-	if terminal := runtimeV2DeadlineTerminalForRun(locked); terminal != nil {
+) *runtimeReconcileTerminal {
+	if terminal := runtimeDeadlineTerminalForRun(locked); terminal != nil {
 		return terminal
 	}
 	if locked.OfferCount >= locked.MaxOfferCount && !locked.DatabaseNow.Before(attempt.OfferExpiresAt) {
-		return &runtimeV2ReconcileTerminal{
+		return &runtimeReconcileTerminal{
 			status: string(RuntimeRunTimeout), dispatchState: string(RuntimeDispatchTerminal),
 			classification: RuntimeResultClassificationTimeout,
 			errorCode:      "RUNTIME_DISPATCH_TIMEOUT",
@@ -413,12 +413,12 @@ func runtimeV2OfferTerminalForRun(
 	return nil
 }
 
-func runtimeV2ExecutionTerminalForRun(locked db.RuntimeV2ReconcileLockedRunRow) *runtimeV2ReconcileTerminal {
-	if terminal := runtimeV2DeadlineTerminalForRun(locked); terminal != nil {
+func runtimeExecutionTerminalForRun(locked db.RuntimeReconcileLockedRunRow) *runtimeReconcileTerminal {
+	if terminal := runtimeDeadlineTerminalForRun(locked); terminal != nil {
 		return terminal
 	}
 	if locked.AttemptCount >= locked.MaxAttempts {
-		return &runtimeV2ReconcileTerminal{
+		return &runtimeReconcileTerminal{
 			status: string(RuntimeRunFailed), dispatchState: string(RuntimeDispatchDeadLetter),
 			classification: RuntimeResultClassificationDeadLetter,
 			errorCode:      "RUNTIME_RETRY_EXHAUSTED", errorMessage: "Runtime retry budget exhausted",
@@ -427,12 +427,12 @@ func runtimeV2ExecutionTerminalForRun(locked db.RuntimeV2ReconcileLockedRunRow) 
 	return nil
 }
 
-func finalizeRuntimeV2ReconciledTerminal(
+func finalizeRuntimeReconciledTerminal(
 	ctx context.Context,
 	queries *db.Queries,
-	locked db.RuntimeV2ReconcileLockedRunRow,
+	locked db.RuntimeReconcileLockedRunRow,
 	finishedAttempt *db.RunAttempt,
-	terminal runtimeV2ReconcileTerminal,
+	terminal runtimeReconcileTerminal,
 ) error {
 	durationMS, err := runtimeCancellationDurationMS(locked.DatabaseNow, locked.StartedAt)
 	if err != nil {
@@ -492,7 +492,7 @@ func finalizeRuntimeV2ReconciledTerminal(
 		id := finishedAttempt.ID
 		attemptID = &id
 	}
-	finalized, err := queries.FinalizeRuntimeV2ReconciledRun(ctx, db.FinalizeRuntimeV2ReconciledRunParams{
+	finalized, err := queries.FinalizeRuntimeReconciledRun(ctx, db.FinalizeRuntimeReconciledRunParams{
 		Status: terminal.status, DispatchState: terminal.dispatchState,
 		ErrorCode: terminal.errorCode, ErrorMessage: terminal.errorMessage,
 		DurationMs: durationMS, TerminalEventID: event.ID,
@@ -519,7 +519,7 @@ func finalizeRuntimeV2ReconciledTerminal(
 	return nil
 }
 
-func createRuntimeV2AvailableSignal(
+func createRuntimeAvailableSignal(
 	ctx context.Context,
 	queries *db.Queries,
 	agentID, runID uuid.UUID,
@@ -536,10 +536,10 @@ func createRuntimeV2AvailableSignal(
 	return err
 }
 
-func validateRuntimeV2ReconcileAttempt(
-	locked db.RuntimeV2ReconcileLockedRunRow,
+func validateRuntimeReconcileAttempt(
+	locked db.RuntimeReconcileLockedRunRow,
 	attempt db.RunAttempt,
-	candidate db.ListDueRuntimeV2ReconcileCandidatesRow,
+	candidate db.ListDueRuntimeReconcileCandidatesRow,
 ) error {
 	if candidate.AttemptID == nil || candidate.ExecutorType == nil ||
 		attempt.ID != *candidate.AttemptID || attempt.RunID != locked.ID ||

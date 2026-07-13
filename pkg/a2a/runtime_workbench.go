@@ -91,7 +91,7 @@ func (s *Service) GetRuntimeWorkbench(
 		},
 		Runtime:     runtimeState,
 		RecentRuns:  recentRuns,
-		Diagnostics: runtimeWorkbenchDiagnosticsV2(agent, snapshot, recentRuns),
+		Diagnostics: runtimeWorkbenchDiagnostics(agent, snapshot, recentRuns),
 	}, nil
 }
 
@@ -293,7 +293,7 @@ func runtimeWorkbenchState(
 	return "offline", "offline", false
 }
 
-func runtimeWorkbenchDiagnosticsV2(
+func runtimeWorkbenchDiagnostics(
 	agent db.Agent,
 	snapshot runtimeWorkbenchSnapshot,
 	runs []RuntimeWorkbenchRun,

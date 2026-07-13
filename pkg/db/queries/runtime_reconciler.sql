@@ -6,7 +6,7 @@
 -- with PostgreSQL's clock and use SKIP LOCKED to keep concurrent workers from
 -- waiting on one another.
 
--- name: ListDueRuntimeV2ReconcileCandidates :many
+-- name: ListDueRuntimeReconcileCandidates :many
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 ), candidates AS (
@@ -82,19 +82,19 @@ FROM candidates
 ORDER BY due_at ASC, run_id ASC
 LIMIT sqlc.arg(batch_limit);
 
--- name: LockRuntimeSessionForV2Reconcile :one
+-- name: LockRuntimeSessionForReconcile :one
 SELECT runtime_session_id
 FROM runtime_sessions
 WHERE runtime_session_id = sqlc.arg(runtime_session_id)
 FOR UPDATE SKIP LOCKED;
 
--- name: LockRuntimeNodeForV2Reconcile :one
+-- name: LockRuntimeNodeForReconcile :one
 SELECT node_id
 FROM runtime_nodes
 WHERE node_id = sqlc.arg(node_id)
 FOR UPDATE SKIP LOCKED;
 
--- name: LockDueRuntimeV2RunWithAttempt :one
+-- name: LockDueRuntimeRunWithAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -151,7 +151,7 @@ WHERE r.id = sqlc.arg(run_id)
   )
 FOR UPDATE OF r SKIP LOCKED;
 
--- name: LockDueRuntimeV2RunWithoutAttempt :one
+-- name: LockDueRuntimeRunWithoutAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -174,7 +174,7 @@ WHERE r.id = sqlc.arg(run_id)
   AND LEAST(r.dispatch_deadline_at, r.run_deadline_at) <= c.database_now
 FOR UPDATE OF r SKIP LOCKED;
 
--- name: FinishRuntimeV2ReconciledAttempt :one
+-- name: FinishRuntimeReconciledAttempt :one
 UPDATE run_attempts a
 SET finished_at = clock_timestamp(),
     outcome = sqlc.arg(outcome),
@@ -212,7 +212,7 @@ WHERE a.run_id = sqlc.arg(run_id)
   )
 RETURNING a.*;
 
--- name: ResetRuntimeV2RunAfterReconciledOffer :one
+-- name: ResetRuntimeRunAfterReconciledOffer :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -257,7 +257,7 @@ WHERE r.id = sqlc.arg(run_id)
 RETURNING r.id, r.status, r.dispatch_state, r.next_attempt_at,
           c.database_now;
 
--- name: TransitionRuntimeV2RunAfterExpiredAttempt :one
+-- name: TransitionRuntimeRunAfterExpiredAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -308,7 +308,7 @@ WHERE r.id = sqlc.arg(run_id)
 RETURNING r.id, r.status, r.dispatch_state, r.next_attempt_at,
           c.database_now;
 
--- name: FinalizeRuntimeV2ReconciledRun :one
+-- name: FinalizeRuntimeReconciledRun :one
 UPDATE runs r
 SET status = sqlc.arg(status),
     dispatch_state = sqlc.arg(dispatch_state),
@@ -413,5 +413,5 @@ RETURNING r.id, r.status, r.dispatch_state, r.error_code,
           r.error_message, r.duration_ms, r.finished_at,
           r.terminal_event_id, r.dead_lettered_at;
 
--- name: GetRuntimeV2ReconcileDatabaseClock :one
+-- name: GetRuntimeReconcileDatabaseClock :one
 SELECT clock_timestamp() AS database_now;

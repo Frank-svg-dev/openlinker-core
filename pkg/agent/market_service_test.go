@@ -289,7 +289,7 @@ UPDATE agent_availability_snapshots
 SET availability_status = 'unreachable', consecutive_failures = 3
 WHERE agent_id = $1`, agentID)
 	require.NoError(t, err)
-	insertMarketRuntimeV2Session(t, pool, agentID)
+	insertMarketRuntimeSession(t, pool, agentID)
 	detail, err = svc.GetBySlug(ctx, "runtime-offline")
 	require.NoError(t, err)
 	assert.Equal(t, "healthy", detail.Availability.Status, "active Runtime Session is the Runtime Worker availability truth")
@@ -337,7 +337,7 @@ WHERE agent_id = $1
 	assert.False(t, resp.Items[0].Readiness.Callable)
 }
 
-func insertMarketRuntimeV2Session(t *testing.T, pool interface {
+func insertMarketRuntimeSession(t *testing.T, pool interface {
 	Begin(context.Context) (pgx.Tx, error)
 }, agentID uuid.UUID) {
 	t.Helper()

@@ -195,7 +195,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 			return err
 		}
 
-		candidate, err := tx.LockNextClaimableRuntimeV2RunForAgent(ctx, principal.AgentID)
+		candidate, err := tx.LockNextClaimableRuntimeRunForAgent(ctx, principal.AgentID)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
@@ -1072,7 +1072,7 @@ type runtimeLeaseTransaction interface {
 	LockRuntimeNodeForPrincipalValidation(context.Context, db.LockRuntimeNodeForPrincipalValidationParams) (db.LockRuntimeNodeForPrincipalValidationRow, error)
 	LockRuntimeCredentialForPrincipalValidation(context.Context, db.LockRuntimeCredentialForPrincipalValidationParams) (db.LockRuntimeCredentialForPrincipalValidationRow, error)
 	GetExistingUnacceptedRunOfferForSession(context.Context, db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error)
-	LockNextClaimableRuntimeV2RunForAgent(context.Context, uuid.UUID) (db.LockNextClaimableRuntimeV2RunForAgentRow, error)
+	LockNextClaimableRuntimeRunForAgent(context.Context, uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error)
 	ClaimRuntimeSessionSlot(context.Context, db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error)
 	ClaimRuntimeNodeSlot(context.Context, db.ClaimRuntimeNodeSlotParams) (db.RuntimeNode, error)
 	ReleaseRuntimeSessionSlot(context.Context, uuid.UUID) (db.RuntimeSession, error)
@@ -1141,8 +1141,8 @@ func (t *postgresRuntimeLeaseTransaction) LockRuntimeCredentialForPrincipalValid
 func (t *postgresRuntimeLeaseTransaction) GetExistingUnacceptedRunOfferForSession(ctx context.Context, params db.GetExistingUnacceptedRunOfferForSessionParams) (db.GetExistingUnacceptedRunOfferForSessionRow, error) {
 	return t.queries.GetExistingUnacceptedRunOfferForSession(ctx, params)
 }
-func (t *postgresRuntimeLeaseTransaction) LockNextClaimableRuntimeV2RunForAgent(ctx context.Context, agentID uuid.UUID) (db.LockNextClaimableRuntimeV2RunForAgentRow, error) {
-	return t.queries.LockNextClaimableRuntimeV2RunForAgent(ctx, agentID)
+func (t *postgresRuntimeLeaseTransaction) LockNextClaimableRuntimeRunForAgent(ctx context.Context, agentID uuid.UUID) (db.LockNextClaimableRuntimeRunForAgentRow, error) {
+	return t.queries.LockNextClaimableRuntimeRunForAgent(ctx, agentID)
 }
 func (t *postgresRuntimeLeaseTransaction) ClaimRuntimeSessionSlot(ctx context.Context, params db.ClaimRuntimeSessionSlotParams) (db.RuntimeSession, error) {
 	return t.queries.ClaimRuntimeSessionSlot(ctx, params)

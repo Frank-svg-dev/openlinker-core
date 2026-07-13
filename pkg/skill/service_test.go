@@ -100,7 +100,7 @@ func insertSkillRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, creatorID uui
 	return id
 }
 
-func insertSkillRuntimeV2Session(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, heartbeatAt time.Time) {
+func insertSkillRuntimeSession(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, heartbeatAt time.Time) {
 	t.Helper()
 	ctx := context.Background()
 	tx, err := pool.Begin(ctx)
@@ -219,7 +219,7 @@ func TestSetListAndRecommendAgentSkills(t *testing.T) {
 	assert.Equal(t, best, limited[0].AgentID)
 }
 
-func TestRecommendAgentsBySkillsUsesCurrentRuntimeV2SessionsForAgentNodes(t *testing.T) {
+func TestRecommendAgentsBySkillsUsesCurrentRuntimeSessionsForAgentNodes(t *testing.T) {
 	pool := setupSkillTestDB(t)
 	svc := skill.NewService(pool)
 	creatorID := insertSkillCreator(t, pool)
@@ -235,9 +235,9 @@ func TestRecommendAgentsBySkillsUsesCurrentRuntimeV2SessionsForAgentNodes(t *tes
 	markSkillAgentAvailability(t, pool, unreachableRuntime, "unreachable")
 	markSkillAgentAvailability(t, pool, betterDirect, "healthy")
 	markSkillAgentAvailability(t, pool, direct, "healthy")
-	insertSkillRuntimeV2Session(t, pool, readyRuntime, time.Now())
-	insertSkillRuntimeV2Session(t, pool, staleSessionRuntime, time.Now().Add(-time.Minute))
-	insertSkillRuntimeV2Session(t, pool, unreachableRuntime, time.Now())
+	insertSkillRuntimeSession(t, pool, readyRuntime, time.Now())
+	insertSkillRuntimeSession(t, pool, staleSessionRuntime, time.Now().Add(-time.Minute))
+	insertSkillRuntimeSession(t, pool, unreachableRuntime, time.Now())
 
 	require.NoError(t, svc.SetAgentSkills(ctx, betterDirect, []string{"data/sql-query", "data/analysis"}))
 	require.NoError(t, svc.SetAgentSkills(ctx, readyRuntime, []string{"data/sql-query"}))

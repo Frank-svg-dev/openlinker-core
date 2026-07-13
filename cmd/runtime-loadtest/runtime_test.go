@@ -67,7 +67,7 @@ func TestRuntimeDuplicateAssignmentExecutesExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var journal runtimeV2JournalDocument
+	var journal runtimeJournalDocument
 	if err = json.Unmarshal(raw, &journal); err != nil {
 		t.Fatal(err)
 	}
@@ -163,16 +163,16 @@ func TestRuntimeScenarioTransportConstraintsFailClosed(t *testing.T) {
 	}
 }
 
-type runtimeV2WorkerTestFixture struct {
-	worker     *runtimeV2Worker
-	connection *runtimeV2Connection
+type runtimeWorkerTestFixture struct {
+	worker     *runtimeWorker
+	connection *runtimeConnection
 	assignment openlinker.RuntimeRunAssignedPayload
 	fake       *fakeRuntimeClient
 	tracker    *runTracker
 	metrics    *metrics
 }
 
-func newRuntimeWorkerTestFixture(t *testing.T) runtimeV2WorkerTestFixture {
+func newRuntimeWorkerTestFixture(t *testing.T) runtimeWorkerTestFixture {
 	t.Helper()
 	now := time.Now().UTC()
 	identity := openlinker.RuntimeAttemptIdentity{
@@ -186,19 +186,19 @@ func newRuntimeWorkerTestFixture(t *testing.T) runtimeV2WorkerTestFixture {
 	tracker.markCreated(clientID, identity.RunID, now.Add(-900*time.Millisecond), "")
 	metrics := &metrics{startedAt: now, runtime: newRuntimeMetrics()}
 	fake := &fakeRuntimeClient{leaseExpiresAt: now.Add(time.Minute)}
-	connection := &runtimeV2Connection{kind: transportPull, client: fake, generation: 1}
-	worker := &runtimeV2Worker{
+	connection := &runtimeConnection{kind: transportPull, client: fake, generation: 1}
+	worker := &runtimeWorker{
 		cfg:   config{NodeCapacity: 1, EventsPerRun: 1},
 		agent: agentRef{ID: identity.AgentID}, workerIndex: 0, tracker: tracker, metrics: metrics,
 		hello: openlinker.RuntimeHelloPayload{
 			NodeID: identity.NodeID, AgentID: identity.AgentID, WorkerID: identity.WorkerID,
 			RuntimeSessionID: identity.RuntimeSessionID, SessionEpoch: 1,
 		},
-		failure: make(chan error, 1), attempts: map[string]*runtimeV2Attempt{},
-		journal: &runtimeV2Journal{path: filepath.Join(t.TempDir(), "worker.json")},
+		failure: make(chan error, 1), attempts: map[string]*runtimeAttempt{},
+		journal: &runtimeJournal{path: filepath.Join(t.TempDir(), "worker.json")},
 	}
 	worker.publishConnection(connection)
-	return runtimeV2WorkerTestFixture{
+	return runtimeWorkerTestFixture{
 		worker: worker, connection: connection, fake: fake, tracker: tracker, metrics: metrics,
 		assignment: openlinker.RuntimeRunAssignedPayload{
 			AttemptIdentity: identity, OfferNo: 1, OfferExpiresAt: now.Add(time.Minute),
@@ -290,7 +290,7 @@ func (f *fakeRuntimeClient) AckRuntimeCancel(_ context.Context, request openlink
 	}, nil
 }
 
-var _ runtimeV2Client = (*fakeRuntimeClient)(nil)
+var _ runtimeClient = (*fakeRuntimeClient)(nil)
 
 func writeRuntimeTestCredentials(t *testing.T, nodeID uuid.UUID) (string, string, string) {
 	t.Helper()

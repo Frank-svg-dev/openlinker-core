@@ -19,8 +19,8 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-func TestRuntimeV2WebSocketAuthenticatesBeforeUpgrade(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketAuthenticatesBeforeUpgrade(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	fixture.tokens.err = errors.New("revoked token")
 	server, target := fixture.server(t)
 	defer server.Close()
@@ -37,14 +37,14 @@ func TestRuntimeV2WebSocketAuthenticatesBeforeUpgrade(t *testing.T) {
 	require.Equal(t, 0, fixture.sessions.createCalls())
 }
 
-func TestRuntimeV2WebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 
-	helloEnvelope := writeRuntimeV2WSHello(t, conn, fixture.hello)
-	readyEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	helloEnvelope := writeRuntimeWSHello(t, conn, fixture.hello)
+	readyEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageReady, readyEnvelope.Type)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(helloEnvelope, readyEnvelope))
 	ready, err := DecodeRuntimeMessagePayload[RuntimeReadyPayload](readyEnvelope, RuntimeMessageReady)
@@ -74,19 +74,91 @@ func TestRuntimeV2WebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	require.Equal(t, "SESSION_DISCONNECTED", fixture.leases.releaseReason())
 }
 
-func TestRuntimeV2WebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketControllerShutdownDrainsHijackedConnections(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	controller := fixture.controller()
+	e := echo.New()
+	controller.Register(e.Group("/api/v1"))
+	server := httptest.NewServer(e)
+	defer server.Close()
+	target := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/agent-runtime/ws"
+
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer shutdownCancel()
+	require.NoError(t, controller.Shutdown(shutdownCtx))
+
+	// Shutdown returns only after the WebSocket handler's durable cleanup has
+	// detached the Session and released any unacknowledged offer.
+	require.Equal(t, []string{"close_session", "release_unacked_offer"}, fixture.operations.snapshot())
+	require.Equal(t, "offline", fixture.sessions.closedStatus())
+	_, _, err := conn.ReadMessage()
+	require.Error(t, err)
+
+	replacement, response, err := websocket.DefaultDialer.Dial(target, http.Header{
+		echo.HeaderAuthorization: []string{"Bearer runtime-secret"},
+	})
+	require.Error(t, err)
+	require.Nil(t, replacement)
+	require.NotNil(t, response)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+	require.Equal(t, 1, fixture.sessions.createCalls())
+}
+
+func TestRuntimeWebSocketRegistryShutdownCoversLateRegistration(t *testing.T) {
+	registry := newRuntimeWSRegistry()
+	require.True(t, registry.admit())
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer shutdownCancel()
+	shutdownResult := make(chan error, 1)
+	go func() {
+		shutdownResult <- registry.shutdown(shutdownCtx)
+	}()
+	require.Eventually(t, func() bool {
+		registry.mu.Lock()
+		defer registry.mu.Unlock()
+		return registry.stopping
+	}, time.Second, time.Millisecond)
+
+	late := &runtimeWSManagedConnectionFake{shutdownCalled: make(chan struct{})}
+	if registry.register(late) {
+		t.Fatal("late WebSocket registration was accepted after shutdown started")
+	}
+	select {
+	case <-late.shutdownCalled:
+	case <-time.After(time.Second):
+		t.Fatal("late WebSocket registration was not closed")
+	}
+	select {
+	case err := <-shutdownResult:
+		t.Fatalf("shutdown returned before the admitted request finished: %v", err)
+	default:
+	}
+
+	registry.finish(late)
+	require.NoError(t, <-shutdownResult)
+	require.False(t, registry.admit())
+}
+
+func TestRuntimeWebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	require.Equal(t, RuntimeMessageReady, readRuntimeV2WSEnvelope(t, conn).Type)
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
 	fixture.sessions.replaceAttachment()
 	fixture.wakeHub.Wake(fixture.principal.AgentID)
 
-	requireRuntimeV2WSCloseCode(t, conn, RuntimeWSCloseSessionConflict)
+	requireRuntimeWSCloseCode(t, conn, RuntimeWSCloseSessionConflict)
 	require.Eventually(t, func() bool {
 		return len(fixture.operations.snapshot()) >= 1
 	}, 3*time.Second, 10*time.Millisecond)
@@ -94,29 +166,29 @@ func TestRuntimeV2WebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *t
 	require.Empty(t, fixture.leases.releaseReason())
 }
 
-func TestRuntimeV2WebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	require.Equal(t, RuntimeMessageReady, readRuntimeV2WSEnvelope(t, conn).Type)
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	started := time.Now()
 	fixture.wakeHub.Wake(fixture.principal.AgentID)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(350*time.Millisecond)))
-	assigned := readRuntimeV2WSEnvelope(t, conn)
+	assigned := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageRunAssigned, assigned.Type)
 	require.Less(t, time.Since(started), 350*time.Millisecond)
 }
 
-func TestRuntimeV2WebSocketHandshakeCloseCodes(t *testing.T) {
+func TestRuntimeWebSocketHandshakeCloseCodes(t *testing.T) {
 	tests := []struct {
 		name      string
-		configure func(*runtimeV2WSTestFixture)
+		configure func(*runtimeWSTestFixture)
 		write     func(*testing.T, *websocket.Conn, RuntimeHelloPayload) RuntimeEnvelope
 		errorCode RuntimeErrorCode
 		closeCode int
@@ -124,10 +196,10 @@ func TestRuntimeV2WebSocketHandshakeCloseCodes(t *testing.T) {
 	}{
 		{
 			name: "authentication",
-			configure: func(f *runtimeV2WSTestFixture) {
+			configure: func(f *runtimeWSTestFixture) {
 				f.sessions.createErr = newRuntimeSessionError(RuntimeSessionErrorAuthenticationFailed, nil)
 			},
-			write:     writeRuntimeV2WSHello,
+			write:     writeRuntimeWSHello,
 			errorCode: RuntimeErrorUnauthorized,
 			closeCode: RuntimeWSCloseAuthenticationFailed,
 			hasError:  true,
@@ -139,17 +211,17 @@ func TestRuntimeV2WebSocketHandshakeCloseCodes(t *testing.T) {
 				require.NoError(t, err)
 				message.ProtocolVersion = 1
 				require.NoError(t, conn.WriteJSON(message))
-				return runtimeV2EnvelopeFromTyped(t, message)
+				return runtimeEnvelopeFromTyped(t, message)
 			},
 			errorCode: RuntimeErrorClientUpgradeRequired,
 			closeCode: RuntimeWSCloseClientUpgradeRequired,
 		},
 		{
 			name: "session conflict",
-			configure: func(f *runtimeV2WSTestFixture) {
+			configure: func(f *runtimeWSTestFixture) {
 				f.sessions.createErr = newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 			},
-			write:     writeRuntimeV2WSHello,
+			write:     writeRuntimeWSHello,
 			errorCode: RuntimeErrorSessionConflict,
 			closeCode: RuntimeWSCloseSessionConflict,
 			hasError:  true,
@@ -161,7 +233,7 @@ func TestRuntimeV2WebSocketHandshakeCloseCodes(t *testing.T) {
 				require.NoError(t, err)
 				message.Payload.Features = message.Payload.Features[:len(message.Payload.Features)-1]
 				require.NoError(t, conn.WriteJSON(message))
-				return runtimeV2EnvelopeFromTyped(t, message)
+				return runtimeEnvelopeFromTyped(t, message)
 			},
 			errorCode: RuntimeErrorRequiredFeatureMissing,
 			closeCode: RuntimeWSCloseRequiredFeatureMissing,
@@ -170,34 +242,34 @@ func TestRuntimeV2WebSocketHandshakeCloseCodes(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fixture := newRuntimeV2WSTestFixture()
+			fixture := newRuntimeWSTestFixture()
 			if test.configure != nil {
 				test.configure(fixture)
 			}
 			server, target := fixture.server(t)
 			defer server.Close()
-			conn := dialRuntimeV2WS(t, target)
+			conn := dialRuntimeWS(t, target)
 			defer conn.Close()
 			request := test.write(t, conn, fixture.hello)
 
 			if test.hasError {
-				errorEnvelope := readRuntimeV2WSEnvelope(t, conn)
+				errorEnvelope := readRuntimeWSEnvelope(t, conn)
 				require.Equal(t, RuntimeMessageError, errorEnvelope.Type)
 				require.Equal(t, request.MessageID, *errorEnvelope.ReplyToMessageID)
 				body, decodeErr := DecodeRuntimeMessagePayload[RuntimeErrorBody](errorEnvelope, RuntimeMessageError)
 				require.NoError(t, decodeErr)
 				require.Equal(t, test.errorCode, body.Code)
 			}
-			requireRuntimeV2WSCloseCode(t, conn, test.closeCode)
+			requireRuntimeWSCloseCode(t, conn, test.closeCode)
 		})
 	}
 }
 
-func TestRuntimeV2WebSocketStrictUnknownPayloadClosesProtocol(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketStrictUnknownPayloadClosesProtocol(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
 	message, err := NewRuntimeTypedMessage(RuntimeMessageHello, nil, fixture.hello)
@@ -210,18 +282,18 @@ func TestRuntimeV2WebSocketStrictUnknownPayloadClosesProtocol(t *testing.T) {
 	payload["unexpected"] = true
 	require.NoError(t, conn.WriteJSON(object))
 
-	errorEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	errorEnvelope := readRuntimeWSEnvelope(t, conn)
 	body, err := DecodeRuntimeMessagePayload[RuntimeErrorBody](errorEnvelope, RuntimeMessageError)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeErrorValidationFailed, body.Code)
-	requireRuntimeV2WSCloseCode(t, conn, RuntimeWSCloseProtocolError)
+	requireRuntimeWSCloseCode(t, conn, RuntimeWSCloseProtocolError)
 }
 
-func TestRuntimeV2WebSocketRejectsMessageAboveFourMiB(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketRejectsMessageAboveFourMiB(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
 	oversized := make([]byte, MaxRuntimeMessageBytes+1)
@@ -229,12 +301,12 @@ func TestRuntimeV2WebSocketRejectsMessageAboveFourMiB(t *testing.T) {
 		oversized[index] = ' '
 	}
 	require.NoError(t, conn.WriteMessage(websocket.TextMessage, oversized))
-	requireRuntimeV2WSCloseCode(t, conn, RuntimeWSCloseProtocolError)
+	requireRuntimeWSCloseCode(t, conn, RuntimeWSCloseProtocolError)
 	require.Equal(t, 0, fixture.sessions.createCalls())
 }
 
-func TestRuntimeV2WebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	fixture.leases.ackResponse = RunAssignmentConfirmedPayload{
@@ -244,13 +316,13 @@ func TestRuntimeV2WebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T)
 	}
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	ready := readRuntimeV2WSEnvelope(t, conn)
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	ready := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageReady, ready.Type)
-	assignedEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageRunAssigned, assignedEnvelope.Type)
 	require.Nil(t, assignedEnvelope.ReplyToMessageID)
 	assigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](assignedEnvelope, RuntimeMessageRunAssigned)
@@ -264,9 +336,9 @@ func TestRuntimeV2WebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T)
 		RunAssignmentAckPayload{AttemptIdentity: assigned.AttemptIdentity},
 	)
 	require.NoError(t, err)
-	ackEnvelope := runtimeV2EnvelopeFromTyped(t, ackMessage)
+	ackEnvelope := runtimeEnvelopeFromTyped(t, ackMessage)
 	require.NoError(t, conn.WriteJSON(ackMessage))
-	confirmedEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	confirmedEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageAssignmentConfirmed, confirmedEnvelope.Type)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(ackEnvelope, confirmedEnvelope))
 	confirmed, err := DecodeRuntimeMessagePayload[RunAssignmentConfirmedPayload](
@@ -279,13 +351,13 @@ func TestRuntimeV2WebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T)
 	// A lost confirmed frame is recovered by replaying the same correlated ACK;
 	// transport correlation must not defeat the Lease service's idempotency.
 	require.NoError(t, conn.WriteJSON(ackMessage))
-	replayedConfirmed := readRuntimeV2WSEnvelope(t, conn)
+	replayedConfirmed := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(ackEnvelope, replayedConfirmed))
 	require.Equal(t, 2, fixture.leases.ackCallCount())
 }
 
-func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	fixture.leases.rejectResponse = RunAssignmentRejectedPayload{
@@ -308,12 +380,12 @@ func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.
 	}
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	require.Equal(t, RuntimeMessageReady, readRuntimeV2WSEnvelope(t, conn).Type)
-	assignedEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 
 	rejectMessage, err := NewRuntimeTypedMessage(
 		RuntimeMessageAssignmentReject,
@@ -326,9 +398,9 @@ func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.
 		},
 	)
 	require.NoError(t, err)
-	rejectEnvelope := runtimeV2EnvelopeFromTyped(t, rejectMessage)
+	rejectEnvelope := runtimeEnvelopeFromTyped(t, rejectMessage)
 	require.NoError(t, conn.WriteJSON(rejectMessage))
-	rejectedEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	rejectedEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(rejectEnvelope, rejectedEnvelope))
 	require.Equal(t, 1, fixture.leases.rejectCallCount())
 
@@ -343,9 +415,9 @@ func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.
 		},
 	)
 	require.NoError(t, err)
-	renewEnvelope := runtimeV2EnvelopeFromTyped(t, renewMessage)
+	renewEnvelope := runtimeEnvelopeFromTyped(t, renewMessage)
 	require.NoError(t, conn.WriteJSON(renewMessage))
-	renewedEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	renewedEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(renewEnvelope, renewedEnvelope))
 	require.Equal(t, 1, fixture.leases.renewCallCount())
 
@@ -361,9 +433,9 @@ func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.
 		},
 	)
 	require.NoError(t, err)
-	eventEnvelope := runtimeV2EnvelopeFromTyped(t, eventMessage)
+	eventEnvelope := runtimeEnvelopeFromTyped(t, eventMessage)
 	require.NoError(t, conn.WriteJSON(eventMessage))
-	eventAckEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	eventAckEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(eventEnvelope, eventAckEnvelope))
 	require.Equal(t, 1, fixture.events.callCount())
 
@@ -380,9 +452,9 @@ func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.
 		},
 	)
 	require.NoError(t, err)
-	resultEnvelope := runtimeV2EnvelopeFromTyped(t, resultMessage)
+	resultEnvelope := runtimeEnvelopeFromTyped(t, resultMessage)
 	require.NoError(t, conn.WriteJSON(resultMessage))
-	resultAckEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	resultAckEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(resultEnvelope, resultAckEnvelope))
 	require.Equal(t, 1, fixture.finalizer.callCount())
 
@@ -394,18 +466,18 @@ func TestRuntimeV2WebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.
 	require.Equal(t, fixture.principal.RuntimeSessionID, *resultPrincipal.RuntimeSessionID)
 }
 
-func TestRuntimeV2WebSocketRejectsWrongAssignmentCorrelationBeforeLeaseMutation(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketRejectsWrongAssignmentCorrelationBeforeLeaseMutation(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	readRuntimeV2WSEnvelope(t, conn) // ready
-	readRuntimeV2WSEnvelope(t, conn) // assigned
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	readRuntimeWSEnvelope(t, conn) // ready
+	readRuntimeWSEnvelope(t, conn) // assigned
 	wrongReply := uuid.New()
 	ack, err := NewRuntimeTypedMessage(
 		RuntimeMessageAssignmentAck,
@@ -414,36 +486,36 @@ func TestRuntimeV2WebSocketRejectsWrongAssignmentCorrelationBeforeLeaseMutation(
 	)
 	require.NoError(t, err)
 	require.NoError(t, conn.WriteJSON(ack))
-	errorEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	errorEnvelope := readRuntimeWSEnvelope(t, conn)
 	errorBody, err := DecodeRuntimeMessagePayload[RuntimeErrorBody](errorEnvelope, RuntimeMessageError)
 	require.NoError(t, err)
 	require.Equal(t, RuntimeErrorValidationFailed, errorBody.Code)
 	require.Equal(t, 0, fixture.leases.ackCallCount())
-	requireRuntimeV2WSCloseCode(t, conn, RuntimeWSCloseProtocolError)
+	requireRuntimeWSCloseCode(t, conn, RuntimeWSCloseProtocolError)
 }
 
-func TestRuntimeV2WebSocketBusinessErrorIsCorrelatedAndConnectionStaysOpen(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketBusinessErrorIsCorrelatedAndConnectionStaysOpen(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	fixture.leases.setAckResult(RunAssignmentConfirmedPayload{}, newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil))
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	readRuntimeV2WSEnvelope(t, conn) // ready
-	assignedEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	readRuntimeWSEnvelope(t, conn) // ready
+	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 	ackMessage, err := NewRuntimeTypedMessage(
 		RuntimeMessageAssignmentAck,
 		&assignedEnvelope.MessageID,
 		RunAssignmentAckPayload{AttemptIdentity: assignment.AttemptIdentity},
 	)
 	require.NoError(t, err)
-	ackEnvelope := runtimeV2EnvelopeFromTyped(t, ackMessage)
+	ackEnvelope := runtimeEnvelopeFromTyped(t, ackMessage)
 	require.NoError(t, conn.WriteJSON(ackMessage))
-	errorEnvelope := readRuntimeV2WSEnvelope(t, conn)
+	errorEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(ackEnvelope, errorEnvelope))
 	errorBody, err := DecodeRuntimeMessagePayload[RuntimeErrorBody](errorEnvelope, RuntimeMessageError)
 	require.NoError(t, err)
@@ -457,16 +529,16 @@ func TestRuntimeV2WebSocketBusinessErrorIsCorrelatedAndConnectionStaysOpen(t *te
 		LeaseExpiresAt:  fixture.now.Add(time.Minute),
 	}, nil)
 	require.NoError(t, conn.WriteJSON(ackMessage))
-	confirmed := readRuntimeV2WSEnvelope(t, conn)
+	confirmed := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageAssignmentConfirmed, confirmed.Type)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(ackEnvelope, confirmed))
 }
 
-func TestRuntimeV2WebSocketResumeEmitsOneCorrelatedDecisionPerAttempt(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketResumeEmitsOneCorrelatedDecisionPerAttempt(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	first := fixture.assignment().AttemptIdentity
 	second := fixture.assignment().AttemptIdentity
-	resume := &runtimeV2WSResumeServiceFake{response: RuntimeResumeResponse{Decisions: []RunResumeAcceptedPayload{
+	resume := &runtimeWSResumeServiceFake{response: RuntimeResumeResponse{Decisions: []RunResumeAcceptedPayload{
 		{
 			AttemptIdentity: first,
 			Decision:        RuntimeResumeLeaseRevoked,
@@ -481,11 +553,11 @@ func TestRuntimeV2WebSocketResumeEmitsOneCorrelatedDecisionPerAttempt(t *testing
 	fixture.resume = resume
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
 
-	writeRuntimeV2WSHello(t, conn, fixture.hello)
-	readRuntimeV2WSEnvelope(t, conn) // ready
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	readRuntimeWSEnvelope(t, conn) // ready
 	requestMessage, err := NewRuntimeTypedMessage(RuntimeMessageResume, nil, RuntimeResumePayload{
 		NodeID:           fixture.principal.NodeID,
 		AgentID:          fixture.principal.AgentID,
@@ -497,11 +569,11 @@ func TestRuntimeV2WebSocketResumeEmitsOneCorrelatedDecisionPerAttempt(t *testing
 		},
 	})
 	require.NoError(t, err)
-	requestEnvelope := runtimeV2EnvelopeFromTyped(t, requestMessage)
+	requestEnvelope := runtimeEnvelopeFromTyped(t, requestMessage)
 	require.NoError(t, conn.WriteJSON(requestMessage))
 
-	firstReply := readRuntimeV2WSEnvelope(t, conn)
-	secondReply := readRuntimeV2WSEnvelope(t, conn)
+	firstReply := readRuntimeWSEnvelope(t, conn)
+	secondReply := readRuntimeWSEnvelope(t, conn)
 	for _, reply := range []RuntimeEnvelope{firstReply, secondReply} {
 		require.Equal(t, RuntimeMessageResumeAccepted, reply.Type)
 		require.NoError(t, ValidateRuntimeReplyCorrelation(requestEnvelope, reply))
@@ -515,8 +587,8 @@ func TestRuntimeV2WebSocketResumeEmitsOneCorrelatedDecisionPerAttempt(t *testing
 	require.Equal(t, 1, resume.callCount())
 }
 
-func TestRuntimeV2WebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	identity := fixture.assignment().AttemptIdentity
 	cancellationID := uuid.New()
 	cancel := RunCancelPayload{
@@ -531,13 +603,13 @@ func TestRuntimeV2WebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.
 
 	server, target := fixture.server(t)
 	defer server.Close()
-	conn := dialRuntimeV2WS(t, target)
+	conn := dialRuntimeWS(t, target)
 	defer conn.Close()
-	hello := writeRuntimeV2WSHello(t, conn, fixture.hello)
-	ready := readRuntimeV2WSEnvelope(t, conn)
+	hello := writeRuntimeWSHello(t, conn, fixture.hello)
+	ready := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(hello, ready))
 
-	command := readRuntimeV2WSEnvelope(t, conn)
+	command := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageRunCancel, command.Type)
 	require.Nil(t, command.ReplyToMessageID)
 	decoded, err := DecodeRuntimeMessagePayload[RunCancelPayload](command, RuntimeMessageRunCancel)
@@ -558,8 +630,8 @@ func TestRuntimeV2WebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.
 	}, 3*time.Second, 10*time.Millisecond)
 }
 
-func TestRuntimeV2WebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
-	fixture := newRuntimeV2WSTestFixture()
+func TestRuntimeWebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
 	identity := fixture.assignment().AttemptIdentity
 	cancel := RunCancelPayload{
 		CancellationID:  uuid.New(),
@@ -567,18 +639,18 @@ func TestRuntimeV2WebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
 		ReasonCode:      runtimeCancellationReasonCode,
 		DeadlineAt:      fixture.now.Add(30 * time.Second),
 	}
-	_, commandEnvelope, err := newRuntimeV2WSTypedMessage(RuntimeMessageRunCancel, nil, cancel)
+	_, commandEnvelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunCancel, nil, cancel)
 	require.NoError(t, err)
-	connection := &runtimeV2WSConnection{
+	connection := &runtimeWSConnection{
 		controller:       fixture.controller(),
 		ctx:              context.Background(),
 		sessionPrincipal: fixture.principal,
-		cancellations:    make(map[uuid.UUID]runtimeV2WSCancellationCorrelation),
+		cancellations:    make(map[uuid.UUID]runtimeWSCancellationCorrelation),
 	}
 	connection.recordCancellation(commandEnvelope, cancel)
 
 	for _, state := range []RuntimeCancelState{RuntimeCancelStopping, RuntimeCancelStopped} {
-		_, ackEnvelope, ackErr := newRuntimeV2WSTypedMessage(RuntimeMessageRunCancelAck, &commandEnvelope.MessageID, RunCancelAckPayload{
+		_, ackEnvelope, ackErr := newRuntimeWSTypedMessage(RuntimeMessageRunCancelAck, &commandEnvelope.MessageID, RunCancelAckPayload{
 			CancellationID:  cancel.CancellationID,
 			AttemptIdentity: identity,
 			CancelState:     state,
@@ -596,24 +668,24 @@ func TestRuntimeV2WebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
 	}
 }
 
-type runtimeV2WSTestFixture struct {
+type runtimeWSTestFixture struct {
 	now           time.Time
 	authenticated AuthenticatedRuntimePrincipal
 	hello         RuntimeHelloPayload
 	principal     RuntimeSessionPrincipal
-	operations    *runtimeV2WSOperations
-	tokens        *runtimeV2WSTokenValidatorFake
-	devices       *runtimeV2WSDeviceAuthenticatorFake
-	sessions      *runtimeV2WSSessionServiceFake
-	leases        *runtimeV2WSLeaseServiceFake
-	events        *runtimeV2WSEventStoreFake
-	finalizer     *runtimeV2WSFinalizerFake
+	operations    *runtimeWSOperations
+	tokens        *runtimeWSTokenValidatorFake
+	devices       *runtimeWSDeviceAuthenticatorFake
+	sessions      *runtimeWSSessionServiceFake
+	leases        *runtimeWSLeaseServiceFake
+	events        *runtimeWSEventStoreFake
+	finalizer     *runtimeWSFinalizerFake
 	resume        RuntimeResumeAPI
-	cancellations *runtimeV2WSCancellationServiceFake
+	cancellations *runtimeWSCancellationServiceFake
 	wakeHub       *RuntimeWakeHub
 }
 
-func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
+func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 	now := time.Date(2026, 7, 11, 9, 10, 11, 0, time.UTC)
 	authenticated := AuthenticatedRuntimePrincipal{
 		AgentID:      uuid.New(),
@@ -673,29 +745,29 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 		},
 		DatabaseTime: now,
 	}
-	operations := &runtimeV2WSOperations{}
-	return &runtimeV2WSTestFixture{
+	operations := &runtimeWSOperations{}
+	return &runtimeWSTestFixture{
 		now:           now,
 		authenticated: authenticated,
 		hello:         hello,
 		principal:     principal,
 		operations:    operations,
-		tokens: &runtimeV2WSTokenValidatorFake{token: db.AgentRuntimeToken{
+		tokens: &runtimeWSTokenValidatorFake{token: db.AgentRuntimeToken{
 			ID: principal.CredentialID, AgentID: principal.AgentID,
 		}},
-		devices:   &runtimeV2WSDeviceAuthenticatorFake{device: authenticated.Device},
-		sessions:  &runtimeV2WSSessionServiceFake{state: state, principal: principal, operations: operations},
-		leases:    &runtimeV2WSLeaseServiceFake{operations: operations},
-		events:    &runtimeV2WSEventStoreFake{},
-		finalizer: &runtimeV2WSFinalizerFake{},
+		devices:   &runtimeWSDeviceAuthenticatorFake{device: authenticated.Device},
+		sessions:  &runtimeWSSessionServiceFake{state: state, principal: principal, operations: operations},
+		leases:    &runtimeWSLeaseServiceFake{operations: operations},
+		events:    &runtimeWSEventStoreFake{},
+		finalizer: &runtimeWSFinalizerFake{},
 		wakeHub:   NewRuntimeWakeHub(),
-		cancellations: &runtimeV2WSCancellationServiceFake{
+		cancellations: &runtimeWSCancellationServiceFake{
 			databaseTime: now,
 		},
 	}
 }
 
-func (f *runtimeV2WSTestFixture) controller() *RuntimeHTTPController {
+func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
 	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
@@ -709,7 +781,7 @@ func (f *runtimeV2WSTestFixture) controller() *RuntimeHTTPController {
 	})
 }
 
-func (f *runtimeV2WSTestFixture) server(t *testing.T) (*httptest.Server, string) {
+func (f *runtimeWSTestFixture) server(t *testing.T) (*httptest.Server, string) {
 	t.Helper()
 	e := echo.New()
 	f.controller().Register(e.Group("/api/v1"))
@@ -718,7 +790,7 @@ func (f *runtimeV2WSTestFixture) server(t *testing.T) (*httptest.Server, string)
 	return server, target
 }
 
-func (f *runtimeV2WSTestFixture) assignment() RunAssignedPayload {
+func (f *runtimeWSTestFixture) assignment() RunAssignedPayload {
 	return RunAssignedPayload{
 		AttemptIdentity: AttemptIdentity{
 			RunID:            uuid.New(),
@@ -740,7 +812,7 @@ func (f *runtimeV2WSTestFixture) assignment() RunAssignedPayload {
 	}
 }
 
-func dialRuntimeV2WS(t *testing.T, target string) *websocket.Conn {
+func dialRuntimeWS(t *testing.T, target string) *websocket.Conn {
 	t.Helper()
 	conn, response, err := websocket.DefaultDialer.Dial(target, http.Header{
 		echo.HeaderAuthorization: []string{"Bearer runtime-secret"},
@@ -753,15 +825,15 @@ func dialRuntimeV2WS(t *testing.T, target string) *websocket.Conn {
 	return conn
 }
 
-func writeRuntimeV2WSHello(t *testing.T, conn *websocket.Conn, hello RuntimeHelloPayload) RuntimeEnvelope {
+func writeRuntimeWSHello(t *testing.T, conn *websocket.Conn, hello RuntimeHelloPayload) RuntimeEnvelope {
 	t.Helper()
 	message, err := NewRuntimeTypedMessage(RuntimeMessageHello, nil, hello)
 	require.NoError(t, err)
 	require.NoError(t, conn.WriteJSON(message))
-	return runtimeV2EnvelopeFromTyped(t, message)
+	return runtimeEnvelopeFromTyped(t, message)
 }
 
-func readRuntimeV2WSEnvelope(t *testing.T, conn *websocket.Conn) RuntimeEnvelope {
+func readRuntimeWSEnvelope(t *testing.T, conn *websocket.Conn) RuntimeEnvelope {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
 	messageType, frame, err := conn.ReadMessage()
@@ -772,14 +844,14 @@ func readRuntimeV2WSEnvelope(t *testing.T, conn *websocket.Conn) RuntimeEnvelope
 	return envelope
 }
 
-func runtimeV2EnvelopeFromTyped[P any](t *testing.T, message RuntimeTypedEnvelope[P]) RuntimeEnvelope {
+func runtimeEnvelopeFromTyped[P any](t *testing.T, message RuntimeTypedEnvelope[P]) RuntimeEnvelope {
 	t.Helper()
 	payload, err := json.Marshal(message.Payload)
 	require.NoError(t, err)
 	return RuntimeEnvelope{RuntimeEnvelopeFields: message.RuntimeEnvelopeFields, Payload: payload}
 }
 
-func requireRuntimeV2WSCloseCode(t *testing.T, conn *websocket.Conn, expected int) {
+func requireRuntimeWSCloseCode(t *testing.T, conn *websocket.Conn, expected int) {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
 	_, _, err := conn.ReadMessage()
@@ -789,24 +861,37 @@ func requireRuntimeV2WSCloseCode(t *testing.T, conn *websocket.Conn, expected in
 	require.Equal(t, expected, closeErr.Code, closeErr.Error())
 }
 
-type runtimeV2WSOperations struct {
+type runtimeWSOperations struct {
 	mu    sync.Mutex
 	items []string
 }
 
-func (o *runtimeV2WSOperations) append(value string) {
+type runtimeWSManagedConnectionFake struct {
+	shutdownOnce   sync.Once
+	shutdownCalled chan struct{}
+}
+
+func (f *runtimeWSManagedConnectionFake) shutdownConnection() {
+	f.shutdownOnce.Do(func() { close(f.shutdownCalled) })
+}
+
+func (f *runtimeWSManagedConnectionFake) shutdown() {
+	f.shutdownConnection()
+}
+
+func (o *runtimeWSOperations) append(value string) {
 	o.mu.Lock()
 	o.items = append(o.items, value)
 	o.mu.Unlock()
 }
 
-func (o *runtimeV2WSOperations) snapshot() []string {
+func (o *runtimeWSOperations) snapshot() []string {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return append([]string(nil), o.items...)
 }
 
-type runtimeV2WSTokenValidatorFake struct {
+type runtimeWSTokenValidatorFake struct {
 	mu        sync.Mutex
 	token     db.AgentRuntimeToken
 	err       error
@@ -814,7 +899,7 @@ type runtimeV2WSTokenValidatorFake struct {
 	scopes    []string
 }
 
-func (f *runtimeV2WSTokenValidatorFake) ValidateRuntimeToken(_ context.Context, plaintext string, scopes ...string) (db.AgentRuntimeToken, error) {
+func (f *runtimeWSTokenValidatorFake) ValidateRuntimeToken(_ context.Context, plaintext string, scopes ...string) (db.AgentRuntimeToken, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.plaintext = plaintext
@@ -822,25 +907,25 @@ func (f *runtimeV2WSTokenValidatorFake) ValidateRuntimeToken(_ context.Context, 
 	return f.token, f.err
 }
 
-type runtimeV2WSDeviceAuthenticatorFake struct {
+type runtimeWSDeviceAuthenticatorFake struct {
 	mu     sync.Mutex
 	device RuntimeDeviceIdentity
 	err    error
 	calls  int
 }
 
-func (f *runtimeV2WSDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error) {
+func (f *runtimeWSDeviceAuthenticatorFake) AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	return f.device, f.err
 }
 
-type runtimeV2WSSessionServiceFake struct {
+type runtimeWSSessionServiceFake struct {
 	mu           sync.Mutex
 	state        RuntimeSessionState
 	principal    RuntimeSessionPrincipal
-	operations   *runtimeV2WSOperations
+	operations   *runtimeWSOperations
 	createErr    error
 	resolveErr   error
 	heartbeatErr error
@@ -850,7 +935,7 @@ type runtimeV2WSSessionServiceFake struct {
 	closeRequest RuntimeSessionCloseRequest
 }
 
-func (f *runtimeV2WSSessionServiceFake) CreateOrAttachSession(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
+func (f *runtimeWSSessionServiceFake) CreateOrAttachSession(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.createCount++
@@ -858,13 +943,13 @@ func (f *runtimeV2WSSessionServiceFake) CreateOrAttachSession(_ context.Context,
 	return f.state, f.createErr
 }
 
-func (f *runtimeV2WSSessionServiceFake) HeartbeatSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
+func (f *runtimeWSSessionServiceFake) HeartbeatSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.state, f.heartbeatErr
 }
 
-func (f *runtimeV2WSSessionServiceFake) CloseSession(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionCloseRequest) (RuntimeSessionState, error) {
+func (f *runtimeWSSessionServiceFake) CloseSession(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionCloseRequest) (RuntimeSessionState, error) {
 	f.mu.Lock()
 	f.closeRequest = request
 	err := f.closeErr
@@ -884,7 +969,7 @@ func (f *runtimeV2WSSessionServiceFake) CloseSession(_ context.Context, _ Authen
 	return state, err
 }
 
-func (f *runtimeV2WSSessionServiceFake) replaceAttachment() uuid.UUID {
+func (f *runtimeWSSessionServiceFake) replaceAttachment() uuid.UUID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	replacement := uuid.New()
@@ -896,39 +981,39 @@ func (f *runtimeV2WSSessionServiceFake) replaceAttachment() uuid.UUID {
 	return replacement
 }
 
-func (f *runtimeV2WSSessionServiceFake) ResolveSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, uuid.UUID) (RuntimeSessionPrincipal, error) {
+func (f *runtimeWSSessionServiceFake) ResolveSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, uuid.UUID) (RuntimeSessionPrincipal, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.principal, f.resolveErr
 }
 
-func (f *runtimeV2WSSessionServiceFake) ResolveWorkerSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, string) (RuntimeSessionPrincipal, error) {
+func (f *runtimeWSSessionServiceFake) ResolveWorkerSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, string) (RuntimeSessionPrincipal, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.principal, f.resolveErr
 }
 
-func (f *runtimeV2WSSessionServiceFake) createCalls() int {
+func (f *runtimeWSSessionServiceFake) createCalls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.createCount
 }
 
-func (f *runtimeV2WSSessionServiceFake) createdRequest() RuntimeSessionRequest {
+func (f *runtimeWSSessionServiceFake) createdRequest() RuntimeSessionRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.created
 }
 
-func (f *runtimeV2WSSessionServiceFake) closedStatus() string {
+func (f *runtimeWSSessionServiceFake) closedStatus() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.closeRequest.Status
 }
 
-type runtimeV2WSLeaseServiceFake struct {
+type runtimeWSLeaseServiceFake struct {
 	mu             sync.Mutex
-	operations     *runtimeV2WSOperations
+	operations     *runtimeWSOperations
 	assignment     *RunAssignedPayload
 	claimErr       error
 	ackResponse    RunAssignmentConfirmedPayload
@@ -944,7 +1029,7 @@ type runtimeV2WSLeaseServiceFake struct {
 	renewCalls     int
 }
 
-func (f *runtimeV2WSLeaseServiceFake) ClaimOffer(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
+func (f *runtimeWSLeaseServiceFake) ClaimOffer(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.assignment == nil {
@@ -954,7 +1039,7 @@ func (f *runtimeV2WSLeaseServiceFake) ClaimOffer(context.Context, RuntimeSession
 	return &copy, f.claimErr
 }
 
-func (f *runtimeV2WSLeaseServiceFake) AckAssignment(_ context.Context, _ RuntimeSessionPrincipal, _ RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error) {
+func (f *runtimeWSLeaseServiceFake) AckAssignment(_ context.Context, _ RuntimeSessionPrincipal, _ RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.ackCalls++
@@ -964,7 +1049,7 @@ func (f *runtimeV2WSLeaseServiceFake) AckAssignment(_ context.Context, _ Runtime
 	return f.ackResponse, f.ackErr
 }
 
-func (f *runtimeV2WSLeaseServiceFake) RejectAssignment(_ context.Context, _ RuntimeSessionPrincipal, _ RunAssignmentRejectPayload) (RunAssignmentRejectedPayload, error) {
+func (f *runtimeWSLeaseServiceFake) RejectAssignment(_ context.Context, _ RuntimeSessionPrincipal, _ RunAssignmentRejectPayload) (RunAssignmentRejectedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rejectCalls++
@@ -974,14 +1059,14 @@ func (f *runtimeV2WSLeaseServiceFake) RejectAssignment(_ context.Context, _ Runt
 	return f.rejectResponse, f.rejectErr
 }
 
-func (f *runtimeV2WSLeaseServiceFake) RenewLease(_ context.Context, _ RuntimeSessionPrincipal, _ RunLeaseRenewPayload) (RunLeaseRenewedPayload, error) {
+func (f *runtimeWSLeaseServiceFake) RenewLease(_ context.Context, _ RuntimeSessionPrincipal, _ RunLeaseRenewPayload) (RunLeaseRenewedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.renewCalls++
 	return f.renewResponse, f.renewErr
 }
 
-func (f *runtimeV2WSLeaseServiceFake) ReleaseUnackedOffer(_ context.Context, _ RuntimeSessionPrincipal, reason ...string) error {
+func (f *runtimeWSLeaseServiceFake) ReleaseUnackedOffer(_ context.Context, _ RuntimeSessionPrincipal, reason ...string) error {
 	f.mu.Lock()
 	if len(reason) > 0 {
 		f.releaseCode = reason[0]
@@ -994,44 +1079,44 @@ func (f *runtimeV2WSLeaseServiceFake) ReleaseUnackedOffer(_ context.Context, _ R
 	return err
 }
 
-func (f *runtimeV2WSLeaseServiceFake) setAssignment(assignment *RunAssignedPayload) {
+func (f *runtimeWSLeaseServiceFake) setAssignment(assignment *RunAssignedPayload) {
 	f.mu.Lock()
 	f.assignment = assignment
 	f.mu.Unlock()
 }
 
-func (f *runtimeV2WSLeaseServiceFake) setAckResult(response RunAssignmentConfirmedPayload, err error) {
+func (f *runtimeWSLeaseServiceFake) setAckResult(response RunAssignmentConfirmedPayload, err error) {
 	f.mu.Lock()
 	f.ackResponse = response
 	f.ackErr = err
 	f.mu.Unlock()
 }
 
-func (f *runtimeV2WSLeaseServiceFake) ackCallCount() int {
+func (f *runtimeWSLeaseServiceFake) ackCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.ackCalls
 }
 
-func (f *runtimeV2WSLeaseServiceFake) rejectCallCount() int {
+func (f *runtimeWSLeaseServiceFake) rejectCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.rejectCalls
 }
 
-func (f *runtimeV2WSLeaseServiceFake) renewCallCount() int {
+func (f *runtimeWSLeaseServiceFake) renewCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.renewCalls
 }
 
-func (f *runtimeV2WSLeaseServiceFake) releaseReason() string {
+func (f *runtimeWSLeaseServiceFake) releaseReason() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.releaseCode
 }
 
-type runtimeV2WSEventStoreFake struct {
+type runtimeWSEventStoreFake struct {
 	mu        sync.Mutex
 	ack       RuntimeEventAck
 	err       error
@@ -1041,7 +1126,7 @@ type runtimeV2WSEventStoreFake struct {
 	request   RuntimeEventRequest
 }
 
-func (f *runtimeV2WSEventStoreFake) AppendRuntimeEvent(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
+func (f *runtimeWSEventStoreFake) AppendRuntimeEvent(_ context.Context, principal RuntimeEventPrincipal, identity RuntimeAttemptIdentity, request RuntimeEventRequest) (RuntimeEventAck, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -1051,19 +1136,19 @@ func (f *runtimeV2WSEventStoreFake) AppendRuntimeEvent(_ context.Context, princi
 	return f.ack, f.err
 }
 
-func (f *runtimeV2WSEventStoreFake) callCount() int {
+func (f *runtimeWSEventStoreFake) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
 }
 
-func (f *runtimeV2WSEventStoreFake) lastPrincipal() RuntimeEventPrincipal {
+func (f *runtimeWSEventStoreFake) lastPrincipal() RuntimeEventPrincipal {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.principal
 }
 
-type runtimeV2WSFinalizerFake struct {
+type runtimeWSFinalizerFake struct {
 	mu        sync.Mutex
 	ack       RuntimeResultAck
 	err       error
@@ -1072,14 +1157,14 @@ type runtimeV2WSFinalizerFake struct {
 	request   RuntimeResultRequest
 }
 
-type runtimeV2WSResumeServiceFake struct {
+type runtimeWSResumeServiceFake struct {
 	mu       sync.Mutex
 	response RuntimeResumeResponse
 	err      error
 	calls    int
 }
 
-type runtimeV2WSCancellationServiceFake struct {
+type runtimeWSCancellationServiceFake struct {
 	mu           sync.Mutex
 	command      *PendingCommand
 	databaseTime time.Time
@@ -1089,7 +1174,7 @@ type runtimeV2WSCancellationServiceFake struct {
 	ackPayloads  []RunCancelAckPayload
 }
 
-func (f *runtimeV2WSCancellationServiceFake) NextCommand(
+func (f *runtimeWSCancellationServiceFake) NextCommand(
 	context.Context,
 	RuntimeSessionPrincipal,
 ) (*PendingCommand, time.Time, error) {
@@ -1103,7 +1188,7 @@ func (f *runtimeV2WSCancellationServiceFake) NextCommand(
 	return &command, f.databaseTime, f.nextErr
 }
 
-func (f *runtimeV2WSCancellationServiceFake) PollCommands(
+func (f *runtimeWSCancellationServiceFake) PollCommands(
 	context.Context,
 	RuntimeSessionPrincipal,
 ) (RuntimeCommandsResponse, error) {
@@ -1118,7 +1203,7 @@ func (f *runtimeV2WSCancellationServiceFake) PollCommands(
 	return RuntimeCommandsResponse{Commands: commands, DatabaseTime: f.databaseTime}, f.nextErr
 }
 
-func (f *runtimeV2WSCancellationServiceFake) AckCancel(
+func (f *runtimeWSCancellationServiceFake) AckCancel(
 	_ context.Context,
 	_ RuntimeSessionPrincipal,
 	payload RunCancelAckPayload,
@@ -1129,32 +1214,32 @@ func (f *runtimeV2WSCancellationServiceFake) AckCancel(
 	return f.ackState, f.ackErr
 }
 
-func (f *runtimeV2WSCancellationServiceFake) setCommand(command PendingCommand) {
+func (f *runtimeWSCancellationServiceFake) setCommand(command PendingCommand) {
 	f.mu.Lock()
 	f.command = &command
 	f.mu.Unlock()
 }
 
-func (f *runtimeV2WSCancellationServiceFake) ackCallCount() int {
+func (f *runtimeWSCancellationServiceFake) ackCallCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.ackPayloads)
 }
 
-func (f *runtimeV2WSResumeServiceFake) Resume(context.Context, RuntimeSessionPrincipal, RuntimeResumePayload) (RuntimeResumeResponse, error) {
+func (f *runtimeWSResumeServiceFake) Resume(context.Context, RuntimeSessionPrincipal, RuntimeResumePayload) (RuntimeResumeResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	return f.response, f.err
 }
 
-func (f *runtimeV2WSResumeServiceFake) callCount() int {
+func (f *runtimeWSResumeServiceFake) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
 }
 
-func (f *runtimeV2WSFinalizerFake) Finalize(_ context.Context, principal RuntimeResultPrincipal, request RuntimeResultRequest) (RuntimeResultAck, error) {
+func (f *runtimeWSFinalizerFake) Finalize(_ context.Context, principal RuntimeResultPrincipal, request RuntimeResultRequest) (RuntimeResultAck, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -1163,25 +1248,25 @@ func (f *runtimeV2WSFinalizerFake) Finalize(_ context.Context, principal Runtime
 	return f.ack, f.err
 }
 
-func (f *runtimeV2WSFinalizerFake) callCount() int {
+func (f *runtimeWSFinalizerFake) callCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.calls
 }
 
-func (f *runtimeV2WSFinalizerFake) lastPrincipal() RuntimeResultPrincipal {
+func (f *runtimeWSFinalizerFake) lastPrincipal() RuntimeResultPrincipal {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.principal
 }
 
 var (
-	_ RuntimeTokenValidator      = (*runtimeV2WSTokenValidatorFake)(nil)
-	_ RuntimeDeviceAuthenticator = (*runtimeV2WSDeviceAuthenticatorFake)(nil)
-	_ RuntimeSessionAPI          = (*runtimeV2WSSessionServiceFake)(nil)
-	_ RuntimeLeaseAPI            = (*runtimeV2WSLeaseServiceFake)(nil)
-	_ RuntimeEventProjector      = (*runtimeV2WSEventStoreFake)(nil)
-	_ RuntimeResultFinalizer     = (*runtimeV2WSFinalizerFake)(nil)
-	_ RuntimeResumeAPI           = (*runtimeV2WSResumeServiceFake)(nil)
-	_ RuntimeCancellationAPI     = (*runtimeV2WSCancellationServiceFake)(nil)
+	_ RuntimeTokenValidator      = (*runtimeWSTokenValidatorFake)(nil)
+	_ RuntimeDeviceAuthenticator = (*runtimeWSDeviceAuthenticatorFake)(nil)
+	_ RuntimeSessionAPI          = (*runtimeWSSessionServiceFake)(nil)
+	_ RuntimeLeaseAPI            = (*runtimeWSLeaseServiceFake)(nil)
+	_ RuntimeEventProjector      = (*runtimeWSEventStoreFake)(nil)
+	_ RuntimeResultFinalizer     = (*runtimeWSFinalizerFake)(nil)
+	_ RuntimeResumeAPI           = (*runtimeWSResumeServiceFake)(nil)
+	_ RuntimeCancellationAPI     = (*runtimeWSCancellationServiceFake)(nil)
 )

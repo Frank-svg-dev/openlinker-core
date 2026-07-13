@@ -166,7 +166,7 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		t.Fatalf("Register returned nil services")
 	}
 	if services.Auth == nil || services.Admin == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
-		services.Runtime == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil || services.ServiceBridge == nil ||
+		services.Runtime == nil || services.RuntimeController == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil || services.ServiceBridge == nil ||
 		services.Registry == nil || services.Benchmark == nil || services.Task == nil || services.MCP == nil ||
 		services.Delivery == nil || services.UserToken == nil {
 		t.Fatalf("Register returned incomplete services: %#v", services)

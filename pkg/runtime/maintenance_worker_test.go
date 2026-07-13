@@ -10,14 +10,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type runtimeV2MaintenanceReconcilerFake struct {
+type runtimeMaintenanceReconcilerFake struct {
 	mu      sync.Mutex
 	results []RuntimeReconcileBatchResult
 	err     error
 	calls   int
 }
 
-func (f *runtimeV2MaintenanceReconcilerFake) ReconcileBatch(_ context.Context, _ int) (RuntimeReconcileBatchResult, error) {
+func (f *runtimeMaintenanceReconcilerFake) ReconcileBatch(_ context.Context, _ int) (RuntimeReconcileBatchResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -29,7 +29,7 @@ func (f *runtimeV2MaintenanceReconcilerFake) ReconcileBatch(_ context.Context, _
 	return result, f.err
 }
 
-type runtimeV2MaintenanceCancellationFake struct {
+type runtimeMaintenanceCancellationFake struct {
 	mu      sync.Mutex
 	results []int
 	err     error
@@ -55,7 +55,7 @@ func (f *runtimeMaintenanceSessionFake) ReapStaleSessions(_ context.Context, _ i
 	return result, f.err
 }
 
-func (f *runtimeV2MaintenanceCancellationFake) ReapExpiredCancellations(_ context.Context, _ int) (int, error) {
+func (f *runtimeMaintenanceCancellationFake) ReapExpiredCancellations(_ context.Context, _ int) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -67,12 +67,12 @@ func (f *runtimeV2MaintenanceCancellationFake) ReapExpiredCancellations(_ contex
 	return result, f.err
 }
 
-func TestRuntimeV2MaintenanceWorkerRunsBoundedCatchUp(t *testing.T) {
-	reconciler := &runtimeV2MaintenanceReconcilerFake{results: []RuntimeReconcileBatchResult{
+func TestRuntimeMaintenanceWorkerRunsBoundedCatchUp(t *testing.T) {
+	reconciler := &runtimeMaintenanceReconcilerFake{results: []RuntimeReconcileBatchResult{
 		{Scanned: 2, Reconciled: 2, Requeued: 1, TimedOut: 1},
 		{Scanned: 1, Reconciled: 1, DeadLettered: 1},
 	}}
-	cancellations := &runtimeV2MaintenanceCancellationFake{results: []int{2, 1}}
+	cancellations := &runtimeMaintenanceCancellationFake{results: []int{2, 1}}
 	sessions := &runtimeMaintenanceSessionFake{results: []int{2, 1}}
 
 	result, err := RunRuntimeMaintenanceOnce(context.Background(), reconciler, cancellations, sessions, RuntimeMaintenanceWorkerConfig{
@@ -86,10 +86,10 @@ func TestRuntimeV2MaintenanceWorkerRunsBoundedCatchUp(t *testing.T) {
 	}, result)
 }
 
-func TestRuntimeV2MaintenanceWorkerDoesNotHideIndependentFailure(t *testing.T) {
+func TestRuntimeMaintenanceWorkerDoesNotHideIndependentFailure(t *testing.T) {
 	reconcileErr := errors.New("reconcile failed")
-	reconciler := &runtimeV2MaintenanceReconcilerFake{err: reconcileErr}
-	cancellations := &runtimeV2MaintenanceCancellationFake{results: []int{1}}
+	reconciler := &runtimeMaintenanceReconcilerFake{err: reconcileErr}
+	cancellations := &runtimeMaintenanceCancellationFake{results: []int{1}}
 	sessions := &runtimeMaintenanceSessionFake{results: []int{1}}
 
 	result, err := RunRuntimeMaintenanceOnce(context.Background(), reconciler, cancellations, sessions, RuntimeMaintenanceWorkerConfig{
@@ -100,9 +100,9 @@ func TestRuntimeV2MaintenanceWorkerDoesNotHideIndependentFailure(t *testing.T) {
 	require.Equal(t, 1, cancellations.calls)
 }
 
-func TestRuntimeV2MaintenanceWorkerStopsWithContext(t *testing.T) {
-	reconciler := &runtimeV2MaintenanceReconcilerFake{}
-	cancellations := &runtimeV2MaintenanceCancellationFake{}
+func TestRuntimeMaintenanceWorkerStopsWithContext(t *testing.T) {
+	reconciler := &runtimeMaintenanceReconcilerFake{}
+	cancellations := &runtimeMaintenanceCancellationFake{}
 	sessions := &runtimeMaintenanceSessionFake{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

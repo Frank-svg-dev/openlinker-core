@@ -16,7 +16,7 @@ import (
 
 func TestRuntimeNodeAdminInventoryDrainAndRevokeAgainstPostgres(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	resetRuntimeNodeAdminTables(t, pool)
 	fixture := insertRuntimeNodeAdminFixture(t, pool)
 	svc := newTestService(t, pool)

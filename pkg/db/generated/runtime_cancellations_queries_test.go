@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
+func TestRuntimeCancellationQueriesAreFencedAndOrdered(t *testing.T) {
 	t.Parallel()
 
 	for _, fragment := range []string{
@@ -42,7 +42,7 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 		"a.slot_acquired_at IS NOT NULL", "a.slot_released_at IS NULL",
 		"a.active_runtime_session_id IS NOT NULL", "a.node_id IS NOT NULL",
 	} {
-		if !strings.Contains(findNextDueRuntimeV2Cancellation, fragment) {
+		if !strings.Contains(findNextDueRuntimeCancellation, fragment) {
 			t.Fatalf("due cancellation discovery missing %q", fragment)
 		}
 	}
@@ -57,7 +57,7 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 		"$6::bigint * INTERVAL '1 millisecond'", "<= clock_timestamp()",
 		"FOR UPDATE OF r",
 	} {
-		if !strings.Contains(lockDueRuntimeV2CancellationRun, fragment) {
+		if !strings.Contains(lockDueRuntimeCancellationRun, fragment) {
 			t.Fatalf("due cancellation Run lock missing %q", fragment)
 		}
 	}
@@ -73,7 +73,7 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 		"run_id = $3", "id = $4", "state = $5",
 		"('delivered', 'stopping', 'stopped', 'unsupported', 'failed', 'unconfirmed')",
 	} {
-		if !strings.Contains(advanceRuntimeV2RunCancellation, fragment) {
+		if !strings.Contains(advanceRuntimeRunCancellation, fragment) {
 			t.Fatalf("cancellation transition fence missing %q", fragment)
 		}
 	}
@@ -85,7 +85,7 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 		"a.executor_type IN ('core_http', 'core_mcp')",
 		"a.finished_at IS NOT NULL", "a.outcome = 'canceled'",
 	} {
-		if !strings.Contains(finalizeRuntimeV2RunCancellation, fragment) {
+		if !strings.Contains(finalizeRuntimeRunCancellation, fragment) {
 			t.Fatalf("Run cancellation finalization missing %q", fragment)
 		}
 	}
@@ -95,13 +95,13 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 		"c.target_attempt_id = a.id",
 		"c.state IN ('stopped', 'unconfirmed')",
 	} {
-		if !strings.Contains(finishRuntimeV2CanceledAttempt, fragment) {
+		if !strings.Contains(finishRuntimeCanceledAttempt, fragment) {
 			t.Fatalf("terminal cancellation Attempt fence missing %q", fragment)
 		}
 	}
 }
 
-func TestRuntimeCancellationV2GeneratedCommandScanAndArgumentOrder(t *testing.T) {
+func TestRuntimeCancellationGeneratedCommandScanAndArgumentOrder(t *testing.T) {
 	now := time.Date(2026, 7, 11, 18, 30, 0, 0, time.UTC)
 	runID, agentID, cancellationID, attemptID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	nodeID, credentialID, sessionID := uuid.New(), uuid.New(), uuid.New()
@@ -125,11 +125,11 @@ func TestRuntimeCancellationV2GeneratedCommandScanAndArgumentOrder(t *testing.T)
 	}
 
 	dbtx.row = fakeRow{values: []any{runID, agentID, cancellationID, attemptID, sessionID, nodeID}}
-	due, err := q.FindNextDueRuntimeV2Cancellation(context.Background(), 30_000)
+	due, err := q.FindNextDueRuntimeCancellation(context.Background(), 30_000)
 	if err != nil || due.RunID != runID || due.TargetAttemptID != attemptID || due.RuntimeSessionID != sessionID {
-		t.Fatalf("FindNextDueRuntimeV2Cancellation = %#v, %v", due, err)
+		t.Fatalf("FindNextDueRuntimeCancellation = %#v, %v", due, err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "FindNextDueRuntimeV2Cancellation")
+	requireSQLName(t, dbtx.queryRowSQL, "FindNextDueRuntimeCancellation")
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{int64(30_000)}) {
 		t.Fatalf("due cancellation discovery args = %#v", dbtx.queryRowArgs)
 	}
@@ -146,14 +146,14 @@ func TestRuntimeCancellationV2GeneratedCommandScanAndArgumentOrder(t *testing.T)
 	}
 
 	dbtx.row = fakeRow{values: []any{runID, agentID, cancellationID, attemptID, now}}
-	lockedDue, err := q.LockDueRuntimeV2CancellationRun(context.Background(), LockDueRuntimeV2CancellationRunParams{
+	lockedDue, err := q.LockDueRuntimeCancellationRun(context.Background(), LockDueRuntimeCancellationRunParams{
 		RunID: runID, CancellationID: cancellationID, TargetAttemptID: attemptID,
 		RuntimeSessionID: sessionID, NodeID: nodeID, CommandDeadlineMs: 30_000,
 	})
 	if err != nil || lockedDue.RunID != runID || lockedDue.DatabaseNow != now {
-		t.Fatalf("LockDueRuntimeV2CancellationRun = %#v, %v", lockedDue, err)
+		t.Fatalf("LockDueRuntimeCancellationRun = %#v, %v", lockedDue, err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "LockDueRuntimeV2CancellationRun")
+	requireSQLName(t, dbtx.queryRowSQL, "LockDueRuntimeCancellationRun")
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{
 		runID, cancellationID, attemptID, sessionID, nodeID, int64(30_000),
 	}) {
@@ -167,14 +167,14 @@ func TestRuntimeCancellationV2GeneratedCommandScanAndArgumentOrder(t *testing.T)
 		(*time.Time)(nil), (*time.Time)(nil), (*string)(nil), now,
 	}
 	dbtx.row = fakeRow{values: cancellationValues}
-	advanced, err := q.AdvanceRuntimeV2RunCancellation(context.Background(), AdvanceRuntimeV2RunCancellationParams{
+	advanced, err := q.AdvanceRuntimeRunCancellation(context.Background(), AdvanceRuntimeRunCancellationParams{
 		NextState: "delivered", RunID: runID, CancellationID: cancellationID,
 		ExpectedState: "requested",
 	})
 	if err != nil || advanced.ID != cancellationID || advanced.State != "delivered" {
-		t.Fatalf("AdvanceRuntimeV2RunCancellation = %#v, %v", advanced, err)
+		t.Fatalf("AdvanceRuntimeRunCancellation = %#v, %v", advanced, err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "AdvanceRuntimeV2RunCancellation")
+	requireSQLName(t, dbtx.queryRowSQL, "AdvanceRuntimeRunCancellation")
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{
 		"delivered", (*string)(nil), runID, cancellationID, "requested",
 	}) {
@@ -182,7 +182,7 @@ func TestRuntimeCancellationV2GeneratedCommandScanAndArgumentOrder(t *testing.T)
 	}
 }
 
-func TestRuntimeCancellationV2MigrationShape(t *testing.T) {
+func TestRuntimeCancellationMigrationShape(t *testing.T) {
 	t.Parallel()
 
 	up, err := os.ReadFile("../../../migrations/065_runtime_cancellation_lifecycle.up.sql")

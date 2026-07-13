@@ -47,23 +47,26 @@ type Options struct {
 }
 
 type Services struct {
-	Auth          *auth.Service
-	Admin         *coreadmin.Service
-	AgentMarket   *agent.MarketService
-	Agent         *agent.Service
-	Skill         *skill.Service
-	Runtime       *runtime.Service
-	Webhook       *webhook.Service
-	A2A           *a2a.Service
-	Workflow      *workflow.Service
-	ServiceBridge *servicebridge.Service
-	Registry      *registry.Service
-	Benchmark     *skill.BenchmarkService
-	Task          *task.Service
-	MCP           *mcp.Service
-	Delivery      *delivery.Service
-	UserToken     *usertoken.Service
-	UserStatus    auth.UserStatusChecker
+	Auth        *auth.Service
+	Admin       *coreadmin.Service
+	AgentMarket *agent.MarketService
+	Agent       *agent.Service
+	Skill       *skill.Service
+	Runtime     *runtime.Service
+	// RuntimeController owns hijacked Runtime WebSocket lifecycles. The API
+	// process drains it before shutting down either HTTP listener.
+	RuntimeController *runtime.RuntimeHTTPController
+	Webhook           *webhook.Service
+	A2A               *a2a.Service
+	Workflow          *workflow.Service
+	ServiceBridge     *servicebridge.Service
+	Registry          *registry.Service
+	Benchmark         *skill.BenchmarkService
+	Task              *task.Service
+	MCP               *mcp.Service
+	Delivery          *delivery.Service
+	UserToken         *usertoken.Service
+	UserStatus        auth.UserStatusChecker
 }
 
 // Register mounts all core-owned HTTP routes and starts core-owned workers.
@@ -130,7 +133,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
-	configureRuntimeV2(rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID, opts.RuntimeSignalBus)
+	configureRuntime(rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID, opts.RuntimeSignalBus)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	if opts.AdminMiddleware != nil {
@@ -219,27 +222,28 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	}
 
 	return &Services{
-		Auth:          authSvc,
-		AgentMarket:   agentMarketSvc,
-		Admin:         adminSvc,
-		Agent:         agentSvc,
-		Skill:         skillSvc,
-		Runtime:       runtimeSvc,
-		Webhook:       webhookSvc,
-		A2A:           a2aSvc,
-		Workflow:      workflowSvc,
-		ServiceBridge: serviceBridgeSvc,
-		Registry:      registrySvc,
-		Benchmark:     benchmarkSvc,
-		Task:          taskSvc,
-		MCP:           mcpSvc,
-		Delivery:      deliverySvc,
-		UserToken:     userTokenSvc,
-		UserStatus:    userStatusChecker,
+		Auth:              authSvc,
+		AgentMarket:       agentMarketSvc,
+		Admin:             adminSvc,
+		Agent:             agentSvc,
+		Skill:             skillSvc,
+		Runtime:           runtimeSvc,
+		RuntimeController: runtimeHandler.RuntimeController(),
+		Webhook:           webhookSvc,
+		A2A:               a2aSvc,
+		Workflow:          workflowSvc,
+		ServiceBridge:     serviceBridgeSvc,
+		Registry:          registrySvc,
+		Benchmark:         benchmarkSvc,
+		Task:              taskSvc,
+		MCP:               mcpSvc,
+		Delivery:          deliverySvc,
+		UserToken:         userTokenSvc,
+		UserStatus:        userStatusChecker,
 	}
 }
 
-func configureRuntimeV2(
+func configureRuntime(
 	rootCtx context.Context,
 	handler *runtime.Handler,
 	runtimeService *runtime.Service,

@@ -357,11 +357,11 @@ type runtimeCancellationTransactionFake struct {
 	capacityCASCalls int
 }
 
-func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeV2CoreCancellation(
+func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeCoreCancellation(
 	context.Context,
 	int64,
-) (db.FindNextDueRuntimeV2CoreCancellationRow, error) {
-	return db.FindNextDueRuntimeV2CoreCancellationRow{}, pgx.ErrNoRows
+) (db.FindNextDueRuntimeCoreCancellationRow, error) {
+	return db.FindNextDueRuntimeCoreCancellationRow{}, pgx.ErrNoRows
 }
 
 func (f *runtimeCancellationTransactionFake) call(name string) { f.calls = append(f.calls, name) }
@@ -429,7 +429,7 @@ func (f *runtimeCancellationTransactionFake) LockRunCancellationForMutation(_ co
 	return f.cancellation, nil
 }
 
-func (f *runtimeCancellationTransactionFake) AdvanceRuntimeV2RunCancellation(_ context.Context, params db.AdvanceRuntimeV2RunCancellationParams) (db.RunCancellation, error) {
+func (f *runtimeCancellationTransactionFake) AdvanceRuntimeRunCancellation(_ context.Context, params db.AdvanceRuntimeRunCancellationParams) (db.RunCancellation, error) {
 	f.call("advance_cancellation")
 	if f.cancellation.State != params.ExpectedState {
 		return db.RunCancellation{}, pgx.ErrNoRows
@@ -480,16 +480,16 @@ func (f *runtimeCancellationTransactionFake) LockNextRuntimeCancellationCommandR
 	}, nil
 }
 
-func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeV2Cancellation(_ context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeV2CancellationRow, error) {
+func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeCancellation(_ context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeCancellationRow, error) {
 	f.call("find_due")
 	state := RuntimeCancelState(f.cancellation.State)
 	dueState := state == RuntimeCancelRequested || state == RuntimeCancelDelivered || state == RuntimeCancelStopping ||
 		state == RuntimeCancelUnsupported || state == RuntimeCancelFailed
 	if commandDeadlineMS < 1 || !dueState || f.attempt.FinishedAt != nil || f.attempt.Outcome != nil ||
 		f.databaseNow.Before(f.cancellation.RequestedAt.Add(time.Duration(commandDeadlineMS)*time.Millisecond)) {
-		return db.FindNextDueRuntimeV2CancellationRow{}, pgx.ErrNoRows
+		return db.FindNextDueRuntimeCancellationRow{}, pgx.ErrNoRows
 	}
-	return db.FindNextDueRuntimeV2CancellationRow{
+	return db.FindNextDueRuntimeCancellationRow{
 		RunID: f.attempt.RunID, AgentID: f.attempt.AgentID, CancellationID: f.cancellation.ID,
 		TargetAttemptID: f.attempt.ID, RuntimeSessionID: f.principal.RuntimeSessionID,
 		NodeID: f.principal.NodeID,
@@ -506,31 +506,31 @@ func (f *runtimeCancellationTransactionFake) LockRuntimeNodeForCancellationReap(
 	return nodeID, nil
 }
 
-func (f *runtimeCancellationTransactionFake) LockDueRuntimeV2CancellationRun(_ context.Context, params db.LockDueRuntimeV2CancellationRunParams) (db.LockDueRuntimeV2CancellationRunRow, error) {
+func (f *runtimeCancellationTransactionFake) LockDueRuntimeCancellationRun(_ context.Context, params db.LockDueRuntimeCancellationRunParams) (db.LockDueRuntimeCancellationRunRow, error) {
 	f.call("lock_due_run")
 	state := RuntimeCancelState(f.cancellation.State)
 	dueState := state == RuntimeCancelRequested || state == RuntimeCancelDelivered || state == RuntimeCancelStopping ||
 		state == RuntimeCancelUnsupported || state == RuntimeCancelFailed
 	if !dueState || f.attempt.FinishedAt != nil || params.RunID != f.attempt.RunID ||
 		params.TargetAttemptID != f.attempt.ID || params.CancellationID != f.cancellation.ID {
-		return db.LockDueRuntimeV2CancellationRunRow{}, pgx.ErrNoRows
+		return db.LockDueRuntimeCancellationRunRow{}, pgx.ErrNoRows
 	}
-	return db.LockDueRuntimeV2CancellationRunRow{
+	return db.LockDueRuntimeCancellationRunRow{
 		RunID: f.attempt.RunID, AgentID: f.attempt.AgentID, CancellationID: f.cancellation.ID,
 		TargetAttemptID: f.attempt.ID, DatabaseNow: f.databaseNow,
 	}, nil
 }
 
-func (f *runtimeCancellationTransactionFake) MirrorRuntimeV2RunCancellationState(_ context.Context, _ db.MirrorRuntimeV2RunCancellationStateParams) (db.MirrorRuntimeV2RunCancellationStateRow, error) {
+func (f *runtimeCancellationTransactionFake) MirrorRuntimeRunCancellationState(_ context.Context, _ db.MirrorRuntimeRunCancellationStateParams) (db.MirrorRuntimeRunCancellationStateRow, error) {
 	f.call("mirror_cancellation")
 	state := f.cancellation.State
-	return db.MirrorRuntimeV2RunCancellationStateRow{
+	return db.MirrorRuntimeRunCancellationStateRow{
 		ID: f.attempt.RunID, CancelRequestID: &f.cancellation.ID, CancelState: &state,
 		CancelAcknowledgedAt: f.cancellation.AcknowledgedAt, DatabaseNow: f.databaseNow,
 	}, nil
 }
 
-func (f *runtimeCancellationTransactionFake) FinishRuntimeV2CanceledAttempt(_ context.Context, _ db.FinishRuntimeV2CanceledAttemptParams) (db.RunAttempt, error) {
+func (f *runtimeCancellationTransactionFake) FinishRuntimeCanceledAttempt(_ context.Context, _ db.FinishRuntimeCanceledAttemptParams) (db.RunAttempt, error) {
 	f.call("finish_attempt")
 	f.finishCalls++
 	finished := f.attempt
@@ -541,7 +541,7 @@ func (f *runtimeCancellationTransactionFake) FinishRuntimeV2CanceledAttempt(_ co
 	return finished, nil
 }
 
-func (f *runtimeCancellationTransactionFake) FinishRuntimeV2CoreCanceledAttempt(_ context.Context, _ db.FinishRuntimeV2CoreCanceledAttemptParams) (db.RunAttempt, error) {
+func (f *runtimeCancellationTransactionFake) FinishRuntimeCoreCanceledAttempt(_ context.Context, _ db.FinishRuntimeCoreCanceledAttemptParams) (db.RunAttempt, error) {
 	f.call("finish_core_attempt")
 	return f.attempt, nil
 }

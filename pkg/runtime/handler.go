@@ -28,7 +28,7 @@ type Handler struct {
 	svc       runtimeService
 	validator *validator.Validate
 	cfg       *config.Config
-	runtimeV2 *RuntimeHTTPController
+	runtime   *RuntimeHTTPController
 }
 
 type runtimeService interface {
@@ -47,7 +47,7 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	h := &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
-		runtimeV2: newRuntimeHTTPControllerForService(svc),
+		runtime:   newRuntimeHTTPControllerForService(svc),
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]
@@ -258,7 +258,7 @@ func (h *Handler) RevokeRuntimeNode(c echo.Context) error {
 // listener dispatches it. Version compatibility is negotiated in the runtime
 // handshake instead of being exposed in the URL.
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
-	h.runtimeV2.Register(api)
+	h.runtime.Register(api)
 }
 
 // PostRun 调用 Agent。

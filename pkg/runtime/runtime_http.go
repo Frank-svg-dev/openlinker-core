@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	runtimeV2TokenScope       = "agent:pull"
+	runtimeTokenScope         = "agent:pull"
 	RuntimeAttachmentIDHeader = "OpenLinker-Runtime-Attachment"
 )
 
@@ -94,10 +94,14 @@ type RuntimeHTTPDependencies struct {
 // Runtime state machine.
 type RuntimeHTTPController struct {
 	dependencies RuntimeHTTPDependencies
+	webSockets   *runtimeWSRegistry
 }
 
 func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
-	return &RuntimeHTTPController{dependencies: dependencies}
+	return &RuntimeHTTPController{
+		dependencies: dependencies,
+		webSockets:   newRuntimeWSRegistry(),
+	}
 }
 
 func newRuntimeHTTPControllerForService(service runtimeService) *RuntimeHTTPController {
@@ -119,7 +123,16 @@ func (h *Handler) SetRuntimeDependencies(dependencies RuntimeHTTPDependencies) {
 			dependencies.TokenValidator = validator
 		}
 	}
-	h.runtimeV2 = NewRuntimeHTTPController(dependencies)
+	h.runtime = NewRuntimeHTTPController(dependencies)
+}
+
+// RuntimeController exposes the transport lifecycle owner so the process can
+// drain hijacked WebSocket connections before shutting down its HTTP servers.
+func (h *Handler) RuntimeController() *RuntimeHTTPController {
+	if h == nil {
+		return nil
+	}
+	return h.runtime
 }
 
 func (h *RuntimeHTTPController) Register(api *echo.Group) {
@@ -148,50 +161,50 @@ func (h *RuntimeHTTPController) Register(api *echo.Group) {
 func (h *RuntimeHTTPController) CreateSession(c echo.Context) error {
 	principal, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	hello, err := DecodeRuntimeBody[RuntimeHelloPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request := runtimeSessionRequestFromHello(hello)
 	state, err := h.dependencies.Sessions.CreateOrAttachSession(c.Request().Context(), principal, request)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	h.refreshPresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	ready, err := runtimeReadyFromSessionState(state)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, ready)
+	return writeRuntimePayload(c, http.StatusOK, ready)
 }
 
 func (h *RuntimeHTTPController) HeartbeatSession(c echo.Context) error {
 	principal, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	sessionID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	sessionID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	hello, err := DecodeRuntimeBody[RuntimeHelloPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if hello.RuntimeSessionID != sessionID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request := runtimeSessionRequestFromHello(hello)
 	request.AttachmentID = attachmentID
@@ -199,38 +212,38 @@ func (h *RuntimeHTTPController) HeartbeatSession(c echo.Context) error {
 		c.Request().Context(), principal, request,
 	)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	h.refreshPresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	ready, err := runtimeReadyFromSessionState(state)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, ready)
+	return writeRuntimePayload(c, http.StatusOK, ready)
 }
 
 func (h *RuntimeHTTPController) CloseSession(c echo.Context) error {
 	principal, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	sessionID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	sessionID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := decodeRuntimeSessionClose(c.Request(), principal)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if request.RuntimeSessionID != sessionID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	state, err := h.dependencies.Sessions.CloseSession(c.Request().Context(), principal, request)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	h.removePresence(c.Request().Context(), state, "pull:"+state.Session.RuntimeSessionID.String())
 	return c.NoContent(http.StatusNoContent)
@@ -239,154 +252,154 @@ func (h *RuntimeHTTPController) CloseSession(c echo.Context) error {
 func (h *RuntimeHTTPController) ClaimRun(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Leases == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	wait, err := parseRuntimeV2Wait(c.QueryParam("wait"))
+	wait, err := parseRuntimeWait(c.QueryParam("wait"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := DecodeRuntimeBody[RuntimeClaimRequest](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if !validRuntimeCapacityReport(request.Capacity, request.Inflight) {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveSession(c, authenticated, request.RuntimeSessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	assignment, err := h.claimWithWait(c.Request().Context(), principal, wait)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if assignment == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, *assignment)
+	return writeRuntimePayload(c, http.StatusOK, *assignment)
 }
 
 func (h *RuntimeHTTPController) AckAssignment(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Leases == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	runID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := DecodeRuntimeBody[RunAssignmentAckPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if request.AttemptIdentity.RunID != runID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveSession(c, authenticated, request.AttemptIdentity.RuntimeSessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	response, err := h.dependencies.Leases.AckAssignment(c.Request().Context(), principal, request)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 func (h *RuntimeHTTPController) RejectAssignment(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Leases == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	runID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := DecodeRuntimeBody[RunAssignmentRejectPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if request.AttemptIdentity.RunID != runID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveSession(c, authenticated, request.AttemptIdentity.RuntimeSessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	response, err := h.dependencies.Leases.RejectAssignment(c.Request().Context(), principal, request)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 func (h *RuntimeHTTPController) RenewLease(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Leases == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	runID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := DecodeRuntimeBody[RunLeaseRenewPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if request.AttemptIdentity.RunID != runID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveSession(c, authenticated, request.AttemptIdentity.RuntimeSessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	response, err := h.dependencies.Leases.RenewLease(c.Request().Context(), principal, request)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 func (h *RuntimeHTTPController) AppendEvent(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.EventProjector == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	runID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := DecodeRuntimeBody[RunEventPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if request.AttemptIdentity.RunID != runID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveEventResultSession(c, authenticated, request.AttemptIdentity.WorkerID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	ack, err := h.dependencies.EventProjector.AppendRuntimeEvent(
 		c.Request().Context(), principal.EventPrincipal(), request.AttemptIdentity.RuntimeIdentity(), request.StoreRequest(),
 	)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	response := RunEventAckPayload{
 		ClientEventID:  ack.ClientEventID,
@@ -394,39 +407,39 @@ func (h *RuntimeHTTPController) AppendEvent(c echo.Context) error {
 		Sequence:       int64(ack.Sequence),
 		Replayed:       ack.Replayed,
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 func (h *RuntimeHTTPController) FinalizeResult(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Finalizer == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	runID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	payload, err := DecodeRuntimeBody[RunResultPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if payload.AttemptIdentity.RunID != runID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveEventResultSession(c, authenticated, payload.AttemptIdentity.WorkerID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request, err := payload.FinalizerRequest()
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	ack, err := h.dependencies.Finalizer.Finalize(c.Request().Context(), principal.EventPrincipal(), request)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	response := RunResultAckPayload{
 		ResultID:       ack.ResultID,
@@ -436,7 +449,7 @@ func (h *RuntimeHTTPController) FinalizeResult(c echo.Context) error {
 		Replayed:       ack.Replayed,
 		NextAttemptAt:  ack.NextAttemptAt,
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 // ResumeRuns authorizes recovery against the currently authenticated target
@@ -446,17 +459,17 @@ func (h *RuntimeHTTPController) FinalizeResult(c echo.Context) error {
 func (h *RuntimeHTTPController) ResumeRuns(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Resume == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	payload, err := DecodeRuntimeBody[RuntimeResumePayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if payload.AgentID != authenticated.AgentID || payload.NodeID != authenticated.Device.NodeID {
-		return writeRuntimeV2Error(c, newRuntimeTransportError(
+		return writeRuntimeError(c, newRuntimeTransportError(
 			RuntimeErrorPermissionDenied,
 			runtimeErrorDefaultMessage(RuntimeErrorPermissionDenied),
 			nil,
@@ -464,10 +477,10 @@ func (h *RuntimeHTTPController) ResumeRuns(c echo.Context) error {
 	}
 	principal, err := h.resolveSession(c, authenticated, payload.RuntimeSessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if principal.WorkerID != payload.WorkerID {
-		return writeRuntimeV2Error(c, newRuntimeTransportError(
+		return writeRuntimeError(c, newRuntimeTransportError(
 			RuntimeErrorLeaseIdentityMismatch,
 			runtimeErrorDefaultMessage(RuntimeErrorLeaseIdentityMismatch),
 			nil,
@@ -475,9 +488,9 @@ func (h *RuntimeHTTPController) ResumeRuns(c echo.Context) error {
 	}
 	response, err := h.dependencies.Resume.Resume(c.Request().Context(), principal, payload)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 // PollCommands long-polls commands for one explicit Session. A token and
@@ -486,54 +499,54 @@ func (h *RuntimeHTTPController) ResumeRuns(c echo.Context) error {
 func (h *RuntimeHTTPController) PollCommands(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Cancellations == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	sessionID, wait, err := parseRuntimeV2CommandsQuery(c.Request())
+	sessionID, wait, err := parseRuntimeCommandsQuery(c.Request())
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	principal, err := h.resolveSession(c, authenticated, sessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	response, err := h.pollCommandsWithWait(c.Request().Context(), principal, wait)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, response)
+	return writeRuntimePayload(c, http.StatusOK, response)
 }
 
 func (h *RuntimeHTTPController) AckCancel(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h.dependencies.Sessions == nil || h.dependencies.Cancellations == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
-	runID, err := parseRuntimeV2PathUUID(c.Param("id"))
+	runID, err := parseRuntimePathUUID(c.Param("id"))
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	payload, err := DecodeRuntimeBody[RunCancelAckPayload](c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	if payload.AttemptIdentity.RunID != runID {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	principal, err := h.resolveSession(c, authenticated, payload.AttemptIdentity.RuntimeSessionID)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	state, err := h.dependencies.Cancellations.AckCancel(c.Request().Context(), principal, payload)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
-	return writeRuntimeV2Payload(c, http.StatusOK, state)
+	return writeRuntimePayload(c, http.StatusOK, state)
 }
 
 // CallAgent authenticates the mTLS Node and both assignment-scoped signed
@@ -542,24 +555,24 @@ func (h *RuntimeHTTPController) AckCancel(c echo.Context) error {
 // credential for this endpoint.
 func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 	if h == nil || h.dependencies.DeviceAuthenticator == nil || h.dependencies.Delegation == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	invocationToken, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
-		return writeRuntimeV2Error(c, runtimeV2UnauthorizedError(err))
+		return writeRuntimeError(c, runtimeUnauthorizedError(err))
 	}
 	device, err := h.dependencies.DeviceAuthenticator.AuthenticateHTTP(
 		c.Request().Context(), c.Request(),
 	)
 	if err != nil {
-		return writeRuntimeV2Error(c, runtimeV2UnauthorizedError(err))
+		return writeRuntimeError(c, runtimeUnauthorizedError(err))
 	}
 	if c.Request().URL.RawQuery != "" {
-		return writeRuntimeV2Error(c, runtimeV2ValidationError())
+		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
 	rawBody, err := readRuntimeJSON(c.Request().Body)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	authorization := RuntimeDelegationAuthorization{
 		Device:            device,
@@ -571,34 +584,34 @@ func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 	}
 	summary, err := h.dependencies.Delegation.CallAgent(c.Request().Context(), authorization)
 	if err != nil {
-		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	status := http.StatusAccepted
 	if summary.Status != RuntimeRunRunning {
 		status = http.StatusOK
 	}
-	return writeRuntimeV2Payload(c, status, summary)
+	return writeRuntimePayload(c, status, summary)
 }
 
 func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
 	if h == nil || h.dependencies.TokenValidator == nil || h.dependencies.DeviceAuthenticator == nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeV2UnavailableError()
+		return AuthenticatedRuntimePrincipal{}, runtimeUnavailableError()
 	}
 	rawToken, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeV2UnauthorizedError(err)
+		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
-	token, err := h.dependencies.TokenValidator.ValidateRuntimeToken(c.Request().Context(), rawToken, runtimeV2TokenScope)
+	token, err := h.dependencies.TokenValidator.ValidateRuntimeToken(c.Request().Context(), rawToken, runtimeTokenScope)
 	if err != nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeV2UnauthorizedError(err)
+		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
 	device, err := h.dependencies.DeviceAuthenticator.AuthenticateHTTP(c.Request().Context(), c.Request())
 	if err != nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeV2UnauthorizedError(err)
+		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
 	principal := AuthenticatedRuntimePrincipal{AgentID: token.AgentID, CredentialID: token.ID, Device: device}
 	if err = validateAuthenticatedRuntimePrincipal(principal); err != nil {
-		return AuthenticatedRuntimePrincipal{}, runtimeV2UnauthorizedError(err)
+		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
 	return principal, nil
 }
@@ -616,7 +629,7 @@ func (h *RuntimeHTTPController) resolveSession(
 	if err != nil {
 		return RuntimeSessionPrincipal{}, err
 	}
-	if err = validateRuntimeV2ResolvedSession(authenticated, principal); err != nil {
+	if err = validateRuntimeResolvedSession(authenticated, principal); err != nil {
 		return RuntimeSessionPrincipal{}, err
 	}
 	if principal.AttachmentID != attachmentID {
@@ -642,7 +655,7 @@ func (h *RuntimeHTTPController) resolveEventResultSession(
 	}
 	// Event/Result authorization combines this resolved acting Session with the
 	// immutable source Attempt and durable resume-grant checks downstream.
-	if err = validateRuntimeV2ResolvedSession(authenticated, principal); err != nil {
+	if err = validateRuntimeResolvedSession(authenticated, principal); err != nil {
 		return RuntimeSessionPrincipal{}, err
 	}
 	if principal.AttachmentID != attachmentID {
@@ -758,7 +771,7 @@ type runtimeSessionClosePayload struct {
 
 func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntimePrincipal) (RuntimeSessionCloseRequest, error) {
 	if req == nil {
-		return RuntimeSessionCloseRequest{}, runtimeV2ValidationError()
+		return RuntimeSessionCloseRequest{}, runtimeTransportValidationError()
 	}
 	attachmentID, err := runtimeAttachmentIDFromRequest(req)
 	if err != nil {
@@ -789,12 +802,12 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 	}
 	if (request.Status != "offline" && request.Status != "closed") ||
 		!validRuntimeIdentityText(request.Reason, 1, maxRuntimeDisconnectReasonRunes) {
-		return RuntimeSessionCloseRequest{}, runtimeV2ValidationError()
+		return RuntimeSessionCloseRequest{}, runtimeTransportValidationError()
 	}
 	return request, nil
 }
 
-func validateRuntimeV2ResolvedSession(authenticated AuthenticatedRuntimePrincipal, principal RuntimeSessionPrincipal) error {
+func validateRuntimeResolvedSession(authenticated AuthenticatedRuntimePrincipal, principal RuntimeSessionPrincipal) error {
 	if principal.RuntimeSessionID == uuid.Nil || principal.NodeID != authenticated.Device.NodeID ||
 		principal.AgentID != authenticated.AgentID || principal.CredentialID != authenticated.CredentialID ||
 		principal.WorkerID == "" || principal.SessionEpoch < 1 || principal.CoreInstanceID == uuid.Nil || principal.AttachmentID == uuid.Nil ||
@@ -808,68 +821,68 @@ func validateRuntimeV2ResolvedSession(authenticated AuthenticatedRuntimePrincipa
 
 func runtimeAttachmentIDFromRequest(req *http.Request) (uuid.UUID, error) {
 	if req == nil {
-		return uuid.Nil, runtimeV2ValidationError()
+		return uuid.Nil, runtimeTransportValidationError()
 	}
 	values := req.Header.Values(RuntimeAttachmentIDHeader)
 	if len(values) != 1 {
-		return uuid.Nil, runtimeV2ValidationError()
+		return uuid.Nil, runtimeTransportValidationError()
 	}
 	raw := values[0]
 	if raw == "" || strings.TrimSpace(raw) != raw {
-		return uuid.Nil, runtimeV2ValidationError()
+		return uuid.Nil, runtimeTransportValidationError()
 	}
 	attachmentID, err := uuid.Parse(raw)
 	if err != nil || attachmentID == uuid.Nil || attachmentID.String() != raw {
-		return uuid.Nil, runtimeV2ValidationError()
+		return uuid.Nil, runtimeTransportValidationError()
 	}
 	return attachmentID, nil
 }
 
-func parseRuntimeV2PathUUID(raw string) (uuid.UUID, error) {
+func parseRuntimePathUUID(raw string) (uuid.UUID, error) {
 	if raw == "" || strings.TrimSpace(raw) != raw {
-		return uuid.Nil, runtimeV2ValidationError()
+		return uuid.Nil, runtimeTransportValidationError()
 	}
 	parsed, err := uuid.Parse(raw)
 	if err != nil || parsed == uuid.Nil || parsed.String() != raw {
-		return uuid.Nil, runtimeV2ValidationError()
+		return uuid.Nil, runtimeTransportValidationError()
 	}
 	return parsed, nil
 }
 
-func parseRuntimeV2Wait(raw string) (time.Duration, error) {
+func parseRuntimeWait(raw string) (time.Duration, error) {
 	if raw == "" {
 		return 0, nil
 	}
 	if strings.TrimSpace(raw) != raw {
-		return 0, runtimeV2ValidationError()
+		return 0, runtimeTransportValidationError()
 	}
 	for _, char := range raw {
 		if char < '0' || char > '9' {
-			return 0, runtimeV2ValidationError()
+			return 0, runtimeTransportValidationError()
 		}
 	}
 	seconds, err := strconv.ParseUint(raw, 10, 8)
 	if err != nil || seconds > RuntimeMaxPullWaitSeconds {
-		return 0, runtimeV2ValidationError()
+		return 0, runtimeTransportValidationError()
 	}
 	return time.Duration(seconds) * time.Second, nil
 }
 
-func parseRuntimeV2CommandsQuery(request *http.Request) (uuid.UUID, time.Duration, error) {
+func parseRuntimeCommandsQuery(request *http.Request) (uuid.UUID, time.Duration, error) {
 	if request == nil || request.URL == nil {
-		return uuid.Nil, 0, runtimeV2ValidationError()
+		return uuid.Nil, 0, runtimeTransportValidationError()
 	}
 	query := request.URL.Query()
 	for key, values := range query {
 		if (key != "runtime_session_id" && key != "wait") || len(values) != 1 {
-			return uuid.Nil, 0, runtimeV2ValidationError()
+			return uuid.Nil, 0, runtimeTransportValidationError()
 		}
 	}
 	sessionValues, ok := query["runtime_session_id"]
 	if !ok || len(sessionValues) != 1 {
-		return uuid.Nil, 0, runtimeV2ValidationError()
+		return uuid.Nil, 0, runtimeTransportValidationError()
 	}
-	sessionID, err := parseRuntimeV2PathUUID(sessionValues[0])
+	sessionID, err := parseRuntimePathUUID(sessionValues[0])
 	if err != nil {
 		return uuid.Nil, 0, err
 	}
@@ -877,28 +890,28 @@ func parseRuntimeV2CommandsQuery(request *http.Request) (uuid.UUID, time.Duratio
 	if !ok {
 		return sessionID, 0, nil
 	}
-	wait, err := parseRuntimeV2Wait(waitValues[0])
+	wait, err := parseRuntimeWait(waitValues[0])
 	if err != nil {
 		return uuid.Nil, 0, err
 	}
 	return sessionID, wait, nil
 }
 
-func runtimeV2ValidationError() *RuntimeTransportError {
+func runtimeTransportValidationError() *RuntimeTransportError {
 	return NewRuntimeTransportError(RuntimeErrorValidationFailed, runtimeErrorDefaultMessage(RuntimeErrorValidationFailed))
 }
 
-func runtimeV2UnauthorizedError(cause error) *RuntimeTransportError {
+func runtimeUnauthorizedError(cause error) *RuntimeTransportError {
 	return newRuntimeTransportError(RuntimeErrorUnauthorized, runtimeErrorDefaultMessage(RuntimeErrorUnauthorized), cause)
 }
 
-func runtimeV2UnavailableError() *RuntimeTransportError {
+func runtimeUnavailableError() *RuntimeTransportError {
 	err := NewRuntimeTransportError(RuntimeErrorServiceUnavailable, runtimeErrorDefaultMessage(RuntimeErrorServiceUnavailable))
 	err.Body.Retryable = true
 	return err
 }
 
-func mapRuntimeV2HTTPError(err error) *RuntimeTransportError {
+func mapRuntimeHTTPError(err error) *RuntimeTransportError {
 	if err == nil {
 		return nil
 	}
@@ -939,7 +952,7 @@ func mapRuntimeV2HTTPError(err error) *RuntimeTransportError {
 	if errors.As(err, &sessionErr) {
 		switch sessionErr.Code {
 		case RuntimeSessionErrorAuthenticationFailed, RuntimeSessionErrorPrincipalInactive:
-			return runtimeV2UnauthorizedError(err)
+			return runtimeUnauthorizedError(err)
 		case RuntimeSessionErrorAgentMismatch, RuntimeSessionErrorDeviceMismatch:
 			return newRuntimeTransportError(RuntimeErrorPermissionDenied, runtimeErrorDefaultMessage(RuntimeErrorPermissionDenied), err)
 		case RuntimeSessionErrorProtocolUnsupported, RuntimeSessionErrorContractMismatch:
@@ -992,14 +1005,14 @@ func mapRuntimeV2HTTPError(err error) *RuntimeTransportError {
 	return MapRuntimeTransportError(err)
 }
 
-func writeRuntimeV2Payload(c echo.Context, status int, payload any) error {
+func writeRuntimePayload(c echo.Context, status int, payload any) error {
 	if err := ValidateRuntimePayload(payload); err != nil {
-		return writeRuntimeV2Error(c, newRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal), err))
+		return writeRuntimeError(c, newRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal), err))
 	}
 	return c.JSON(status, payload)
 }
 
-func writeRuntimeV2Error(c echo.Context, err *RuntimeTransportError) error {
+func writeRuntimeError(c echo.Context, err *RuntimeTransportError) error {
 	if err == nil {
 		err = NewRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal))
 	}

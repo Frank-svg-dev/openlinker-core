@@ -164,7 +164,7 @@ func (c *RuntimeCancellationCoordinator) CancelOwnedRun(
 			return errors.New("created runtime cancellation identity is inconsistent")
 		}
 		if target == nil {
-			cancellation, createErr = tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
+			cancellation, createErr = tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
 				NextState:      string(RuntimeCancelStopped),
 				RunID:          runID,
 				CancellationID: cancellationID,
@@ -264,7 +264,7 @@ func (c *RuntimeCancellationCoordinator) NextCommand(
 			if nextState == string(RuntimeCancelRequested) {
 				nextState = string(RuntimeCancelDelivered)
 			}
-			cancellation, cancellationErr = tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
+			cancellation, cancellationErr = tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
 				NextState:      nextState,
 				ErrorCode:      cancellation.ErrorCode,
 				RunID:          cancellation.RunID,
@@ -274,7 +274,7 @@ func (c *RuntimeCancellationCoordinator) NextCommand(
 			if cancellationErr != nil {
 				return cancellationErr
 			}
-			if _, cancellationErr = tx.MirrorRuntimeV2RunCancellationState(ctx, db.MirrorRuntimeV2RunCancellationStateParams{
+			if _, cancellationErr = tx.MirrorRuntimeRunCancellationState(ctx, db.MirrorRuntimeRunCancellationStateParams{
 				RunID: cancellation.RunID, CancellationID: cancellation.ID,
 			}); cancellationErr != nil {
 				return cancellationErr
@@ -392,7 +392,7 @@ func (c *RuntimeCancellationCoordinator) AckCancel(
 			code := request.ErrorCode
 			errorCode = &code
 		}
-		advanced, advanceErr := tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
+		advanced, advanceErr := tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
 			NextState:      string(request.CancelState),
 			ErrorCode:      errorCode,
 			RunID:          cancellation.RunID,
@@ -411,7 +411,7 @@ func (c *RuntimeCancellationCoordinator) AckCancel(
 				return finishErr
 			}
 		}
-		mirrored, mirrorErr := tx.MirrorRuntimeV2RunCancellationState(ctx, db.MirrorRuntimeV2RunCancellationStateParams{
+		mirrored, mirrorErr := tx.MirrorRuntimeRunCancellationState(ctx, db.MirrorRuntimeRunCancellationStateParams{
 			RunID: advanced.RunID, CancellationID: advanced.ID,
 		})
 		if errors.Is(mirrorErr, pgx.ErrNoRows) {
@@ -501,21 +501,21 @@ func (c *RuntimeCancellationCoordinator) AcknowledgeCoreStopped(
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 		}
 
-		advanced, err := tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
+		advanced, err := tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
 			NextState: string(RuntimeCancelStopped), RunID: cancellation.RunID,
 			CancellationID: cancellation.ID, ExpectedState: cancellation.State,
 		})
 		if err != nil {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
 		}
-		finished, err := tx.FinishRuntimeV2CoreCanceledAttempt(ctx, db.FinishRuntimeV2CoreCanceledAttemptParams{
+		finished, err := tx.FinishRuntimeCoreCanceledAttempt(ctx, db.FinishRuntimeCoreCanceledAttemptParams{
 			RunID: attempt.RunID, AttemptID: attempt.ID,
 			LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 		})
 		if err != nil || finished.FinishedAt == nil || finished.Outcome == nil || *finished.Outcome != "canceled" {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
 		}
-		mirrored, err := tx.MirrorRuntimeV2RunCancellationState(ctx, db.MirrorRuntimeV2RunCancellationStateParams{
+		mirrored, err := tx.MirrorRuntimeRunCancellationState(ctx, db.MirrorRuntimeRunCancellationStateParams{
 			RunID: advanced.RunID, CancellationID: advanced.ID,
 		})
 		if err != nil || mirrored.CancelState == nil || *mirrored.CancelState != advanced.State {
@@ -543,7 +543,7 @@ func (c *RuntimeCancellationCoordinator) ReapExpiredCancellation(
 
 	var state *RunCancellationState
 	err := c.repository.WithTransaction(ctx, func(tx runtimeCancellationTransaction) error {
-		candidate, candidateErr := tx.FindNextDueRuntimeV2Cancellation(
+		candidate, candidateErr := tx.FindNextDueRuntimeCancellation(
 			ctx, c.commandDeadline.Milliseconds(),
 		)
 		if errors.Is(candidateErr, pgx.ErrNoRows) {
@@ -566,7 +566,7 @@ func (c *RuntimeCancellationCoordinator) ReapExpiredCancellation(
 		if lockedNodeID != candidate.NodeID {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 		}
-		lockedRun, runErr := tx.LockDueRuntimeV2CancellationRun(ctx, db.LockDueRuntimeV2CancellationRunParams{
+		lockedRun, runErr := tx.LockDueRuntimeCancellationRun(ctx, db.LockDueRuntimeCancellationRunParams{
 			RunID: candidate.RunID, CancellationID: candidate.CancellationID,
 			TargetAttemptID: candidate.TargetAttemptID, RuntimeSessionID: candidate.RuntimeSessionID,
 			NodeID: candidate.NodeID, CommandDeadlineMs: c.commandDeadline.Milliseconds(),
@@ -600,7 +600,7 @@ func (c *RuntimeCancellationCoordinator) ReapExpiredCancellation(
 		}
 
 		errorCode := runtimeCancellationUnconfirmedCode
-		advanced, advanceErr := tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
+		advanced, advanceErr := tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
 			NextState:      string(RuntimeCancelUnconfirmed),
 			ErrorCode:      &errorCode,
 			RunID:          cancellation.RunID,
@@ -616,7 +616,7 @@ func (c *RuntimeCancellationCoordinator) ReapExpiredCancellation(
 		if finishErr := finishRuntimeCancellationAttempt(ctx, tx, attempt, &errorCode); finishErr != nil {
 			return finishErr
 		}
-		mirrored, mirrorErr := tx.MirrorRuntimeV2RunCancellationState(ctx, db.MirrorRuntimeV2RunCancellationStateParams{
+		mirrored, mirrorErr := tx.MirrorRuntimeRunCancellationState(ctx, db.MirrorRuntimeRunCancellationStateParams{
 			RunID: advanced.RunID, CancellationID: advanced.ID,
 		})
 		if errors.Is(mirrorErr, pgx.ErrNoRows) {
@@ -644,14 +644,14 @@ func (c *RuntimeCancellationCoordinator) reapExpiredCoreCancellation(
 	var state *RunCancellationState
 	handled := false
 	err := c.repository.WithTransaction(ctx, func(tx runtimeCancellationTransaction) error {
-		candidate, err := tx.FindNextDueRuntimeV2CoreCancellation(ctx, c.commandDeadline.Milliseconds())
+		candidate, err := tx.FindNextDueRuntimeCoreCancellation(ctx, c.commandDeadline.Milliseconds())
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil
 		}
 		if err != nil {
 			return err
 		}
-		locked, err := tx.LockDueRuntimeV2CoreCancellationRun(ctx, db.LockDueRuntimeV2CoreCancellationRunParams{
+		locked, err := tx.LockDueRuntimeCoreCancellationRun(ctx, db.LockDueRuntimeCoreCancellationRunParams{
 			RunID: candidate.RunID, CancellationID: candidate.CancellationID,
 			TargetAttemptID:   candidate.TargetAttemptID,
 			CommandDeadlineMs: c.commandDeadline.Milliseconds(),
@@ -683,7 +683,7 @@ func (c *RuntimeCancellationCoordinator) reapExpiredCoreCancellation(
 		}
 
 		errorCode := runtimeCancellationUnconfirmedCode
-		advanced, err := tx.AdvanceRuntimeV2RunCancellation(ctx, db.AdvanceRuntimeV2RunCancellationParams{
+		advanced, err := tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
 			NextState: string(RuntimeCancelUnconfirmed), ErrorCode: &errorCode,
 			RunID: cancellation.RunID, CancellationID: cancellation.ID,
 			ExpectedState: cancellation.State,
@@ -694,14 +694,14 @@ func (c *RuntimeCancellationCoordinator) reapExpiredCoreCancellation(
 		// The query requires stopped to end a Core Attempt. The reaper records
 		// unconfirmed, so use the generic fenced mutation through a dedicated
 		// query shape rather than misrepresenting a confirmed stop.
-		finished, err := tx.FinishRuntimeV2CoreUnconfirmedAttempt(ctx, db.FinishRuntimeV2CoreUnconfirmedAttemptParams{
+		finished, err := tx.FinishRuntimeCoreUnconfirmedAttempt(ctx, db.FinishRuntimeCoreUnconfirmedAttemptParams{
 			RunID: attempt.RunID, AttemptID: attempt.ID,
 			LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 		})
 		if err != nil || finished.FinishedAt == nil || finished.Outcome == nil || *finished.Outcome != "canceled" {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
 		}
-		mirrored, err := tx.MirrorRuntimeV2RunCancellationState(ctx, db.MirrorRuntimeV2RunCancellationStateParams{
+		mirrored, err := tx.MirrorRuntimeRunCancellationState(ctx, db.MirrorRuntimeRunCancellationStateParams{
 			RunID: advanced.RunID, CancellationID: advanced.ID,
 		})
 		if err != nil || mirrored.CancelState == nil || *mirrored.CancelState != advanced.State {
@@ -774,7 +774,7 @@ func finishRuntimeCancellationAttempt(
 	attempt db.RunAttempt,
 	errorCode *string,
 ) error {
-	finished, err := tx.FinishRuntimeV2CanceledAttempt(ctx, db.FinishRuntimeV2CanceledAttemptParams{
+	finished, err := tx.FinishRuntimeCanceledAttempt(ctx, db.FinishRuntimeCanceledAttemptParams{
 		ErrorCode: errorCode, RunID: attempt.RunID, AttemptID: attempt.ID,
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 	})
@@ -850,7 +850,7 @@ func (t *postgresRuntimeCancellationTransaction) PersistCancellationTerminal(
 	if err != nil {
 		return db.Run{}, err
 	}
-	finalized, err := t.queries.FinalizeRuntimeV2RunCancellation(ctx, db.FinalizeRuntimeV2RunCancellationParams{
+	finalized, err := t.queries.FinalizeRuntimeRunCancellation(ctx, db.FinalizeRuntimeRunCancellationParams{
 		DurationMs: durationMS, TerminalEventID: event.ID, RunID: run.id, CancellationID: cancellation.ID,
 	})
 	if err != nil {
@@ -957,7 +957,7 @@ func runtimeCancellationCommandTargetMatches(
 }
 
 func runtimeCancellationReapTargetMatches(
-	candidate db.LockDueRuntimeV2CancellationRunRow,
+	candidate db.LockDueRuntimeCancellationRunRow,
 	cancellation db.RunCancellation,
 	attempt db.RunAttempt,
 	deadline time.Duration,
@@ -1120,18 +1120,18 @@ type runtimeCancellationTransaction interface {
 	GetRunCancellationByRun(context.Context, uuid.UUID) (db.RunCancellation, error)
 	CreateRunCancellation(context.Context, db.CreateRunCancellationParams) (db.RunCancellation, error)
 	LockNextRuntimeCancellationCommandRun(context.Context, db.LockNextRuntimeCancellationCommandRunParams) (db.LockNextRuntimeCancellationCommandRunRow, error)
-	FindNextDueRuntimeV2Cancellation(context.Context, int64) (db.FindNextDueRuntimeV2CancellationRow, error)
-	FindNextDueRuntimeV2CoreCancellation(context.Context, int64) (db.FindNextDueRuntimeV2CoreCancellationRow, error)
+	FindNextDueRuntimeCancellation(context.Context, int64) (db.FindNextDueRuntimeCancellationRow, error)
+	FindNextDueRuntimeCoreCancellation(context.Context, int64) (db.FindNextDueRuntimeCoreCancellationRow, error)
 	LockRuntimeSessionForCancellationReap(context.Context, uuid.UUID) (uuid.UUID, error)
 	LockRuntimeNodeForCancellationReap(context.Context, uuid.UUID) (uuid.UUID, error)
-	LockDueRuntimeV2CancellationRun(context.Context, db.LockDueRuntimeV2CancellationRunParams) (db.LockDueRuntimeV2CancellationRunRow, error)
-	LockDueRuntimeV2CoreCancellationRun(context.Context, db.LockDueRuntimeV2CoreCancellationRunParams) (db.LockDueRuntimeV2CoreCancellationRunRow, error)
+	LockDueRuntimeCancellationRun(context.Context, db.LockDueRuntimeCancellationRunParams) (db.LockDueRuntimeCancellationRunRow, error)
+	LockDueRuntimeCoreCancellationRun(context.Context, db.LockDueRuntimeCoreCancellationRunParams) (db.LockDueRuntimeCoreCancellationRunRow, error)
 	LockRunCancellationForMutation(context.Context, db.LockRunCancellationForMutationParams) (db.RunCancellation, error)
-	AdvanceRuntimeV2RunCancellation(context.Context, db.AdvanceRuntimeV2RunCancellationParams) (db.RunCancellation, error)
-	MirrorRuntimeV2RunCancellationState(context.Context, db.MirrorRuntimeV2RunCancellationStateParams) (db.MirrorRuntimeV2RunCancellationStateRow, error)
-	FinishRuntimeV2CanceledAttempt(context.Context, db.FinishRuntimeV2CanceledAttemptParams) (db.RunAttempt, error)
-	FinishRuntimeV2CoreCanceledAttempt(context.Context, db.FinishRuntimeV2CoreCanceledAttemptParams) (db.RunAttempt, error)
-	FinishRuntimeV2CoreUnconfirmedAttempt(context.Context, db.FinishRuntimeV2CoreUnconfirmedAttemptParams) (db.RunAttempt, error)
+	AdvanceRuntimeRunCancellation(context.Context, db.AdvanceRuntimeRunCancellationParams) (db.RunCancellation, error)
+	MirrorRuntimeRunCancellationState(context.Context, db.MirrorRuntimeRunCancellationStateParams) (db.MirrorRuntimeRunCancellationStateRow, error)
+	FinishRuntimeCanceledAttempt(context.Context, db.FinishRuntimeCanceledAttemptParams) (db.RunAttempt, error)
+	FinishRuntimeCoreCanceledAttempt(context.Context, db.FinishRuntimeCoreCanceledAttemptParams) (db.RunAttempt, error)
+	FinishRuntimeCoreUnconfirmedAttempt(context.Context, db.FinishRuntimeCoreUnconfirmedAttemptParams) (db.RunAttempt, error)
 	MarkRunAttemptCapacityReleased(context.Context, db.MarkRunAttemptCapacityReleasedParams) (db.MarkRunAttemptCapacityReleasedRow, error)
 	ReleaseRuntimeSessionSlot(context.Context, uuid.UUID) (db.RuntimeSession, error)
 	ReleaseRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
@@ -1190,11 +1190,11 @@ func (t *postgresRuntimeCancellationTransaction) CreateRunCancellation(ctx conte
 func (t *postgresRuntimeCancellationTransaction) LockNextRuntimeCancellationCommandRun(ctx context.Context, params db.LockNextRuntimeCancellationCommandRunParams) (db.LockNextRuntimeCancellationCommandRunRow, error) {
 	return t.queries.LockNextRuntimeCancellationCommandRun(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) FindNextDueRuntimeV2Cancellation(ctx context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeV2CancellationRow, error) {
-	return t.queries.FindNextDueRuntimeV2Cancellation(ctx, commandDeadlineMS)
+func (t *postgresRuntimeCancellationTransaction) FindNextDueRuntimeCancellation(ctx context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeCancellationRow, error) {
+	return t.queries.FindNextDueRuntimeCancellation(ctx, commandDeadlineMS)
 }
-func (t *postgresRuntimeCancellationTransaction) FindNextDueRuntimeV2CoreCancellation(ctx context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeV2CoreCancellationRow, error) {
-	return t.queries.FindNextDueRuntimeV2CoreCancellation(ctx, commandDeadlineMS)
+func (t *postgresRuntimeCancellationTransaction) FindNextDueRuntimeCoreCancellation(ctx context.Context, commandDeadlineMS int64) (db.FindNextDueRuntimeCoreCancellationRow, error) {
+	return t.queries.FindNextDueRuntimeCoreCancellation(ctx, commandDeadlineMS)
 }
 func (t *postgresRuntimeCancellationTransaction) LockRuntimeSessionForCancellationReap(ctx context.Context, sessionID uuid.UUID) (uuid.UUID, error) {
 	return t.queries.LockRuntimeSessionForCancellationReap(ctx, sessionID)
@@ -1202,29 +1202,29 @@ func (t *postgresRuntimeCancellationTransaction) LockRuntimeSessionForCancellati
 func (t *postgresRuntimeCancellationTransaction) LockRuntimeNodeForCancellationReap(ctx context.Context, nodeID uuid.UUID) (uuid.UUID, error) {
 	return t.queries.LockRuntimeNodeForCancellationReap(ctx, nodeID)
 }
-func (t *postgresRuntimeCancellationTransaction) LockDueRuntimeV2CancellationRun(ctx context.Context, params db.LockDueRuntimeV2CancellationRunParams) (db.LockDueRuntimeV2CancellationRunRow, error) {
-	return t.queries.LockDueRuntimeV2CancellationRun(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) LockDueRuntimeCancellationRun(ctx context.Context, params db.LockDueRuntimeCancellationRunParams) (db.LockDueRuntimeCancellationRunRow, error) {
+	return t.queries.LockDueRuntimeCancellationRun(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) LockDueRuntimeV2CoreCancellationRun(ctx context.Context, params db.LockDueRuntimeV2CoreCancellationRunParams) (db.LockDueRuntimeV2CoreCancellationRunRow, error) {
-	return t.queries.LockDueRuntimeV2CoreCancellationRun(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) LockDueRuntimeCoreCancellationRun(ctx context.Context, params db.LockDueRuntimeCoreCancellationRunParams) (db.LockDueRuntimeCoreCancellationRunRow, error) {
+	return t.queries.LockDueRuntimeCoreCancellationRun(ctx, params)
 }
 func (t *postgresRuntimeCancellationTransaction) LockRunCancellationForMutation(ctx context.Context, params db.LockRunCancellationForMutationParams) (db.RunCancellation, error) {
 	return t.queries.LockRunCancellationForMutation(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) AdvanceRuntimeV2RunCancellation(ctx context.Context, params db.AdvanceRuntimeV2RunCancellationParams) (db.RunCancellation, error) {
-	return t.queries.AdvanceRuntimeV2RunCancellation(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) AdvanceRuntimeRunCancellation(ctx context.Context, params db.AdvanceRuntimeRunCancellationParams) (db.RunCancellation, error) {
+	return t.queries.AdvanceRuntimeRunCancellation(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) MirrorRuntimeV2RunCancellationState(ctx context.Context, params db.MirrorRuntimeV2RunCancellationStateParams) (db.MirrorRuntimeV2RunCancellationStateRow, error) {
-	return t.queries.MirrorRuntimeV2RunCancellationState(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) MirrorRuntimeRunCancellationState(ctx context.Context, params db.MirrorRuntimeRunCancellationStateParams) (db.MirrorRuntimeRunCancellationStateRow, error) {
+	return t.queries.MirrorRuntimeRunCancellationState(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) FinishRuntimeV2CanceledAttempt(ctx context.Context, params db.FinishRuntimeV2CanceledAttemptParams) (db.RunAttempt, error) {
-	return t.queries.FinishRuntimeV2CanceledAttempt(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) FinishRuntimeCanceledAttempt(ctx context.Context, params db.FinishRuntimeCanceledAttemptParams) (db.RunAttempt, error) {
+	return t.queries.FinishRuntimeCanceledAttempt(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) FinishRuntimeV2CoreCanceledAttempt(ctx context.Context, params db.FinishRuntimeV2CoreCanceledAttemptParams) (db.RunAttempt, error) {
-	return t.queries.FinishRuntimeV2CoreCanceledAttempt(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) FinishRuntimeCoreCanceledAttempt(ctx context.Context, params db.FinishRuntimeCoreCanceledAttemptParams) (db.RunAttempt, error) {
+	return t.queries.FinishRuntimeCoreCanceledAttempt(ctx, params)
 }
-func (t *postgresRuntimeCancellationTransaction) FinishRuntimeV2CoreUnconfirmedAttempt(ctx context.Context, params db.FinishRuntimeV2CoreUnconfirmedAttemptParams) (db.RunAttempt, error) {
-	return t.queries.FinishRuntimeV2CoreUnconfirmedAttempt(ctx, params)
+func (t *postgresRuntimeCancellationTransaction) FinishRuntimeCoreUnconfirmedAttempt(ctx context.Context, params db.FinishRuntimeCoreUnconfirmedAttemptParams) (db.RunAttempt, error) {
+	return t.queries.FinishRuntimeCoreUnconfirmedAttempt(ctx, params)
 }
 func (t *postgresRuntimeCancellationTransaction) MarkRunAttemptCapacityReleased(ctx context.Context, params db.MarkRunAttemptCapacityReleasedParams) (db.MarkRunAttemptCapacityReleasedRow, error) {
 	return t.queries.MarkRunAttemptCapacityReleased(ctx, params)

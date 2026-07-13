@@ -569,7 +569,7 @@ func (s *MarketService) runtimeAwareAvailability(ctx context.Context, agentID uu
 	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
-	hasRuntime, err := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agentID)
+	hasRuntime, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.MarketService.runtimeAwareAvailability")
 		return availability

@@ -109,10 +109,10 @@ func attachSkill(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID, skillID, s
 
 func insertParentRun(t *testing.T, pool *pgxpool.Pool, userID, callerAgentID uuid.UUID) uuid.UUID {
 	t.Helper()
-	return insertPendingV2Run(t, pool, userID, callerAgentID, "web")
+	return insertPendingRuntimeRun(t, pool, userID, callerAgentID, "web")
 }
 
-func insertPendingV2Run(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID, source string) uuid.UUID {
+func insertPendingRuntimeRun(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.UUID, source string) uuid.UUID {
 	t.Helper()
 	id := uuid.New()
 	keyHash := sha256.Sum256([]byte("a2a-test-key/" + id.String()))
@@ -141,7 +141,7 @@ func insertPendingV2Run(t *testing.T, pool *pgxpool.Pool, userID, agentID uuid.U
 
 func insertDelegatedRun(t *testing.T, pool *pgxpool.Pool, userID, childAgentID, parentRunID, callerAgentID uuid.UUID) uuid.UUID {
 	t.Helper()
-	childRunID := insertPendingV2Run(t, pool, userID, childAgentID, "api")
+	childRunID := insertPendingRuntimeRun(t, pool, userID, childAgentID, "api")
 	_, err := pool.Exec(context.Background(),
 		`INSERT INTO run_delegations (child_run_id, parent_run_id, caller_agent_id, reason)
 		 VALUES ($1, $2, $3, 'test chain')`,
@@ -198,7 +198,7 @@ func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 	require.NoError(t, err)
 }
 
-func TestRuntimeWorkbenchShowsV2SessionAndBacklog(t *testing.T) {
+func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 	pool, svc, _ := setupService(t)
 	ownerID := insertCreator(t, pool)
 	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")

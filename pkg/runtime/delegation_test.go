@@ -9,29 +9,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestRuntimeV2DelegationRequiresMatchingDomainCapabilities(t *testing.T) {
+func TestRuntimeDelegationRequiresMatchingDomainCapabilities(t *testing.T) {
 	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
 	capability := runtimeInvocationCapabilityFixture()
 	contextValue, token, err := signer.Issue(capability)
 	require.NoError(t, err)
 
-	verified, err := verifyRuntimeV2DelegationCapabilityPair(
+	verified, err := verifyRuntimeDelegationCapabilityPair(
 		signer, contextValue, token, capability.IssuedAt.Add(10),
 	)
 	require.NoError(t, err)
-	require.True(t, runtimeV2InvocationCapabilitiesEqual(capability, verified))
+	require.True(t, runtimeInvocationCapabilitiesEqual(capability, verified))
 
 	other := capability
 	other.AttemptID = uuid.New()
 	otherContext, _, err := signer.Issue(other)
 	require.NoError(t, err)
-	_, err = verifyRuntimeV2DelegationCapabilityPair(
+	_, err = verifyRuntimeDelegationCapabilityPair(
 		signer, otherContext, token, capability.IssuedAt.Add(10),
 	)
 	require.ErrorIs(t, err, ErrInvalidRuntimeInvocation)
 
-	_, err = verifyRuntimeV2DelegationCapabilityPair(
+	_, err = verifyRuntimeDelegationCapabilityPair(
 		signer, contextValue, token, capability.ExpiresAt,
 	)
 	require.ErrorIs(t, err, ErrExpiredRuntimeInvocation)
@@ -46,7 +46,7 @@ func TestRuntimeDelegationAuthorizationBindsExactRequest(t *testing.T) {
 	body := []byte(`{"target_agent_id":"` + uuid.NewString() + `","input":{"q":"hi"}}`)
 	proofRequest := RuntimeInvocationProofRequest{
 		Method:         http.MethodPost,
-		Path:           runtimeV2CallAgentPath,
+		Path:           runtimeCallAgentPath,
 		IdempotencyKey: "delegate-once",
 		Context:        contextValue,
 		Body:           body,

@@ -9,16 +9,16 @@ import (
 )
 
 const (
-	defaultRuntimeV2MaintenanceInterval    = time.Second
-	defaultRuntimeV2MaintenanceBatchSize   = 128
-	defaultRuntimeV2MaintenanceCatchUpRuns = 4
+	defaultRuntimeMaintenanceInterval    = time.Second
+	defaultRuntimeMaintenanceBatchSize   = 128
+	defaultRuntimeMaintenanceCatchUpRuns = 4
 )
 
-type runtimeV2DeadlineReconcileWorker interface {
+type runtimeDeadlineReconcileWorker interface {
 	ReconcileBatch(context.Context, int) (RuntimeReconcileBatchResult, error)
 }
 
-type runtimeV2CancellationReapWorker interface {
+type runtimeCancellationReapWorker interface {
 	ReapExpiredCancellations(context.Context, int) (int, error)
 }
 
@@ -51,19 +51,19 @@ type RuntimeMaintenanceResult struct {
 
 func normalizeRuntimeMaintenanceWorkerConfig(cfg RuntimeMaintenanceWorkerConfig) RuntimeMaintenanceWorkerConfig {
 	if cfg.Interval <= 0 {
-		cfg.Interval = defaultRuntimeV2MaintenanceInterval
+		cfg.Interval = defaultRuntimeMaintenanceInterval
 	}
-	if cfg.ReconcileBatchSize <= 0 || cfg.ReconcileBatchSize > maxRuntimeV2ReconcileBatch {
-		cfg.ReconcileBatchSize = defaultRuntimeV2MaintenanceBatchSize
+	if cfg.ReconcileBatchSize <= 0 || cfg.ReconcileBatchSize > maxRuntimeReconcileBatch {
+		cfg.ReconcileBatchSize = defaultRuntimeMaintenanceBatchSize
 	}
 	if cfg.CancellationBatchSize <= 0 || cfg.CancellationBatchSize > maxRuntimeCancellationReapBatch {
-		cfg.CancellationBatchSize = defaultRuntimeV2MaintenanceBatchSize
+		cfg.CancellationBatchSize = defaultRuntimeMaintenanceBatchSize
 	}
 	if cfg.SessionBatchSize <= 0 || cfg.SessionBatchSize > maxRuntimeSessionReapBatch {
-		cfg.SessionBatchSize = defaultRuntimeV2MaintenanceBatchSize
+		cfg.SessionBatchSize = defaultRuntimeMaintenanceBatchSize
 	}
 	if cfg.MaxCatchUpBatches <= 0 || cfg.MaxCatchUpBatches > 32 {
-		cfg.MaxCatchUpBatches = defaultRuntimeV2MaintenanceCatchUpRuns
+		cfg.MaxCatchUpBatches = defaultRuntimeMaintenanceCatchUpRuns
 	}
 	return cfg
 }
@@ -73,8 +73,8 @@ func normalizeRuntimeMaintenanceWorkerConfig(cfg RuntimeMaintenanceWorkerConfig)
 // suppress the other path; errors are joined after both bounded passes finish.
 func RunRuntimeMaintenanceOnce(
 	ctx context.Context,
-	reconciler runtimeV2DeadlineReconcileWorker,
-	cancellations runtimeV2CancellationReapWorker,
+	reconciler runtimeDeadlineReconcileWorker,
+	cancellations runtimeCancellationReapWorker,
 	sessions runtimeSessionReapWorker,
 	cfg RuntimeMaintenanceWorkerConfig,
 ) (RuntimeMaintenanceResult, error) {
@@ -156,8 +156,8 @@ func RunRuntimeMaintenanceOnce(
 // retried on the next tick instead of terminating the API process.
 func StartRuntimeMaintenanceWorker(
 	ctx context.Context,
-	reconciler runtimeV2DeadlineReconcileWorker,
-	cancellations runtimeV2CancellationReapWorker,
+	reconciler runtimeDeadlineReconcileWorker,
+	cancellations runtimeCancellationReapWorker,
 	sessions runtimeSessionReapWorker,
 	cfg RuntimeMaintenanceWorkerConfig,
 ) {

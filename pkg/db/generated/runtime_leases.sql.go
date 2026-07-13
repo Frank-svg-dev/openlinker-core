@@ -633,7 +633,7 @@ func (q *Queries) LockAgentNodeRunAttemptForLeaseMutation(ctx context.Context, a
 	return i, err
 }
 
-const lockNextClaimableRuntimeV2RunForAgent = `-- name: LockNextClaimableRuntimeV2RunForAgent :one
+const lockNextClaimableRuntimeRunForAgent = `-- name: LockNextClaimableRuntimeRunForAgent :one
 SELECT r.id, r.user_id, r.agent_id, r.input, r.request_metadata,
        r.connection_mode_snapshot, r.dispatch_state, r.offer_count,
        r.max_offer_count, r.attempt_count, r.max_attempts,
@@ -664,7 +664,7 @@ LIMIT 1
 FOR UPDATE OF r SKIP LOCKED
 `
 
-type LockNextClaimableRuntimeV2RunForAgentRow struct {
+type LockNextClaimableRuntimeRunForAgentRow struct {
 	ID                     uuid.UUID  `db:"id" json:"id"`
 	UserID                 uuid.UUID  `db:"user_id" json:"user_id"`
 	AgentID                uuid.UUID  `db:"agent_id" json:"agent_id"`
@@ -684,9 +684,9 @@ type LockNextClaimableRuntimeV2RunForAgentRow struct {
 	DatabaseNow            time.Time  `db:"database_now" json:"database_now"`
 }
 
-func (q *Queries) LockNextClaimableRuntimeV2RunForAgent(ctx context.Context, agentID uuid.UUID) (LockNextClaimableRuntimeV2RunForAgentRow, error) {
-	row := q.db.QueryRow(ctx, lockNextClaimableRuntimeV2RunForAgent, agentID)
-	var i LockNextClaimableRuntimeV2RunForAgentRow
+func (q *Queries) LockNextClaimableRuntimeRunForAgent(ctx context.Context, agentID uuid.UUID) (LockNextClaimableRuntimeRunForAgentRow, error) {
+	row := q.db.QueryRow(ctx, lockNextClaimableRuntimeRunForAgent, agentID)
+	var i LockNextClaimableRuntimeRunForAgentRow
 	err := row.Scan(
 		&i.ID,
 		&i.UserID,

@@ -11,7 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-func TestRuntimeV2AttemptAndCancellationQueries(t *testing.T) {
+func TestRuntimeAttemptAndCancellationQueries(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
 	runID, agentID, attemptID := uuid.New(), uuid.New(), uuid.New()
 	leaseID, coreID := uuid.New(), uuid.New()
@@ -215,7 +215,7 @@ func TestResultFinalizationQueries(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
+func TestRuntimeRunEventQueriesAndLockOrder(t *testing.T) {
 	now := time.Date(2026, 7, 11, 9, 0, 0, 0, time.UTC)
 	runID, agentID, attemptID := uuid.New(), uuid.New(), uuid.New()
 	clientEventID, leaseID, sessionID := uuid.New(), uuid.New(), uuid.New()
@@ -383,7 +383,7 @@ func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {
+func TestRuntimeOutboxLedgerAndDLQQueries(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
 	runID, agentID, eventID := uuid.New(), uuid.New(), uuid.New()
 	owner := uuid.New()
@@ -524,7 +524,7 @@ func TestRuntimeV2OutboxLedgerAndDLQQueries(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2NodeSessionAndClusterQueries(t *testing.T) {
+func TestRuntimeNodeSessionAndClusterQueries(t *testing.T) {
 	now := time.Date(2026, 7, 11, 8, 0, 0, 0, time.UTC)
 	digest := "60bef5cec7eeab563937187f48a458059995aebee161765032cddc17d0cdfa61"
 	features := []string{
@@ -607,7 +607,7 @@ func TestRuntimeV2NodeSessionAndClusterQueries(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2PrincipalRevocationLockOrderQueries(t *testing.T) {
+func TestRuntimePrincipalRevocationLockOrderQueries(t *testing.T) {
 	nodeA, nodeB := uuid.New(), uuid.New()
 	tokenA, tokenB := uuid.New(), uuid.New()
 	sessionA, sessionB := uuid.New(), uuid.New()

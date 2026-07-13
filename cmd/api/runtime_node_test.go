@@ -127,7 +127,7 @@ func TestParseRuntimeNodeIssueConfigRequiresDatabaseAndFiles(t *testing.T) {
 	}
 }
 
-func TestCreateRuntimeNodeCertificateHasStrictV2Identity(t *testing.T) {
+func TestCreateRuntimeNodeCertificateHasStrictIdentity(t *testing.T) {
 	now := time.Date(2026, time.July, 11, 8, 30, 0, 0, time.UTC)
 	ca := newRuntimeNodeTestCA(t, now)
 	nodeID := uuid.New()

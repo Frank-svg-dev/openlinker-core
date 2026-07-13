@@ -373,11 +373,11 @@ func (s *Service) finalizeCoreSetupFailure(
 }
 
 func (s *Service) acknowledgeCoreStopped(identity RuntimeAttemptIdentity) {
-	if s == nil || s.cancellationV2 == nil {
+	if s == nil || s.cancellation == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), coreFinalizationTimeout)
-	_, err := s.cancellationV2.AcknowledgeCoreStopped(ctx, s.coreInstanceID, identity)
+	_, err := s.cancellation.AcknowledgeCoreStopped(ctx, s.coreInstanceID, identity)
 	cancel()
 	if err != nil && !IsRuntimeLeaseError(err, RuntimeLeaseErrorStaleLease) {
 		log.Error().Err(err).Str("run_id", identity.RunID.String()).

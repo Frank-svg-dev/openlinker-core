@@ -19,7 +19,7 @@ import (
 
 func TestRunCreationIdempotencyOneWinnerUnder100ConcurrentRequests(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	svc := newTestService(t, pool)
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
@@ -144,7 +144,7 @@ func TestRunCreationIdempotencyOneWinnerUnder100ConcurrentRequests(t *testing.T)
 
 func TestRunCreationRollsBackAtEveryRequiredInsertBoundary(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	svc := newTestService(t, pool)
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
@@ -207,7 +207,7 @@ func TestRunCreationRollsBackAtEveryRequiredInsertBoundary(t *testing.T) {
 	}
 }
 
-func requireReliableRuntimeV2Schema(t *testing.T, pool *pgxpool.Pool) {
+func requireReliableRuntimeSchema(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	var ready bool
 	err := pool.QueryRow(context.Background(), `

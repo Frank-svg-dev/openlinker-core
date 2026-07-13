@@ -12,16 +12,16 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestHasActiveRuntimeV2SessionForAgentUsesDurableCurrentTruth(t *testing.T) {
+func TestHasActiveRuntimeSessionForAgentUsesDurableCurrentTruth(t *testing.T) {
 	agentID := uuid.New()
 	dbtx := &signalQueryDBTX{row: signalQueryRow{values: []any{true}}}
-	active, err := New(dbtx).HasActiveRuntimeV2SessionForAgent(context.Background(), agentID)
+	active, err := New(dbtx).HasActiveRuntimeSessionForAgent(context.Background(), agentID)
 	if err != nil || !active {
-		t.Fatalf("HasActiveRuntimeV2SessionForAgent = %v, %v", active, err)
+		t.Fatalf("HasActiveRuntimeSessionForAgent = %v, %v", active, err)
 	}
-	requireSignalQueryName(t, dbtx.queryRowSQL, "HasActiveRuntimeV2SessionForAgent")
+	requireSignalQueryName(t, dbtx.queryRowSQL, "HasActiveRuntimeSessionForAgent")
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID}) {
-		t.Fatalf("HasActiveRuntimeV2SessionForAgent args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("HasActiveRuntimeSessionForAgent args = %#v", dbtx.queryRowArgs)
 	}
 	for _, guard := range []string{
 		"s.status IN ('active', 'draining')",
@@ -39,7 +39,7 @@ func TestHasActiveRuntimeV2SessionForAgentUsesDurableCurrentTruth(t *testing.T) 
 		"attachment.detached_at IS NULL",
 	} {
 		if !strings.Contains(dbtx.queryRowSQL, guard) {
-			t.Fatalf("HasActiveRuntimeV2SessionForAgent missing guard %q:\n%s", guard, dbtx.queryRowSQL)
+			t.Fatalf("HasActiveRuntimeSessionForAgent missing guard %q:\n%s", guard, dbtx.queryRowSQL)
 		}
 	}
 }

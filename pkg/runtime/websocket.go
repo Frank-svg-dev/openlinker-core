@@ -17,16 +17,16 @@ import (
 )
 
 const (
-	runtimeV2WSWriteWait         = 10 * time.Second
-	runtimeV2WSPongWait          = 75 * time.Second
-	runtimeV2WSPingInterval      = 30 * time.Second
-	runtimeV2WSClaimInterval     = 500 * time.Millisecond
-	runtimeV2WSHeartbeatInterval = 20 * time.Second
-	runtimeV2WSCleanupTimeout    = 5 * time.Second
-	runtimeV2WSWriteQueue        = 32
+	runtimeWSWriteWait         = 10 * time.Second
+	runtimeWSPongWait          = 75 * time.Second
+	runtimeWSPingInterval      = 30 * time.Second
+	runtimeWSClaimInterval     = 500 * time.Millisecond
+	runtimeWSHeartbeatInterval = 20 * time.Second
+	runtimeWSCleanupTimeout    = 5 * time.Second
+	runtimeWSWriteQueue        = 32
 )
 
-var runtimeV2WSUpgrader = websocket.Upgrader{
+var runtimeWSUpgrader = websocket.Upgrader{
 	ReadBufferSize:  4096,
 	WriteBufferSize: 4096,
 	CheckOrigin: func(request *http.Request) bool {
@@ -41,47 +41,166 @@ type RuntimeResumeAPI interface {
 	Resume(context.Context, RuntimeSessionPrincipal, RuntimeResumePayload) (RuntimeResumeResponse, error)
 }
 
+type runtimeWSManagedConnection interface {
+	shutdown()
+}
+
+// runtimeWSRegistry owns WebSocket admission and draining. An admitted request
+// is counted before Upgrade so Shutdown cannot miss a socket that is racing
+// between hijack and registration.
+type runtimeWSRegistry struct {
+	mu          sync.Mutex
+	stopping    bool
+	inFlight    int
+	connections map[runtimeWSManagedConnection]struct{}
+	drained     chan struct{}
+	drainedOnce sync.Once
+}
+
+func newRuntimeWSRegistry() *runtimeWSRegistry {
+	return &runtimeWSRegistry{
+		connections: make(map[runtimeWSManagedConnection]struct{}),
+		drained:     make(chan struct{}),
+	}
+}
+
+func (r *runtimeWSRegistry) admit() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.stopping {
+		return false
+	}
+	r.inFlight++
+	return true
+}
+
+// register returns false and closes the socket when Shutdown won the race
+// after admission. It remains in-flight until the HTTP handler calls finish.
+func (r *runtimeWSRegistry) register(connection runtimeWSManagedConnection) bool {
+	if r == nil || connection == nil {
+		return false
+	}
+	r.mu.Lock()
+	r.connections[connection] = struct{}{}
+	accepting := !r.stopping
+	r.mu.Unlock()
+	if !accepting {
+		connection.shutdown()
+	}
+	return accepting
+}
+
+func (r *runtimeWSRegistry) finish(connection runtimeWSManagedConnection) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	if connection != nil {
+		delete(r.connections, connection)
+	}
+	if r.inFlight > 0 {
+		r.inFlight--
+	}
+	if r.stopping && r.inFlight == 0 {
+		r.drainedOnce.Do(func() { close(r.drained) })
+	}
+	r.mu.Unlock()
+}
+
+func (r *runtimeWSRegistry) shutdown(ctx context.Context) error {
+	if r == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	r.mu.Lock()
+	r.stopping = true
+	connections := make([]runtimeWSManagedConnection, 0, len(r.connections))
+	for connection := range r.connections {
+		connections = append(connections, connection)
+	}
+	if r.inFlight == 0 {
+		r.drainedOnce.Do(func() { close(r.drained) })
+	}
+	drained := r.drained
+	r.mu.Unlock()
+
+	for _, connection := range connections {
+		connection.shutdown()
+	}
+
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Shutdown rejects new Runtime WebSockets, interrupts every hijacked
+// connection, and waits until each handler has completed durable cleanup.
+func (h *RuntimeHTTPController) Shutdown(ctx context.Context) error {
+	if h == nil || h.webSockets == nil {
+		return nil
+	}
+	return h.webSockets.shutdown(ctx)
+}
+
 // WebSocket authenticates both Agent Token and Node certificate before the
 // HTTP connection is upgraded. No unauthenticated peer can consume a socket or
 // create/attach a durable Session.
 func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
-		return writeRuntimeV2Error(c, transportErr)
+		return writeRuntimeError(c, transportErr)
 	}
 	if h == nil || h.dependencies.Sessions == nil || h.dependencies.Leases == nil ||
 		h.dependencies.EventProjector == nil || h.dependencies.Finalizer == nil ||
 		h.dependencies.Cancellations == nil {
-		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
+		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	if !websocket.IsWebSocketUpgrade(c.Request()) {
-		return writeRuntimeV2Error(c, NewRuntimeTransportError(
+		return writeRuntimeError(c, NewRuntimeTransportError(
 			RuntimeErrorBadRequest, runtimeErrorDefaultMessage(RuntimeErrorBadRequest),
 		))
 	}
-	if runtimeV2WSUpgrader.CheckOrigin != nil && !runtimeV2WSUpgrader.CheckOrigin(c.Request()) {
-		return writeRuntimeV2Error(c, NewRuntimeTransportError(
+	if runtimeWSUpgrader.CheckOrigin != nil && !runtimeWSUpgrader.CheckOrigin(c.Request()) {
+		return writeRuntimeError(c, NewRuntimeTransportError(
 			RuntimeErrorForbidden, runtimeErrorDefaultMessage(RuntimeErrorForbidden),
 		))
 	}
+	if h.webSockets == nil || !h.webSockets.admit() {
+		return writeRuntimeError(c, runtimeUnavailableError())
+	}
+	var tracked runtimeWSManagedConnection
+	defer func() { h.webSockets.finish(tracked) }()
 
-	socket, err := runtimeV2WSUpgrader.Upgrade(c.Response().Writer, c.Request(), nil)
+	socket, err := runtimeWSUpgrader.Upgrade(c.Response().Writer, c.Request(), nil)
 	if err != nil {
 		// The upgrader has already written the handshake failure.
 		return nil
 	}
-	connection := newRuntimeV2WSConnection(c.Request().Context(), h, socket, authenticated)
+	connection := newRuntimeWSConnection(c.Request().Context(), h, socket, authenticated)
+	tracked = connection
+	if !h.webSockets.register(connection) {
+		return nil
+	}
 	connection.run()
 	return nil
 }
 
-type runtimeV2WSConnection struct {
+type runtimeWSConnection struct {
 	controller      *RuntimeHTTPController
 	socket          *websocket.Conn
 	authenticated   AuthenticatedRuntimePrincipal
 	ctx             context.Context
 	cancel          context.CancelFunc
-	writes          chan runtimeV2WSWriteRequest
+	writes          chan runtimeWSWriteRequest
 	writerDone      chan struct{}
 	maintenanceDone chan struct{}
 	cleanupOnce     sync.Once
@@ -96,50 +215,62 @@ type runtimeV2WSConnection struct {
 
 	operationMu   sync.Mutex
 	correlationMu sync.Mutex
-	assignments   map[uuid.UUID]runtimeV2WSAssignmentCorrelation
-	cancellations map[uuid.UUID]runtimeV2WSCancellationCorrelation
+	assignments   map[uuid.UUID]runtimeWSAssignmentCorrelation
+	cancellations map[uuid.UUID]runtimeWSCancellationCorrelation
 }
 
-type runtimeV2WSWriteRequest struct {
+type runtimeWSWriteRequest struct {
 	message     any
 	controlType int
 	controlData []byte
 	result      chan error
 }
 
-type runtimeV2WSAssignmentCorrelation struct {
+type runtimeWSAssignmentCorrelation struct {
 	envelope RuntimeEnvelope
 	payload  RunAssignedPayload
 }
 
-type runtimeV2WSCancellationCorrelation struct {
+type runtimeWSCancellationCorrelation struct {
 	envelope RuntimeEnvelope
 	payload  RunCancelPayload
 }
 
-func newRuntimeV2WSConnection(
+func newRuntimeWSConnection(
 	parent context.Context,
 	controller *RuntimeHTTPController,
 	socket *websocket.Conn,
 	authenticated AuthenticatedRuntimePrincipal,
-) *runtimeV2WSConnection {
+) *runtimeWSConnection {
 	ctx, cancel := context.WithCancel(parent)
-	return &runtimeV2WSConnection{
+	return &runtimeWSConnection{
 		controller:      controller,
 		socket:          socket,
 		authenticated:   authenticated,
 		ctx:             ctx,
 		cancel:          cancel,
-		writes:          make(chan runtimeV2WSWriteRequest, runtimeV2WSWriteQueue),
+		writes:          make(chan runtimeWSWriteRequest, runtimeWSWriteQueue),
 		writerDone:      make(chan struct{}),
 		maintenanceDone: make(chan struct{}),
-		assignments:     make(map[uuid.UUID]runtimeV2WSAssignmentCorrelation),
-		cancellations:   make(map[uuid.UUID]runtimeV2WSCancellationCorrelation),
+		assignments:     make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
+		cancellations:   make(map[uuid.UUID]runtimeWSCancellationCorrelation),
 		connectionID:    "ws:" + uuid.NewString(),
 	}
 }
 
-func (c *runtimeV2WSConnection) run() {
+func (c *runtimeWSConnection) shutdown() {
+	if c == nil {
+		return
+	}
+	if c.cancel != nil {
+		c.cancel()
+	}
+	if c.socket != nil {
+		_ = c.socket.Close()
+	}
+}
+
+func (c *runtimeWSConnection) run() {
 	go c.writeLoop()
 	defer c.cleanup()
 
@@ -148,17 +279,17 @@ func (c *runtimeV2WSConnection) run() {
 	})
 	c.socket.SetCloseHandler(func(int, string) error { return nil })
 	if err := c.socket.SetReadDeadline(time.Now().Add(RuntimeHelloTimeoutSeconds * time.Second)); err != nil {
-		c.closeForError(runtimeV2UnavailableError())
+		c.closeForError(runtimeUnavailableError())
 		return
 	}
 
 	helloEnvelope, err := c.readEnvelope()
 	if err != nil {
-		c.closeForError(mapRuntimeV2HTTPError(err))
+		c.closeForError(mapRuntimeHTTPError(err))
 		return
 	}
 	if helloEnvelope.Type != RuntimeMessageHello || helloEnvelope.ReplyToMessageID != nil {
-		c.replyErrorAndMaybeClose(helloEnvelope, runtimeV2ValidationError(), true)
+		c.replyErrorAndMaybeClose(helloEnvelope, runtimeTransportValidationError(), true)
 		return
 	}
 	hello, err := DecodeRuntimeMessagePayload[RuntimeHelloPayload](helloEnvelope, RuntimeMessageHello)
@@ -188,7 +319,7 @@ func (c *runtimeV2WSConnection) run() {
 		c.ctx, c.authenticated, hello.RuntimeSessionID,
 	)
 	if err == nil {
-		err = validateRuntimeV2ResolvedSession(c.authenticated, principal)
+		err = validateRuntimeResolvedSession(c.authenticated, principal)
 	}
 	if err == nil && principal.AttachmentID != c.attachmentID {
 		err = newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
@@ -204,16 +335,16 @@ func (c *runtimeV2WSConnection) run() {
 		c.replyErrorAndMaybeClose(helloEnvelope, err, true)
 		return
 	}
-	if err = sendRuntimeV2WSReply(c, helloEnvelope, RuntimeMessageReady, ready); err != nil {
-		c.closeForError(mapRuntimeV2HTTPError(err))
+	if err = sendRuntimeWSReply(c, helloEnvelope, RuntimeMessageReady, ready); err != nil {
+		c.closeForError(mapRuntimeHTTPError(err))
 		return
 	}
 
-	if err = c.socket.SetReadDeadline(time.Now().Add(runtimeV2WSPongWait)); err != nil {
+	if err = c.socket.SetReadDeadline(time.Now().Add(runtimeWSPongWait)); err != nil {
 		return
 	}
 	c.socket.SetPongHandler(func(string) error {
-		return c.socket.SetReadDeadline(time.Now().Add(runtimeV2WSPongWait))
+		return c.socket.SetReadDeadline(time.Now().Add(runtimeWSPongWait))
 	})
 	c.maintenanceStarted = true
 	go func() {
@@ -227,7 +358,7 @@ func (c *runtimeV2WSConnection) run() {
 			if c.ctx.Err() == nil {
 				var closeErr *websocket.CloseError
 				if !errors.As(readErr, &closeErr) {
-					c.closeForError(mapRuntimeV2HTTPError(readErr))
+					c.closeForError(mapRuntimeHTTPError(readErr))
 				}
 			}
 			return
@@ -238,13 +369,13 @@ func (c *runtimeV2WSConnection) run() {
 	}
 }
 
-func (c *runtimeV2WSConnection) readEnvelope() (RuntimeEnvelope, error) {
+func (c *runtimeWSConnection) readEnvelope() (RuntimeEnvelope, error) {
 	messageType, reader, err := c.socket.NextReader()
 	if err != nil {
 		return RuntimeEnvelope{}, err
 	}
 	if messageType != websocket.TextMessage {
-		return RuntimeEnvelope{}, runtimeV2ValidationError()
+		return RuntimeEnvelope{}, runtimeTransportValidationError()
 	}
 	frame, err := io.ReadAll(io.LimitReader(reader, MaxRuntimeMessageBytes+1))
 	if err != nil {
@@ -258,7 +389,7 @@ func (c *runtimeV2WSConnection) readEnvelope() (RuntimeEnvelope, error) {
 	return ParseRuntimeEnvelope(frame)
 }
 
-func (c *runtimeV2WSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
+func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 	if envelope.Type == RuntimeMessageHello {
 		c.replyErrorAndMaybeClose(envelope, NewRuntimeTransportError(
 			RuntimeErrorSessionConflict, runtimeErrorDefaultMessage(RuntimeErrorSessionConflict),
@@ -288,7 +419,7 @@ func (c *runtimeV2WSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 	case RuntimeMessageResume:
 		err = c.handleResume(envelope)
 	default:
-		err = runtimeV2ValidationError()
+		err = runtimeTransportValidationError()
 	}
 	if err == nil {
 		return false
@@ -296,14 +427,14 @@ func (c *runtimeV2WSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 	return c.replyErrorAndMaybeClose(envelope, err, false)
 }
 
-func (c *runtimeV2WSConnection) refreshSession() error {
+func (c *runtimeWSConnection) refreshSession() error {
 	principal, err := c.controller.dependencies.Sessions.ResolveSessionPrincipal(
 		c.ctx, c.authenticated, c.sessionPrincipal.RuntimeSessionID,
 	)
 	if err != nil {
 		return err
 	}
-	if err = validateRuntimeV2ResolvedSession(c.authenticated, principal); err != nil {
+	if err = validateRuntimeResolvedSession(c.authenticated, principal); err != nil {
 		return err
 	}
 	if principal.RuntimeSessionID != c.sessionPrincipal.RuntimeSessionID ||
@@ -316,7 +447,7 @@ func (c *runtimeV2WSConnection) refreshSession() error {
 	return nil
 }
 
-func (c *runtimeV2WSConnection) handleAssignmentAck(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleAssignmentAck(envelope RuntimeEnvelope) error {
 	payload, err := DecodeRuntimeMessagePayload[RunAssignmentAckPayload](envelope, RuntimeMessageAssignmentAck)
 	if err != nil {
 		return err
@@ -332,10 +463,10 @@ func (c *runtimeV2WSConnection) handleAssignmentAck(envelope RuntimeEnvelope) er
 	if err != nil {
 		return err
 	}
-	return sendRuntimeV2WSReply(c, envelope, RuntimeMessageAssignmentConfirmed, confirmed)
+	return sendRuntimeWSReply(c, envelope, RuntimeMessageAssignmentConfirmed, confirmed)
 }
 
-func (c *runtimeV2WSConnection) handleAssignmentReject(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleAssignmentReject(envelope RuntimeEnvelope) error {
 	payload, err := DecodeRuntimeMessagePayload[RunAssignmentRejectPayload](envelope, RuntimeMessageAssignmentReject)
 	if err != nil {
 		return err
@@ -351,12 +482,12 @@ func (c *runtimeV2WSConnection) handleAssignmentReject(envelope RuntimeEnvelope)
 	if err != nil {
 		return err
 	}
-	return sendRuntimeV2WSReply(c, envelope, RuntimeMessageAssignmentRejected, rejected)
+	return sendRuntimeWSReply(c, envelope, RuntimeMessageAssignmentRejected, rejected)
 }
 
-func (c *runtimeV2WSConnection) handleLeaseRenew(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleLeaseRenew(envelope RuntimeEnvelope) error {
 	if envelope.ReplyToMessageID != nil {
-		return runtimeV2ValidationError()
+		return runtimeTransportValidationError()
 	}
 	payload, err := DecodeRuntimeMessagePayload[RunLeaseRenewPayload](envelope, RuntimeMessageLeaseRenew)
 	if err != nil {
@@ -366,12 +497,12 @@ func (c *runtimeV2WSConnection) handleLeaseRenew(envelope RuntimeEnvelope) error
 	if err != nil {
 		return err
 	}
-	return sendRuntimeV2WSReply(c, envelope, RuntimeMessageLeaseRenewed, renewed)
+	return sendRuntimeWSReply(c, envelope, RuntimeMessageLeaseRenewed, renewed)
 }
 
-func (c *runtimeV2WSConnection) handleRunEvent(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleRunEvent(envelope RuntimeEnvelope) error {
 	if envelope.ReplyToMessageID != nil {
-		return runtimeV2ValidationError()
+		return runtimeTransportValidationError()
 	}
 	payload, err := DecodeRuntimeMessagePayload[RunEventPayload](envelope, RuntimeMessageRunEvent)
 	if err != nil {
@@ -392,12 +523,12 @@ func (c *runtimeV2WSConnection) handleRunEvent(envelope RuntimeEnvelope) error {
 		Sequence:       int64(ack.Sequence),
 		Replayed:       ack.Replayed,
 	}
-	return sendRuntimeV2WSReply(c, envelope, RuntimeMessageRunEventAck, response)
+	return sendRuntimeWSReply(c, envelope, RuntimeMessageRunEventAck, response)
 }
 
-func (c *runtimeV2WSConnection) handleRunResult(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleRunResult(envelope RuntimeEnvelope) error {
 	if envelope.ReplyToMessageID != nil {
-		return runtimeV2ValidationError()
+		return runtimeTransportValidationError()
 	}
 	payload, err := DecodeRuntimeMessagePayload[RunResultPayload](envelope, RuntimeMessageRunResult)
 	if err != nil {
@@ -421,10 +552,10 @@ func (c *runtimeV2WSConnection) handleRunResult(envelope RuntimeEnvelope) error 
 		Replayed:       ack.Replayed,
 		NextAttemptAt:  ack.NextAttemptAt,
 	}
-	return sendRuntimeV2WSReply(c, envelope, RuntimeMessageRunResultAck, response)
+	return sendRuntimeWSReply(c, envelope, RuntimeMessageRunResultAck, response)
 }
 
-func (c *runtimeV2WSConnection) handleRunCancelAck(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleRunCancelAck(envelope RuntimeEnvelope) error {
 	payload, err := DecodeRuntimeMessagePayload[RunCancelAckPayload](envelope, RuntimeMessageRunCancelAck)
 	if err != nil {
 		return err
@@ -443,9 +574,9 @@ func (c *runtimeV2WSConnection) handleRunCancelAck(envelope RuntimeEnvelope) err
 	return err
 }
 
-func (c *runtimeV2WSConnection) handleResume(envelope RuntimeEnvelope) error {
+func (c *runtimeWSConnection) handleResume(envelope RuntimeEnvelope) error {
 	if envelope.ReplyToMessageID != nil {
-		return runtimeV2ValidationError()
+		return runtimeTransportValidationError()
 	}
 	payload, err := DecodeRuntimeMessagePayload[RuntimeResumePayload](envelope, RuntimeMessageResume)
 	if err != nil {
@@ -454,29 +585,29 @@ func (c *runtimeV2WSConnection) handleResume(envelope RuntimeEnvelope) error {
 	// The WS reply contract emits one run.resume.accepted message per Attempt.
 	// An empty batch would have no correlated reply and leave the caller waiting.
 	if len(payload.Attempts) == 0 {
-		return runtimeV2ValidationError()
+		return runtimeTransportValidationError()
 	}
 	if c.controller.dependencies.Resume == nil {
-		return runtimeV2UnavailableError()
+		return runtimeUnavailableError()
 	}
 	response, err := c.controller.dependencies.Resume.Resume(c.ctx, c.sessionPrincipal, payload)
 	if err != nil {
 		return err
 	}
 	if len(response.Decisions) != len(payload.Attempts) {
-		return runtimeV2WSOutboundError(errors.New("runtime resume response count does not match request"))
+		return runtimeWSOutboundError(errors.New("runtime resume response count does not match request"))
 	}
 	for _, decision := range response.Decisions {
-		if err = sendRuntimeV2WSReply(c, envelope, RuntimeMessageResumeAccepted, decision); err != nil {
+		if err = sendRuntimeWSReply(c, envelope, RuntimeMessageResumeAccepted, decision); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *runtimeV2WSConnection) maintenanceLoop() {
-	claimTicker := time.NewTicker(runtimeV2WSClaimInterval)
-	heartbeatTicker := time.NewTicker(runtimeV2WSHeartbeatInterval)
+func (c *runtimeWSConnection) maintenanceLoop() {
+	claimTicker := time.NewTicker(runtimeWSClaimInterval)
+	heartbeatTicker := time.NewTicker(runtimeWSHeartbeatInterval)
 	defer claimTicker.Stop()
 	defer heartbeatTicker.Stop()
 
@@ -513,7 +644,7 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 				c.ctx, c.authenticated, c.sessionRequest,
 			)
 			if err != nil {
-				c.closeForError(mapRuntimeV2HTTPError(err))
+				c.closeForError(mapRuntimeHTTPError(err))
 				return
 			}
 			c.controller.refreshPresence(c.ctx, state, c.connectionID)
@@ -521,20 +652,20 @@ func (c *runtimeV2WSConnection) maintenanceLoop() {
 	}
 }
 
-func (c *runtimeV2WSConnection) refreshMaintenanceSession() bool {
+func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
 	if err := c.refreshSession(); err != nil {
-		c.closeForError(mapRuntimeV2HTTPError(err))
+		c.closeForError(mapRuntimeHTTPError(err))
 		return false
 	}
 	return true
 }
 
-func (c *runtimeV2WSConnection) commandAndSend() {
+func (c *runtimeWSConnection) commandAndSend() {
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
 	command, _, err := c.controller.dependencies.Cancellations.NextCommand(c.ctx, c.sessionPrincipal)
 	if err != nil {
-		mapped := mapRuntimeV2HTTPError(err)
+		mapped := mapRuntimeHTTPError(err)
 		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
 			c.closeForError(mapped)
 		}
@@ -545,19 +676,19 @@ func (c *runtimeV2WSConnection) commandAndSend() {
 	}
 	decoded, err := DecodePendingCommand(*command)
 	if err != nil {
-		c.closeForError(runtimeV2WSOutboundError(err))
+		c.closeForError(runtimeWSOutboundError(err))
 		return
 	}
 	if decoded.Type != RuntimeMessageRunCancel || decoded.Cancel == nil {
-		c.closeForError(runtimeV2WSOutboundError(errors.New("unexpected Runtime websocket command type")))
+		c.closeForError(runtimeWSOutboundError(errors.New("unexpected Runtime websocket command type")))
 		return
 	}
 	if c.cancellationAlreadySent(*decoded.Cancel) {
 		return
 	}
-	message, envelope, err := newRuntimeV2WSTypedMessage(RuntimeMessageRunCancel, nil, *decoded.Cancel)
+	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunCancel, nil, *decoded.Cancel)
 	if err != nil {
-		c.closeForError(runtimeV2WSOutboundError(err))
+		c.closeForError(runtimeWSOutboundError(err))
 		return
 	}
 	c.recordCancellation(envelope, *decoded.Cancel)
@@ -567,12 +698,12 @@ func (c *runtimeV2WSConnection) commandAndSend() {
 	}
 }
 
-func (c *runtimeV2WSConnection) claimAndSend() {
+func (c *runtimeWSConnection) claimAndSend() {
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
 	assignment, err := c.controller.dependencies.Leases.ClaimOffer(c.ctx, c.sessionPrincipal)
 	if err != nil {
-		mapped := mapRuntimeV2HTTPError(err)
+		mapped := mapRuntimeHTTPError(err)
 		if _, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code); fatal {
 			c.closeForError(mapped)
 		}
@@ -581,9 +712,9 @@ func (c *runtimeV2WSConnection) claimAndSend() {
 	if assignment == nil || c.assignmentAlreadySent(assignment.AttemptIdentity) {
 		return
 	}
-	message, envelope, err := newRuntimeV2WSTypedMessage(RuntimeMessageRunAssigned, nil, *assignment)
+	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunAssigned, nil, *assignment)
 	if err != nil {
-		c.closeForError(runtimeV2WSOutboundError(err))
+		c.closeForError(runtimeWSOutboundError(err))
 		return
 	}
 	c.recordAssignment(envelope, *assignment)
@@ -593,23 +724,23 @@ func (c *runtimeV2WSConnection) claimAndSend() {
 	}
 }
 
-func (c *runtimeV2WSConnection) assignmentCorrelation(
+func (c *runtimeWSConnection) assignmentCorrelation(
 	envelope RuntimeEnvelope,
 	identity AttemptIdentity,
-) (runtimeV2WSAssignmentCorrelation, error) {
+) (runtimeWSAssignmentCorrelation, error) {
 	if envelope.ReplyToMessageID == nil {
-		return runtimeV2WSAssignmentCorrelation{}, runtimeV2ValidationError()
+		return runtimeWSAssignmentCorrelation{}, runtimeTransportValidationError()
 	}
 	c.correlationMu.Lock()
 	correlation, ok := c.assignments[*envelope.ReplyToMessageID]
 	c.correlationMu.Unlock()
 	if !ok || correlation.payload.AttemptIdentity != identity {
-		return runtimeV2WSAssignmentCorrelation{}, runtimeV2ValidationError()
+		return runtimeWSAssignmentCorrelation{}, runtimeTransportValidationError()
 	}
 	return correlation, nil
 }
 
-func (c *runtimeV2WSConnection) assignmentAlreadySent(identity AttemptIdentity) bool {
+func (c *runtimeWSConnection) assignmentAlreadySent(identity AttemptIdentity) bool {
 	c.correlationMu.Lock()
 	defer c.correlationMu.Unlock()
 	for _, correlation := range c.assignments {
@@ -620,7 +751,7 @@ func (c *runtimeV2WSConnection) assignmentAlreadySent(identity AttemptIdentity) 
 	return false
 }
 
-func (c *runtimeV2WSConnection) recordAssignment(envelope RuntimeEnvelope, payload RunAssignedPayload) {
+func (c *runtimeWSConnection) recordAssignment(envelope RuntimeEnvelope, payload RunAssignedPayload) {
 	c.correlationMu.Lock()
 	// Correlation evidence is transport-only, but retaining a bounded history
 	// lets an ACK/reject replay recover its persisted response after a lost WS
@@ -632,34 +763,34 @@ func (c *runtimeV2WSConnection) recordAssignment(envelope RuntimeEnvelope, paylo
 			break
 		}
 	}
-	c.assignments[envelope.MessageID] = runtimeV2WSAssignmentCorrelation{envelope: envelope, payload: payload}
+	c.assignments[envelope.MessageID] = runtimeWSAssignmentCorrelation{envelope: envelope, payload: payload}
 	c.correlationMu.Unlock()
 }
 
-func (c *runtimeV2WSConnection) removeAssignmentMessage(messageID uuid.UUID) {
+func (c *runtimeWSConnection) removeAssignmentMessage(messageID uuid.UUID) {
 	c.correlationMu.Lock()
 	delete(c.assignments, messageID)
 	c.correlationMu.Unlock()
 }
 
-func (c *runtimeV2WSConnection) cancellationCorrelation(
+func (c *runtimeWSConnection) cancellationCorrelation(
 	envelope RuntimeEnvelope,
 	payload RunCancelAckPayload,
-) (runtimeV2WSCancellationCorrelation, error) {
+) (runtimeWSCancellationCorrelation, error) {
 	if envelope.ReplyToMessageID == nil {
-		return runtimeV2WSCancellationCorrelation{}, runtimeV2ValidationError()
+		return runtimeWSCancellationCorrelation{}, runtimeTransportValidationError()
 	}
 	c.correlationMu.Lock()
 	correlation, ok := c.cancellations[*envelope.ReplyToMessageID]
 	c.correlationMu.Unlock()
 	if !ok || correlation.payload.CancellationID != payload.CancellationID ||
 		correlation.payload.AttemptIdentity != payload.AttemptIdentity {
-		return runtimeV2WSCancellationCorrelation{}, runtimeV2ValidationError()
+		return runtimeWSCancellationCorrelation{}, runtimeTransportValidationError()
 	}
 	return correlation, nil
 }
 
-func (c *runtimeV2WSConnection) cancellationAlreadySent(payload RunCancelPayload) bool {
+func (c *runtimeWSConnection) cancellationAlreadySent(payload RunCancelPayload) bool {
 	c.correlationMu.Lock()
 	defer c.correlationMu.Unlock()
 	for _, correlation := range c.cancellations {
@@ -671,7 +802,7 @@ func (c *runtimeV2WSConnection) cancellationAlreadySent(payload RunCancelPayload
 	return false
 }
 
-func (c *runtimeV2WSConnection) recordCancellation(envelope RuntimeEnvelope, payload RunCancelPayload) {
+func (c *runtimeWSConnection) recordCancellation(envelope RuntimeEnvelope, payload RunCancelPayload) {
 	c.correlationMu.Lock()
 	if len(c.cancellations) >= RuntimeMaximumNodeCapacity {
 		for messageID := range c.cancellations {
@@ -679,36 +810,36 @@ func (c *runtimeV2WSConnection) recordCancellation(envelope RuntimeEnvelope, pay
 			break
 		}
 	}
-	c.cancellations[envelope.MessageID] = runtimeV2WSCancellationCorrelation{
+	c.cancellations[envelope.MessageID] = runtimeWSCancellationCorrelation{
 		envelope: envelope,
 		payload:  payload,
 	}
 	c.correlationMu.Unlock()
 }
 
-func (c *runtimeV2WSConnection) removeCancellationMessage(messageID uuid.UUID) {
+func (c *runtimeWSConnection) removeCancellationMessage(messageID uuid.UUID) {
 	c.correlationMu.Lock()
 	delete(c.cancellations, messageID)
 	c.correlationMu.Unlock()
 }
 
-func sendRuntimeV2WSReply[P any](
-	c *runtimeV2WSConnection,
+func sendRuntimeWSReply[P any](
+	c *runtimeWSConnection,
 	request RuntimeEnvelope,
 	messageType RuntimeMessageType,
 	payload P,
 ) error {
-	message, envelope, err := newRuntimeV2WSTypedMessage(messageType, &request.MessageID, payload)
+	message, envelope, err := newRuntimeWSTypedMessage(messageType, &request.MessageID, payload)
 	if err != nil {
-		return runtimeV2WSOutboundError(err)
+		return runtimeWSOutboundError(err)
 	}
 	if err = ValidateRuntimeReplyCorrelation(request, envelope); err != nil {
-		return runtimeV2WSOutboundError(err)
+		return runtimeWSOutboundError(err)
 	}
 	return c.writeMessage(message)
 }
 
-func newRuntimeV2WSTypedMessage[P any](
+func newRuntimeWSTypedMessage[P any](
 	messageType RuntimeMessageType,
 	replyTo *uuid.UUID,
 	payload P,
@@ -728,18 +859,18 @@ func newRuntimeV2WSTypedMessage[P any](
 	return message, envelope, nil
 }
 
-func runtimeV2WSOutboundError(cause error) *RuntimeTransportError {
+func runtimeWSOutboundError(cause error) *RuntimeTransportError {
 	return newRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal), cause)
 }
 
-func (c *runtimeV2WSConnection) replyErrorAndMaybeClose(
+func (c *runtimeWSConnection) replyErrorAndMaybeClose(
 	request RuntimeEnvelope,
 	cause error,
 	forceClose bool,
 ) bool {
-	mapped := mapRuntimeV2HTTPError(cause)
+	mapped := mapRuntimeHTTPError(cause)
 	if runtimeMessageExpectsReply(request.Type) {
-		if err := sendRuntimeV2WSReply(c, request, RuntimeMessageError, mapped.Body); err != nil {
+		if err := sendRuntimeWSReply(c, request, RuntimeMessageError, mapped.Body); err != nil {
 			c.cancel()
 			return true
 		}
@@ -756,7 +887,7 @@ func (c *runtimeV2WSConnection) replyErrorAndMaybeClose(
 	return false
 }
 
-func (c *runtimeV2WSConnection) closeForError(mapped *RuntimeTransportError) {
+func (c *runtimeWSConnection) closeForError(mapped *RuntimeTransportError) {
 	if mapped == nil {
 		mapped = NewRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal))
 	}
@@ -768,23 +899,23 @@ func (c *runtimeV2WSConnection) closeForError(mapped *RuntimeTransportError) {
 	c.cancel()
 }
 
-func (c *runtimeV2WSConnection) writeMessage(message any) error {
-	return c.enqueueWrite(runtimeV2WSWriteRequest{message: message, result: make(chan error, 1)})
+func (c *runtimeWSConnection) writeMessage(message any) error {
+	return c.enqueueWrite(runtimeWSWriteRequest{message: message, result: make(chan error, 1)})
 }
 
-func (c *runtimeV2WSConnection) writeControl(messageType int, data []byte) error {
-	return c.enqueueWrite(runtimeV2WSWriteRequest{
+func (c *runtimeWSConnection) writeControl(messageType int, data []byte) error {
+	return c.enqueueWrite(runtimeWSWriteRequest{
 		controlType: messageType,
 		controlData: append([]byte(nil), data...),
 		result:      make(chan error, 1),
 	})
 }
 
-func (c *runtimeV2WSConnection) writeClose(code int, reason string) error {
+func (c *runtimeWSConnection) writeClose(code int, reason string) error {
 	return c.writeControl(websocket.CloseMessage, websocket.FormatCloseMessage(code, reason))
 }
 
-func (c *runtimeV2WSConnection) enqueueWrite(request runtimeV2WSWriteRequest) error {
+func (c *runtimeWSConnection) enqueueWrite(request runtimeWSWriteRequest) error {
 	select {
 	case <-c.ctx.Done():
 		return c.ctx.Err()
@@ -807,8 +938,8 @@ func (c *runtimeV2WSConnection) enqueueWrite(request runtimeV2WSWriteRequest) er
 	}
 }
 
-func (c *runtimeV2WSConnection) writeLoop() {
-	ticker := time.NewTicker(runtimeV2WSPingInterval)
+func (c *runtimeWSConnection) writeLoop() {
+	ticker := time.NewTicker(runtimeWSPingInterval)
 	defer ticker.Stop()
 	defer close(c.writerDone)
 	defer c.socket.Close()
@@ -817,14 +948,14 @@ func (c *runtimeV2WSConnection) writeLoop() {
 		case <-c.ctx.Done():
 			return
 		case request := <-c.writes:
-			_ = c.socket.SetWriteDeadline(time.Now().Add(runtimeV2WSWriteWait))
+			_ = c.socket.SetWriteDeadline(time.Now().Add(runtimeWSWriteWait))
 			var err error
 			switch {
 			case request.message != nil:
 				err = c.socket.WriteJSON(request.message)
 			case request.controlType != 0:
 				err = c.socket.WriteControl(
-					request.controlType, request.controlData, time.Now().Add(runtimeV2WSWriteWait),
+					request.controlType, request.controlData, time.Now().Add(runtimeWSWriteWait),
 				)
 			default:
 				err = errors.New("empty Runtime websocket write")
@@ -834,9 +965,9 @@ func (c *runtimeV2WSConnection) writeLoop() {
 				return
 			}
 		case <-ticker.C:
-			_ = c.socket.SetWriteDeadline(time.Now().Add(runtimeV2WSWriteWait))
+			_ = c.socket.SetWriteDeadline(time.Now().Add(runtimeWSWriteWait))
 			if err := c.socket.WriteControl(
-				websocket.PingMessage, nil, time.Now().Add(runtimeV2WSWriteWait),
+				websocket.PingMessage, nil, time.Now().Add(runtimeWSWriteWait),
 			); err != nil {
 				c.cancel()
 				return
@@ -845,19 +976,19 @@ func (c *runtimeV2WSConnection) writeLoop() {
 	}
 }
 
-func (c *runtimeV2WSConnection) cleanup() {
+func (c *runtimeWSConnection) cleanup() {
 	c.cleanupOnce.Do(func() {
 		// Stop claim/heartbeat work before changing durable Session state.
 		c.cancel()
 		if c.maintenanceStarted {
 			select {
 			case <-c.maintenanceDone:
-			case <-time.After(runtimeV2WSCleanupTimeout):
+			case <-time.After(runtimeWSCleanupTimeout):
 				log.Warn().Msg("Runtime websocket maintenance did not stop before cleanup")
 			}
 		}
 		if c.attached {
-			closeCtx, closeCancel := context.WithTimeout(context.Background(), runtimeV2WSCleanupTimeout)
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), runtimeWSCleanupTimeout)
 			detached := false
 			state, closeErr := c.controller.dependencies.Sessions.CloseSession(
 				closeCtx,
@@ -882,7 +1013,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 			// Lease implementations must use the exact offline cleanup path: only
 			// an unaccepted offer may be released; executing Attempts are untouched.
 			if detached && c.sessionPrincipal.RuntimeSessionID != uuid.Nil {
-				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), runtimeV2WSCleanupTimeout)
+				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), runtimeWSCleanupTimeout)
 				if releaseErr := c.controller.dependencies.Leases.ReleaseUnackedOffer(
 					releaseCtx, c.sessionPrincipal, "SESSION_DISCONNECTED",
 				); releaseErr != nil {
@@ -894,7 +1025,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 		_ = c.socket.Close()
 		select {
 		case <-c.writerDone:
-		case <-time.After(runtimeV2WSWriteWait):
+		case <-time.After(runtimeWSWriteWait):
 		}
 	})
 }

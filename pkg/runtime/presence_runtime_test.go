@@ -11,7 +11,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-func TestRuntimeV2ControllerPresenceFollowsAttachHeartbeatAndClose(t *testing.T) {
+func TestRuntimeControllerPresenceFollowsAttachHeartbeatAndClose(t *testing.T) {
 	coreID := uuid.New()
 	store := &runtimePresenceStoreFake{}
 	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{

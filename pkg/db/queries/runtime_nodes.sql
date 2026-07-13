@@ -10,7 +10,7 @@
 -- Pass the complete scope to each phase; every query sorts UUIDs itself, so
 -- callers must not rely on input-array order or lock a principal first.
 
--- name: HasActiveRuntimeV2SessionForAgent :one
+-- name: HasActiveRuntimeSessionForAgent :one
 -- Availability is PostgreSQL truth. Redis presence is only an advisory hint.
 -- Keep this query parameter-free beyond agent_id so every caller applies the
 -- same heartbeat and current-contract boundary.

@@ -24,34 +24,34 @@ func TestRuntimeDeadlineReconcilerRejectsInvalidConfigurationAndBatch(t *testing
 	require.True(t, errors.Is(err, ErrRuntimeReconcilerNotConfigured))
 }
 
-func TestRuntimeV2ReconcileTerminalPrecedence(t *testing.T) {
+func TestRuntimeReconcileTerminalPrecedence(t *testing.T) {
 	now := time.Date(2026, 7, 11, 20, 0, 0, 0, time.UTC)
-	base := db.RuntimeV2ReconcileLockedRunRow{
+	base := db.RuntimeReconcileLockedRunRow{
 		ID: uuid.New(), DatabaseNow: now,
 		DispatchDeadlineAt: now.Add(time.Minute), RunDeadlineAt: now.Add(2 * time.Minute),
 		OfferCount: 1, MaxOfferCount: 2, AttemptCount: 1, MaxAttempts: 3,
 	}
 
-	require.Nil(t, runtimeV2DeadlineTerminalForRun(base))
-	require.Nil(t, runtimeV2OfferTerminalForRun(base, db.RunAttempt{OfferExpiresAt: now}))
-	require.Nil(t, runtimeV2ExecutionTerminalForRun(base))
+	require.Nil(t, runtimeDeadlineTerminalForRun(base))
+	require.Nil(t, runtimeOfferTerminalForRun(base, db.RunAttempt{OfferExpiresAt: now}))
+	require.Nil(t, runtimeExecutionTerminalForRun(base))
 
 	dispatchDue := base
 	dispatchDue.DispatchDeadlineAt = now
-	terminal := runtimeV2ExecutionTerminalForRun(dispatchDue)
+	terminal := runtimeExecutionTerminalForRun(dispatchDue)
 	require.NotNil(t, terminal)
 	require.Equal(t, "timeout", terminal.status)
 	require.Equal(t, "RUNTIME_DISPATCH_TIMEOUT", terminal.errorCode)
 
 	runDue := dispatchDue
 	runDue.RunDeadlineAt = now
-	terminal = runtimeV2ExecutionTerminalForRun(runDue)
+	terminal = runtimeExecutionTerminalForRun(runDue)
 	require.NotNil(t, terminal)
 	require.Equal(t, "RUN_DEADLINE_EXCEEDED", terminal.errorCode)
 
 	exhausted := base
 	exhausted.AttemptCount = exhausted.MaxAttempts
-	terminal = runtimeV2ExecutionTerminalForRun(exhausted)
+	terminal = runtimeExecutionTerminalForRun(exhausted)
 	require.NotNil(t, terminal)
 	require.Equal(t, "failed", terminal.status)
 	require.Equal(t, "dead_letter", terminal.dispatchState)
@@ -59,7 +59,7 @@ func TestRuntimeV2ReconcileTerminalPrecedence(t *testing.T) {
 
 	offerExhausted := base
 	offerExhausted.OfferCount = offerExhausted.MaxOfferCount
-	terminal = runtimeV2OfferTerminalForRun(offerExhausted, db.RunAttempt{OfferExpiresAt: now})
+	terminal = runtimeOfferTerminalForRun(offerExhausted, db.RunAttempt{OfferExpiresAt: now})
 	require.NotNil(t, terminal)
 	require.Equal(t, "RUNTIME_DISPATCH_TIMEOUT", terminal.errorCode)
 }

@@ -20,7 +20,7 @@ import (
 
 func TestEventStoreReliableAppendAndContinuity(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	store := runtime.NewEventStore(pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 
@@ -298,7 +298,7 @@ func TestEventStoreReliableAppendAndContinuity(t *testing.T) {
 
 func TestRuntimeSessionReaperClosesCrashedPullGenerationWithoutFinishingAttempt(t *testing.T) {
 	pool := setupTestDB(t)
-	requireReliableRuntimeV2Schema(t, pool)
+	requireReliableRuntimeSchema(t, pool)
 	fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
 	require.NotNil(t, fixture.identity.RuntimeSessionID)
 	sessionID := *fixture.identity.RuntimeSessionID

@@ -106,11 +106,11 @@ func TestResolveRuntimeWorkerSessionPrincipalIsFailClosed(t *testing.T) {
 	sessionID, nodeID, agentID := uuid.New(), uuid.New(), uuid.New()
 	credentialID, coreID := uuid.New(), uuid.New()
 	attachmentID := uuid.New()
-	features := append([]string(nil), runtimeV2RequiredFeatures...)
+	features := append([]string(nil), runtimeRequiredFeatures...)
 	dbtx := &fakeDBTX{row: fakeRow{values: []any{
 		sessionID, nodeID, agentID, credentialID, "worker-resolve", int64(7), coreID,
 		"cert-resolve", "spki-resolve", "v2", int32(2),
-		"openlinker.runtime.v2", runtimeV2ContractDigest, features,
+		"openlinker.runtime.v2", runtimeContractDigest, features,
 		"active", now, attachmentID, now,
 	}}}
 	q := New(dbtx)
@@ -188,7 +188,7 @@ func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 		"r.run_deadline_at > clock_timestamp()",
 		"FOR UPDATE OF r SKIP LOCKED",
 	} {
-		if !strings.Contains(lockNextClaimableRuntimeV2RunForAgent, fragment) {
+		if !strings.Contains(lockNextClaimableRuntimeRunForAgent, fragment) {
 			t.Fatalf("claim query missing %q", fragment)
 		}
 	}

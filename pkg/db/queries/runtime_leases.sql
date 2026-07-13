@@ -168,7 +168,7 @@ WHERE r.active_attempt_id = a.id
   AND r.run_deadline_at > clock_timestamp()
 FOR UPDATE OF a;
 
--- name: LockNextClaimableRuntimeV2RunForAgent :one
+-- name: LockNextClaimableRuntimeRunForAgent :one
 SELECT r.id, r.user_id, r.agent_id, r.input, r.request_metadata,
        r.connection_mode_snapshot, r.dispatch_state, r.offer_count,
        r.max_offer_count, r.attempt_count, r.max_attempts,

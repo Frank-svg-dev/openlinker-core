@@ -349,7 +349,7 @@ type metrics struct {
 	httpOps      []httpMetric
 	errorSamples []string
 	c            counters
-	runtime      *runtimeV2Metrics
+	runtime      *runtimeMetrics
 }
 
 type phaseTimestamps struct {
@@ -747,7 +747,7 @@ func main() {
 				fail(workerErr)
 			}
 			workerWG.Add(1)
-			go func(worker *runtimeV2Worker, connectDelay time.Duration) {
+			go func(worker *runtimeWorker, connectDelay time.Duration) {
 				defer workerWG.Done()
 				if connectDelay > 0 {
 					sleepContext(workerCtx, connectDelay)

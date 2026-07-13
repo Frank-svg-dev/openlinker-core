@@ -554,7 +554,7 @@ SELECT
 -- name: ListPublicAgents :many
 -- 市场列表：visibility=public AND lifecycle_status=active。
 -- $1 tags TEXT[]（空数组表示不筛选）；$2 keyword TEXT（空串表示不搜索）；$3 limit；$4 offset；$5 callable_only；$6 skill_ids TEXT[]。
--- Keep active_runtime_agents aligned with HasActiveRuntimeV2SessionForAgent.
+-- Keep active_runtime_agents aligned with HasActiveRuntimeSessionForAgent.
 WITH active_runtime_agents AS (
     SELECT DISTINCT s.agent_id
     FROM runtime_sessions s
@@ -740,7 +740,7 @@ END ASC,
 LIMIT $3 OFFSET $4;
 
 -- name: CountPublicAgents :one
--- Keep active_runtime_agents aligned with HasActiveRuntimeV2SessionForAgent.
+-- Keep active_runtime_agents aligned with HasActiveRuntimeSessionForAgent.
 WITH active_runtime_agents AS (
     SELECT DISTINCT s.agent_id
     FROM runtime_sessions s

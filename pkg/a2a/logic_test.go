@@ -888,7 +888,7 @@ func TestA2ARunEventMessageFallbacks(t *testing.T) {
 	}
 }
 
-func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
+func TestA2ARuntimeWorkbenchAndPushHelpers(t *testing.T) {
 	if svc := NewService(nil, nil); svc == nil || svc.queries == nil {
 		t.Fatalf("NewService did not initialize queries: %#v", svc)
 	}
@@ -911,12 +911,12 @@ func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
 		t.Fatalf("draining workbench state = %q, %q, %t", connection, availability, callable)
 	}
 
-	diagnostics := runtimeWorkbenchDiagnosticsV2(db.Agent{ConnectionMode: "direct_http"}, runtimeWorkbenchSnapshot{}, nil)
+	diagnostics := runtimeWorkbenchDiagnostics(db.Agent{ConnectionMode: "direct_http"}, runtimeWorkbenchSnapshot{}, nil)
 	if len(diagnostics) != 1 || diagnostics[0].Code != "runtime_not_applicable" {
 		t.Fatalf("direct diagnostics = %#v", diagnostics)
 	}
 	dispatchTimeout := "RUNTIME_DISPATCH_TIMEOUT"
-	diagnostics = runtimeWorkbenchDiagnosticsV2(
+	diagnostics = runtimeWorkbenchDiagnostics(
 		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime"},
 		runtimeWorkbenchSnapshot{pendingRunCount: 2},
 		[]RuntimeWorkbenchRun{{ErrorCode: &dispatchTimeout}},
@@ -927,7 +927,7 @@ func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
 			t.Fatalf("missing diagnostic %q in %#v", want, diagnostics)
 		}
 	}
-	diagnostics = runtimeWorkbenchDiagnosticsV2(
+	diagnostics = runtimeWorkbenchDiagnostics(
 		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime"},
 		runtimeWorkbenchSnapshot{activeSessionCount: 1, readySessionCount: 1}, nil,
 	)
