@@ -140,12 +140,18 @@ RETURNING id, workflow_id, user_id, status, input, output, error_message,
 -- name: PauseWorkflowRun :one
 UPDATE workflow_runs
 SET status = 'paused',
-    claimed_at = NULL,
+    claimed_at = CASE
+        WHEN status = 'running' THEN claimed_at
+        ELSE NULL
+    END,
     next_retry_at = NULL,
     last_worker_error = NULL,
     updated_at = NOW()
 WHERE id = $1
-  AND status IN ('pending', 'running')
+  AND (
+      status = 'pending'
+      OR (status = 'running' AND claimed_at IS NOT NULL)
+  )
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
@@ -161,9 +167,19 @@ SET status = 'pending',
     updated_at = NOW()
 WHERE id = $1
   AND status = 'paused'
+  AND claimed_at IS NULL
 RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
+
+-- name: ReleasePausedWorkflowRunClaim :execrows
+UPDATE workflow_runs
+SET claimed_at = NULL,
+    updated_at = NOW()
+WHERE id = sqlc.arg(id)
+  AND status = 'paused'
+  AND claimed_at = sqlc.arg(expected_claimed_at)
+  AND attempt_count = sqlc.arg(expected_attempt_count);
 
 -- name: CancelWorkflowRun :one
 UPDATE workflow_runs

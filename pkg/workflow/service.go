@@ -51,6 +51,7 @@ const (
 
 const workflowNodeRunPollInterval = 250 * time.Millisecond
 const workflowNodeRunPollMaxLoops = 240
+const workflowRunClaimReleaseTimeout = 5 * time.Second
 
 func normalizeRunStatus(status string) string {
 	return strings.ToLower(strings.TrimSpace(status))
@@ -652,7 +653,11 @@ func (s *Service) PauseWorkflowRun(ctx context.Context, userID, workflowRunID uu
 	switch run.Status {
 	case workflowRunStatusPaused:
 		return s.GetWorkflowRun(ctx, userID, workflowRunID)
-	case workflowRunStatusPending, workflowRunStatusRunning:
+	case workflowRunStatusPending:
+	case workflowRunStatusRunning:
+		if run.ClaimedAt == nil {
+			return nil, httpx.Conflict("同步执行中的 workflow_run 不支持暂停")
+		}
 	default:
 		return nil, httpx.Conflict("只有 pending / running workflow_run 可以暂停")
 	}
@@ -674,9 +679,19 @@ func (s *Service) ResumeWorkflowRun(ctx context.Context, userID, workflowRunID u
 	if run.Status != workflowRunStatusPaused {
 		return nil, httpx.Conflict("只有 paused workflow_run 可以恢复")
 	}
+	if run.ClaimedAt != nil {
+		return nil, httpx.Conflict("workflow_run 仍在完成暂停，请稍后再恢复")
+	}
 	if _, err := s.queries.ResumeWorkflowRun(ctx, workflowRunID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return s.GetWorkflowRun(ctx, userID, workflowRunID)
+			current, getErr := s.GetWorkflowRun(ctx, userID, workflowRunID)
+			if getErr != nil {
+				return nil, getErr
+			}
+			if current.Status == workflowRunStatusPaused && current.ClaimedAt != "" {
+				return nil, httpx.Conflict("workflow_run 仍在完成暂停，请稍后再恢复")
+			}
+			return current, nil
 		}
 		log.Error().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.ResumeWorkflowRun")
 		return nil, httpx.Internal("恢复 workflow_run 失败")
@@ -1141,6 +1156,10 @@ func (s *Service) RequeueStaleWorkflowRuns(ctx context.Context, staleAfter time.
 }
 
 func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.WorkflowRun) error {
+	if run.ClaimedAt != nil {
+		defer s.releasePausedWorkflowRunClaim(ctx, run.ID, *run.ClaimedAt, run.AttemptCount)
+	}
+
 	w, nodes, err := s.getWorkflowDefinition(ctx, run.WorkflowID)
 	if err != nil {
 		return s.failWorkflowRun(ctx, run.ID, err.Error())
@@ -1168,6 +1187,18 @@ func (s *Service) executeClaimedWorkflowRun(ctx context.Context, run db.Workflow
 	}
 	_, err = s.executeWorkflowRun(ctx, w, nodes, graph, run, input)
 	return err
+}
+
+func (s *Service) releasePausedWorkflowRunClaim(ctx context.Context, workflowRunID uuid.UUID, claimedAt time.Time, attemptCount int32) {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workflowRunClaimReleaseTimeout)
+	defer cancel()
+	if _, err := s.queries.ReleasePausedWorkflowRunClaim(releaseCtx, db.ReleasePausedWorkflowRunClaimParams{
+		ID:                   workflowRunID,
+		ExpectedClaimedAt:    claimedAt,
+		ExpectedAttemptCount: attemptCount,
+	}); err != nil {
+		log.Warn().Err(err).Str("workflow_run_id", workflowRunID.String()).Msg("workflow.releasePausedWorkflowRunClaim")
+	}
 }
 
 func (s *Service) getWorkflowForOwner(ctx context.Context, userID, workflowID uuid.UUID) (db.Workflow, []db.WorkflowNode, error) {

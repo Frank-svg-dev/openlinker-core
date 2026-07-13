@@ -349,12 +349,18 @@ func (q *Queries) MarkWorkflowRunFailed(ctx context.Context, arg MarkWorkflowRun
 const pauseWorkflowRun = `-- name: PauseWorkflowRun :one
 	UPDATE workflow_runs
 	SET status = 'paused',
-	    claimed_at = NULL,
+	    claimed_at = CASE
+	        WHEN status = 'running' THEN claimed_at
+	        ELSE NULL
+	    END,
 	    next_retry_at = NULL,
 	    last_worker_error = NULL,
 	    updated_at = NOW()
 	WHERE id = $1
-	  AND status IN ('pending', 'running')
+	  AND (
+	      status = 'pending'
+	      OR (status = 'running' AND claimed_at IS NOT NULL)
+	  )
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
@@ -377,6 +383,7 @@ const resumeWorkflowRun = `-- name: ResumeWorkflowRun :one
 	    updated_at = NOW()
 	WHERE id = $1
 	  AND status = 'paused'
+	  AND claimed_at IS NULL
 	RETURNING id, workflow_id, user_id, status, input, output, error_message,
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
@@ -386,6 +393,30 @@ func (q *Queries) ResumeWorkflowRun(ctx context.Context, id uuid.UUID) (Workflow
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err
+}
+
+const releasePausedWorkflowRunClaim = `-- name: ReleasePausedWorkflowRunClaim :execrows
+UPDATE workflow_runs
+SET claimed_at = NULL,
+    updated_at = NOW()
+WHERE id = $1
+  AND status = 'paused'
+  AND claimed_at = $2
+  AND attempt_count = $3
+`
+
+type ReleasePausedWorkflowRunClaimParams struct {
+	ID                   uuid.UUID `db:"id" json:"id"`
+	ExpectedClaimedAt    time.Time `db:"expected_claimed_at" json:"expected_claimed_at"`
+	ExpectedAttemptCount int32     `db:"expected_attempt_count" json:"expected_attempt_count"`
+}
+
+func (q *Queries) ReleasePausedWorkflowRunClaim(ctx context.Context, arg ReleasePausedWorkflowRunClaimParams) (int64, error) {
+	tag, err := q.db.Exec(ctx, releasePausedWorkflowRunClaim, arg.ID, arg.ExpectedClaimedAt, arg.ExpectedAttemptCount)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
 }
 
 const cancelWorkflowRun = `-- name: CancelWorkflowRun :one

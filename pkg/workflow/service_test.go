@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	runtimemod "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
@@ -751,6 +752,179 @@ func TestPauseResumeWorkflowRunControlsWorkerClaim(t *testing.T) {
 	require.Equal(t, "success", done.Status)
 	require.Equal(t, int32(1), done.AttemptCount)
 	require.Len(t, done.Steps, 1)
+}
+
+func TestPauseResumeRunningWorkflowWaitsForClaimReleaseAndReusesChildRun(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	agentCalled := make(chan struct{}, 1)
+	releaseAgent := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseAgent) }) }
+	var callsMu sync.Mutex
+	callCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var req runtimemod.AgentRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		callsMu.Lock()
+		callCount++
+		callsMu.Unlock()
+		select {
+		case agentCalled <- struct{}{}:
+		default:
+		}
+		<-releaseAgent
+		w.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{
+			"output": map[string]interface{}{
+				"step":    req.Input["node_key"],
+				"summary": "paused child completed once",
+			},
+		}))
+	}))
+	t.Cleanup(release)
+	t.Cleanup(server.Close)
+
+	userID := insertWorkflowUser(t, pool, "wf-running-pause-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-running-pause-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, server.URL)
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{
+		RunTimeoutSeconds:       5,
+		AllowLocalHTTPEndpoints: true,
+	})
+	runtimeSvc.ConfigureCoreRuntime(uuid.New())
+	svc := workflow.NewService(pool, runtimeSvc)
+
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Running pause handshake",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+	queued, err := svc.StartWorkflowRun(context.Background(), userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "running pause"},
+	})
+	require.NoError(t, err)
+	runID := uuid.MustParse(queued.ID)
+
+	type claimResult struct {
+		claimed bool
+		err     error
+	}
+	workerDone := make(chan claimResult, 1)
+	go func() {
+		claimed, claimErr := svc.ClaimAndRunPendingWorkflow(context.Background())
+		workerDone <- claimResult{claimed: claimed, err: claimErr}
+	}()
+
+	select {
+	case <-agentCalled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("workflow worker did not call Agent")
+	}
+
+	paused, err := svc.PauseWorkflowRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "paused", paused.Status)
+	require.NotEmpty(t, paused.ClaimedAt, "running pause must retain the active worker claim")
+
+	_, err = svc.ResumeWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+
+	release()
+	select {
+	case result := <-workerDone:
+		require.NoError(t, result.err)
+		require.True(t, result.claimed)
+	case <-time.After(5 * time.Second):
+		t.Fatal("workflow worker did not converge after pause")
+	}
+
+	var settled *workflow.WorkflowRunResponse
+	require.Eventually(t, func() bool {
+		got, getErr := svc.GetWorkflowRun(context.Background(), userID, runID)
+		if getErr != nil {
+			return false
+		}
+		settled = got
+		return got.Status == "paused" && got.ClaimedAt == "" && len(got.Steps) == 1 && got.Steps[0].Status == "success" && got.Steps[0].RunID != ""
+	}, 3*time.Second, 20*time.Millisecond)
+	pausedChildRunID := settled.Steps[0].RunID
+
+	resumed, err := svc.ResumeWorkflowRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "pending", resumed.Status)
+	claimed, err := svc.ClaimAndRunPendingWorkflow(context.Background())
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	done, err := svc.GetWorkflowRun(context.Background(), userID, runID)
+	require.NoError(t, err)
+	require.Equal(t, "success", done.Status)
+	require.Equal(t, int32(2), done.AttemptCount)
+	require.Len(t, done.Steps, 1)
+	require.Equal(t, pausedChildRunID, done.Steps[0].RunID)
+	callsMu.Lock()
+	require.Equal(t, 1, callCount, "resume must replay the durable child Run instead of invoking the Agent twice")
+	callsMu.Unlock()
+}
+
+func TestReleasePausedWorkflowRunClaimRejectsStaleFence(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+
+	userID := insertWorkflowUser(t, pool, "wf-claim-fence-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-claim-fence-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "http://127.0.0.1:18080")
+	svc := workflow.NewService(pool, nil)
+	created, err := svc.CreateWorkflow(context.Background(), userID, &workflow.CreateWorkflowRequest{
+		Name: "Claim fence workflow",
+		Nodes: []workflow.WorkflowNodeRequest{
+			{Key: "worker", Title: "Worker", AgentID: agentID},
+		},
+	})
+	require.NoError(t, err)
+
+	runID := uuid.New()
+	claimA := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)
+	claimB := claimA.Add(30 * time.Second)
+	_, err = pool.Exec(context.Background(), `
+		INSERT INTO workflow_runs (
+			id, workflow_id, user_id, status, input, attempt_count, max_attempts, claimed_at
+		) VALUES ($1, $2, $3, 'paused', '{}'::jsonb, 2, 3, $4)`,
+		runID, uuid.MustParse(created.ID), userID, claimB)
+	require.NoError(t, err)
+
+	queries := db.New(pool)
+	requeued, err := svc.RequeueStaleWorkflowRuns(context.Background(), 0)
+	require.NoError(t, err)
+	require.Zero(t, requeued, "stale recovery must leave paused claims fail-closed")
+
+	released, err := queries.ReleasePausedWorkflowRunClaim(context.Background(), db.ReleasePausedWorkflowRunClaimParams{
+		ID: runID, ExpectedClaimedAt: claimA, ExpectedAttemptCount: 1,
+	})
+	require.NoError(t, err)
+	require.Zero(t, released, "stale worker A must not release worker B's claim")
+
+	released, err = queries.ReleasePausedWorkflowRunClaim(context.Background(), db.ReleasePausedWorkflowRunClaimParams{
+		ID: runID, ExpectedClaimedAt: claimB, ExpectedAttemptCount: 1,
+	})
+	require.NoError(t, err)
+	require.Zero(t, released, "claim timestamp alone must not bypass the attempt fence")
+
+	var storedClaim time.Time
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT claimed_at FROM workflow_runs WHERE id=$1`, runID).Scan(&storedClaim))
+	require.True(t, storedClaim.Equal(claimB))
+
+	released, err = queries.ReleasePausedWorkflowRunClaim(context.Background(), db.ReleasePausedWorkflowRunClaimParams{
+		ID: runID, ExpectedClaimedAt: claimB, ExpectedAttemptCount: 2,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), released)
+	var claimReleased bool
+	require.NoError(t, pool.QueryRow(context.Background(), `SELECT claimed_at IS NULL FROM workflow_runs WHERE id=$1`, runID).Scan(&claimReleased))
+	require.True(t, claimReleased)
 }
 
 func TestCancelRunningWorkflowRunPreventsSuccessOverwrite(t *testing.T) {

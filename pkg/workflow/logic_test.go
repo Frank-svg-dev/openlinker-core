@@ -586,6 +586,24 @@ func TestWorkflowStateControlErrorEdges(t *testing.T) {
 		})
 	}
 
+	claimedAt := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	claimedPausedValues := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusPaused, nil)
+	claimedPausedValues[14] = &claimedAt
+	claimedPausedDB := &workflowFakeDBTX{queryRowRows: []workflowFakeRow{{values: claimedPausedValues}}}
+	_, err := (&Service{queries: db.New(claimedPausedDB)}).ResumeWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+	if claimedPausedDB.queryRowCalls != 1 {
+		t.Fatalf("resume with active pause claim issued %d DB calls, want only owner read", claimedPausedDB.queryRowCalls)
+	}
+
+	synchronousRunningValues := workflowFakeRunValues(runID, workflowID, userID, workflowRunStatusRunning, nil)
+	synchronousRunningDB := &workflowFakeDBTX{queryRowRows: []workflowFakeRow{{values: synchronousRunningValues}}}
+	_, err = (&Service{queries: db.New(synchronousRunningDB)}).PauseWorkflowRun(context.Background(), userID, runID)
+	requireWorkflowHTTPStatus(t, err, http.StatusConflict)
+	if synchronousRunningDB.queryRowCalls != 1 {
+		t.Fatalf("pause without a worker claim issued %d DB calls, want only owner read", synchronousRunningDB.queryRowCalls)
+	}
+
 	for _, tc := range []struct {
 		name   string
 		status string
@@ -1360,6 +1378,30 @@ func TestWorkflowHandlerValidationAndRoutes(t *testing.T) {
 	}
 }
 
+func TestReleasePausedWorkflowRunClaimBestEffort(t *testing.T) {
+	runID := uuid.New()
+	claimedAt := time.Date(2026, 6, 22, 10, 30, 0, 0, time.UTC)
+	dbtx := &workflowFakeDBTX{execRowsAffected: 1}
+	(&Service{queries: db.New(dbtx)}).releasePausedWorkflowRunClaim(context.Background(), runID, claimedAt, 2)
+	if !strings.Contains(dbtx.execSQL, "-- name: ReleasePausedWorkflowRunClaim") {
+		t.Fatalf("release query = %q", dbtx.execSQL)
+	}
+	if !reflect.DeepEqual(dbtx.execArgs, []any{runID, claimedAt, int32(2)}) {
+		t.Fatalf("release args = %#v", dbtx.execArgs)
+	}
+
+	failing := &workflowFakeDBTX{execErr: errors.New("release failed")}
+	(&Service{queries: db.New(failing)}).releasePausedWorkflowRunClaim(context.Background(), runID, claimedAt, 2)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	detached := &workflowFakeDBTX{execRowsAffected: 1}
+	(&Service{queries: db.New(detached)}).releasePausedWorkflowRunClaim(canceledCtx, runID, claimedAt, 2)
+	if detached.execContextErr != nil {
+		t.Fatalf("best-effort release inherited canceled worker context: %v", detached.execContextErr)
+	}
+}
+
 type workflowHandlerRequest struct {
 	method  string
 	target  string
@@ -1425,6 +1467,7 @@ type workflowFakeDBTX struct {
 	queryResults     []workflowFakeQueryResult
 	queryCalls       int
 	execErr          error
+	execContextErr   error
 	execRowsAffected int64
 	queryRowSQL      string
 	queryRowArgs     []any
@@ -1434,9 +1477,10 @@ type workflowFakeDBTX struct {
 	execArgs         []any
 }
 
-func (f *workflowFakeDBTX) Exec(_ context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
+func (f *workflowFakeDBTX) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
 	f.execSQL = sql
 	f.execArgs = append([]any(nil), args...)
+	f.execContextErr = ctx.Err()
 	if f.execErr != nil {
 		return pgconn.CommandTag{}, f.execErr
 	}

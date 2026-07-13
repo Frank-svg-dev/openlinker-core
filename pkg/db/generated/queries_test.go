@@ -2312,6 +2312,12 @@ func TestGeneratedExecQueriesPropagateExecErrors(t *testing.T) {
 			_, err := q.RequeueStaleWorkflowRuns(ctx, time.Date(2026, 6, 20, 20, 0, 0, 0, time.UTC))
 			return err
 		}},
+		{name: "ReleasePausedWorkflowRunClaim", run: func() error {
+			_, err := q.ReleasePausedWorkflowRunClaim(ctx, ReleasePausedWorkflowRunClaimParams{
+				ID: id, ExpectedClaimedAt: time.Now(), ExpectedAttemptCount: 2,
+			})
+			return err
+		}},
 	}
 
 	for _, tt := range tests {
@@ -2530,6 +2536,12 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("PauseWorkflowRun error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "PauseWorkflowRun")
+	if !strings.Contains(dbtx.queryRowSQL, "WHEN status = 'running' THEN claimed_at") {
+		t.Fatalf("PauseWorkflowRun must preserve a running claim: %s", dbtx.queryRowSQL)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "status = 'running' AND claimed_at IS NOT NULL") {
+		t.Fatalf("PauseWorkflowRun must reject unclaimed synchronous runs: %s", dbtx.queryRowSQL)
+	}
 	if pausedRun.ID != runID || pausedRun.Status != "paused" {
 		t.Fatalf("PauseWorkflowRun scan = %#v", pausedRun)
 	}
@@ -2548,8 +2560,24 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("ResumeWorkflowRun error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "ResumeWorkflowRun")
+	if !strings.Contains(dbtx.queryRowSQL, "AND claimed_at IS NULL") {
+		t.Fatalf("ResumeWorkflowRun must wait for claim release: %s", dbtx.queryRowSQL)
+	}
 	if resumedRun.ID != runID || resumedRun.Status != "pending" || resumedRun.NextRetryAt == nil {
 		t.Fatalf("ResumeWorkflowRun scan = %#v", resumedRun)
+	}
+
+	if rows, err := q.ReleasePausedWorkflowRunClaim(context.Background(), ReleasePausedWorkflowRunClaimParams{
+		ID: runID, ExpectedClaimedAt: claimedAt, ExpectedAttemptCount: 2,
+	}); err != nil || rows != 7 {
+		t.Fatalf("ReleasePausedWorkflowRunClaim = %d, %v", rows, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "ReleasePausedWorkflowRunClaim")
+	if !strings.Contains(dbtx.execSQL, "claimed_at = $2") || !strings.Contains(dbtx.execSQL, "attempt_count = $3") {
+		t.Fatalf("ReleasePausedWorkflowRunClaim must fence claim and attempt identity: %s", dbtx.execSQL)
+	}
+	if !reflect.DeepEqual(dbtx.execArgs, []any{runID, claimedAt, int32(2)}) {
+		t.Fatalf("ReleasePausedWorkflowRunClaim args = %#v", dbtx.execArgs)
 	}
 
 	canceledRunValues := append([]any{}, runValues...)
@@ -2629,6 +2657,9 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("RequeueStaleWorkflowRuns = %d, %v", rows, err)
 	}
 	requireSQLName(t, dbtx.execSQL, "RequeueStaleWorkflowRuns")
+	if !strings.Contains(dbtx.execSQL, "WHERE status = 'running'") || strings.Contains(dbtx.execSQL, "status IN ('running', 'paused')") {
+		t.Fatalf("RequeueStaleWorkflowRuns must leave paused claims fail-closed: %s", dbtx.execSQL)
+	}
 	if !reflect.DeepEqual(dbtx.execArgs, []any{before}) {
 		t.Fatalf("RequeueStaleWorkflowRuns args = %#v", dbtx.execArgs)
 	}
