@@ -2021,15 +2021,17 @@ func (s *Service) DryRun(
 }
 
 type runArtifactDraft struct {
-	ArtifactType  string
-	Title         string
-	Content       map[string]interface{}
-	Visibility    string
-	MimeType      string
-	FileURI       string
-	FileName      string
-	FileSHA256    string
-	FileSizeBytes *int64
+	SourceArtifactID string
+	ArtifactType     string
+	Title            string
+	Content          map[string]interface{}
+	Visibility       string
+	MimeType         string
+	FileURI          string
+	FileName         string
+	FileSHA256       string
+	FileSizeBytes    *int64
+	Fallback         bool
 }
 
 type runArtifactDeltaDraft struct {
@@ -2049,22 +2051,53 @@ type runArtifactDeltaDraft struct {
 }
 
 func createRunArtifacts(ctx context.Context, q *db.Queries, runID uuid.UUID, output map[string]interface{}) error {
-	for _, artifact := range runArtifactsFromOutput(output) {
+	artifacts := runArtifactsFromOutput(output)
+	seenSourceIDs := make(map[string]struct{})
+	for _, artifact := range artifacts {
+		if artifact.SourceArtifactID == "" {
+			continue
+		}
+		if _, duplicate := seenSourceIDs[artifact.SourceArtifactID]; duplicate {
+			return fmt.Errorf("duplicate result artifact_id %q", artifact.SourceArtifactID)
+		}
+		seenSourceIDs[artifact.SourceArtifactID] = struct{}{}
+	}
+	for _, artifact := range artifacts {
+		if artifact.Fallback {
+			// A streamed artifact is already the durable output. Do not add a
+			// second generic "Agent output" record merely because the final Result
+			// has no explicit artifact list.
+			existing, err := q.ListRunArtifactsByRun(ctx, runID)
+			if err != nil {
+				return err
+			}
+			if len(existing) > 0 {
+				continue
+			}
+		}
 		raw, err := json.Marshal(artifact.Content)
 		if err != nil {
 			return err
 		}
+		var sourceArtifactID *string
+		if artifact.SourceArtifactID != "" {
+			// The stable source identity lets a final Result replace the snapshot
+			// projected from run.artifact.delta while retaining its chunk history.
+			sourceID := artifact.SourceArtifactID
+			sourceArtifactID = &sourceID
+		}
 		if _, err := q.CreateRunArtifact(ctx, db.CreateRunArtifactParams{
-			RunID:         runID,
-			ArtifactType:  artifact.ArtifactType,
-			Title:         artifact.Title,
-			Content:       raw,
-			Visibility:    artifact.Visibility,
-			MimeType:      stringPtrOrNil(artifact.MimeType),
-			FileUri:       stringPtrOrNil(artifact.FileURI),
-			FileName:      stringPtrOrNil(artifact.FileName),
-			FileSha256:    stringPtrOrNil(artifact.FileSHA256),
-			FileSizeBytes: artifact.FileSizeBytes,
+			RunID:            runID,
+			ArtifactType:     artifact.ArtifactType,
+			Title:            artifact.Title,
+			Content:          raw,
+			Visibility:       artifact.Visibility,
+			SourceArtifactID: sourceArtifactID,
+			MimeType:         stringPtrOrNil(artifact.MimeType),
+			FileUri:          stringPtrOrNil(artifact.FileURI),
+			FileName:         stringPtrOrNil(artifact.FileName),
+			FileSha256:       stringPtrOrNil(artifact.FileSHA256),
+			FileSizeBytes:    artifact.FileSizeBytes,
 		}); err != nil {
 			return err
 		}
@@ -2198,10 +2231,21 @@ func runArtifactsFromOutput(output map[string]interface{}) []runArtifactDraft {
 		Title:        "Agent 输出",
 		Content:      output,
 		Visibility:   "private",
+		Fallback:     true,
 	}}
 }
 
 func artifactDraftFromMap(raw map[string]interface{}, fallbackTitle string) runArtifactDraft {
+	sourceID := coalesceArtifactString(raw, "artifact_id", "")
+	if sourceID == "" {
+		sourceID = coalesceArtifactString(raw, "source_artifact_id", "")
+	}
+	if sourceID == "" {
+		sourceID = coalesceArtifactString(raw, "id", "")
+	}
+	if sourceID != "" {
+		sourceID = normalizeArtifactSourceID(sourceID)
+	}
 	title := normalizeArtifactTitle(coalesceArtifactString(raw, "title", fallbackTitle))
 	artifactType := coalesceArtifactString(raw, "artifact_type", "")
 	if artifactType == "" {
@@ -2246,15 +2290,16 @@ func artifactDraftFromMap(raw map[string]interface{}, fallbackTitle string) runA
 		}
 	}
 	return runArtifactDraft{
-		ArtifactType:  artifactType,
-		Title:         title,
-		Content:       content,
-		Visibility:    visibility,
-		MimeType:      meta.MimeType,
-		FileURI:       meta.FileURI,
-		FileName:      meta.FileName,
-		FileSHA256:    meta.FileSHA256,
-		FileSizeBytes: meta.FileSizeBytes,
+		SourceArtifactID: sourceID,
+		ArtifactType:     artifactType,
+		Title:            title,
+		Content:          content,
+		Visibility:       visibility,
+		MimeType:         meta.MimeType,
+		FileURI:          meta.FileURI,
+		FileName:         meta.FileName,
+		FileSHA256:       meta.FileSHA256,
+		FileSizeBytes:    meta.FileSizeBytes,
 	}
 }
 

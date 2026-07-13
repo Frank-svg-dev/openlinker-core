@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
@@ -25,6 +26,7 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 	request := successfulRuntimeResult(fixture, map[string]any{
 		"answer": "one terminal transaction",
 		"artifacts": []any{map[string]any{
+			"artifact_id":   "runtime-result-evidence",
 			"artifact_type": "json",
 			"title":         "Runtime result evidence",
 			"visibility":    "public_example",
@@ -93,14 +95,15 @@ func TestResultFinalizerConcurrentSuccessIsExactlyOnce(t *testing.T) {
 	require.Equal(t, int32(1), totalCalls)
 	require.Equal(t, 1, availabilitySuccesses)
 	var artifactCount int
-	var artifactTitle, artifactVisibility string
+	var artifactTitle, artifactVisibility, artifactSourceID string
 	require.NoError(t, pool.QueryRow(context.Background(), `
-		SELECT COUNT(*), MIN(title), MIN(visibility)
+		SELECT COUNT(*), MIN(title), MIN(visibility), MIN(source_artifact_id)
 		FROM run_artifacts WHERE run_id = $1`, fixture.identity.RunID).
-		Scan(&artifactCount, &artifactTitle, &artifactVisibility))
+		Scan(&artifactCount, &artifactTitle, &artifactVisibility, &artifactSourceID))
 	require.Equal(t, 1, artifactCount)
 	require.Equal(t, "Runtime result evidence", artifactTitle)
 	require.Equal(t, "public_example", artifactVisibility)
+	require.Equal(t, "runtime-result-evidence", artifactSourceID)
 
 	rows, err := pool.Query(context.Background(), `
 		SELECT effect_type, max_attempts, metadata::text
@@ -169,6 +172,88 @@ func TestResultFinalizerLinksSuccessfulRunToPrivateTask(t *testing.T) {
 	replayed, err := runtime.NewResultFinalizer(pool, nil, nil).Finalize(context.Background(), fixture.principal, request)
 	require.NoError(t, err)
 	require.True(t, replayed.Replayed)
+}
+
+func TestResultFinalizerMergesStreamedArtifactsAndSkipsDuplicateFallback(t *testing.T) {
+	pool := setupTestDB(t)
+	requireReliableRuntimeSchema(t, pool)
+
+	merged := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	var originalArtifactID uuid.UUID
+	var originalCreatedAt time.Time
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		INSERT INTO run_artifacts (
+			run_id, artifact_type, title, content, visibility, source_artifact_id
+		) VALUES ($1, 'data', 'Streaming draft', '{"streamed":true}', 'private', 'evidence-1')
+		RETURNING id, created_at`, merged.identity.RunID).
+		Scan(&originalArtifactID, &originalCreatedAt))
+	queries := db.New(pool)
+	_, err := queries.CreateRunArtifactChunk(context.Background(), db.CreateRunArtifactChunkParams{
+		RunID:            merged.identity.RunID,
+		RunArtifactID:    originalArtifactID,
+		SourceArtifactID: "evidence-1",
+		Append:           true,
+		LastChunk:        true,
+		Parts:            []byte(`[{"type":"data","data":{"draft":true}}]`),
+		Payload:          []byte(`{"artifact_id":"evidence-1"}`),
+		ChecksumStatus:   "not_provided",
+	})
+	require.NoError(t, err)
+
+	request := successfulRuntimeResult(merged, map[string]any{
+		"summary": "final snapshot",
+		"artifacts": []any{map[string]any{
+			"artifact_id":   "evidence-1",
+			"artifact_type": "json",
+			"title":         "Final evidence",
+			"visibility":    "public_example",
+			"content":       map[string]any{"final": true},
+		}},
+	})
+	ack, err := runtime.NewResultFinalizer(pool, nil, nil).Finalize(context.Background(), merged.principal, request)
+	require.NoError(t, err)
+	require.Equal(t, "success", ack.RunStatus)
+
+	var mergedArtifactID uuid.UUID
+	var mergedCreatedAt time.Time
+	var mergedTitle, mergedVisibility, mergedContent string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT id, created_at, title, visibility, content::text
+		FROM run_artifacts WHERE run_id = $1`, merged.identity.RunID).
+		Scan(&mergedArtifactID, &mergedCreatedAt, &mergedTitle, &mergedVisibility, &mergedContent))
+	var mergedCount int
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM run_artifacts WHERE run_id = $1`, merged.identity.RunID).Scan(&mergedCount))
+	require.Equal(t, 1, mergedCount)
+	require.Equal(t, originalArtifactID, mergedArtifactID)
+	require.Equal(t, originalCreatedAt, mergedCreatedAt)
+	require.Equal(t, "Final evidence", mergedTitle)
+	require.Equal(t, "public_example", mergedVisibility)
+	require.JSONEq(t, `{"final":true}`, mergedContent)
+	chunks, err := queries.ListRunArtifactChunksByRun(context.Background(), merged.identity.RunID)
+	require.NoError(t, err)
+	require.Len(t, chunks, 1)
+	require.Equal(t, originalArtifactID, chunks[0].RunArtifactID)
+
+	fallback := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+	_, err = pool.Exec(context.Background(), `
+		INSERT INTO run_artifacts (
+			run_id, artifact_type, title, content, visibility, source_artifact_id
+		) VALUES ($1, 'text', 'Only streamed artifact', '{"text":"done"}', 'shared', 'stream-only')`,
+		fallback.identity.RunID)
+	require.NoError(t, err)
+
+	fallbackRequest := successfulRuntimeResult(fallback, map[string]any{"answer": "already streamed"})
+	_, err = runtime.NewResultFinalizer(pool, nil, nil).Finalize(context.Background(), fallback.principal, fallbackRequest)
+	require.NoError(t, err)
+	var fallbackCount int
+	var fallbackSourceID string
+	require.NoError(t, pool.QueryRow(context.Background(), `
+		SELECT COUNT(*), MIN(source_artifact_id)
+		FROM run_artifacts WHERE run_id = $1`, fallback.identity.RunID).
+		Scan(&fallbackCount, &fallbackSourceID))
+	require.Equal(t, 1, fallbackCount)
+	require.Equal(t, "stream-only", fallbackSourceID)
 }
 
 func TestResultFinalizerNonRetryableFailureAndReplayOwnership(t *testing.T) {

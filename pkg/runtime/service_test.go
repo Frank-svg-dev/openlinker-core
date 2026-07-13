@@ -1004,7 +1004,7 @@ func TestRun_RecordsAgentReturnedEventsBeforeCompleted(t *testing.T) {
 
 	artifacts, err := svc.ListRunArtifacts(ctx, userID, mustParseUUID(t, resp.RunID))
 	require.NoError(t, err)
-	require.Len(t, artifacts, 2)
+	require.Len(t, artifacts, 1)
 	var streamed *runtime.RunArtifactResponse
 	for i := range artifacts {
 		if artifacts[i].SourceArtifactID == "art_1" {
@@ -1013,6 +1013,7 @@ func TestRun_RecordsAgentReturnedEventsBeforeCompleted(t *testing.T) {
 		}
 	}
 	require.NotNil(t, streamed)
+	assert.NotEqual(t, "Agent 输出", streamed.Title)
 	assert.Equal(t, "text", streamed.ArtifactType)
 	assert.Equal(t, "Draft artifact", streamed.Title)
 	assert.Equal(t, "chunk one", streamed.Content["text"])

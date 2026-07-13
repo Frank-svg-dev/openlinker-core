@@ -888,9 +888,21 @@ func TestRuntimeArtifactDraftHelpers(t *testing.T) {
 	require.Len(t, items, 2)
 	require.Equal(t, "A", items[0].Title)
 	require.Equal(t, map[string]interface{}{"value": "raw"}, items[1].Content)
+	identified := runArtifactsFromOutput(map[string]interface{}{"artifact": map[string]interface{}{
+		"artifact_id": " final-evidence ",
+		"content":     map[string]interface{}{"ok": true},
+	}})
+	require.Equal(t, "final-evidence", identified[0].SourceArtifactID)
+	require.ErrorContains(t, createRunArtifacts(context.Background(), nil, uuid.New(), map[string]interface{}{
+		"artifacts": []interface{}{
+			map[string]interface{}{"artifact_id": "duplicate", "content": map[string]interface{}{}},
+			map[string]interface{}{"artifact_id": " duplicate ", "content": map[string]interface{}{}},
+		},
+	}), "duplicate result artifact_id")
 	require.Equal(t, "Agent 产物", runArtifactsFromOutput(map[string]interface{}{"artifact": map[string]interface{}{"data": map[string]interface{}{"x": 1}}})[0].Title)
 	require.Equal(t, "Agent 输出", runArtifactsFromOutput(map[string]interface{}{"answer": 1})[0].Title)
 	require.Equal(t, map[string]interface{}{}, runArtifactsFromOutput(nil)[0].Content)
+	require.True(t, runArtifactsFromOutput(map[string]interface{}{"answer": 1})[0].Fallback)
 	invalidDraft := artifactDraftFromMap(map[string]interface{}{
 		"title":      " ",
 		"type":       "html",

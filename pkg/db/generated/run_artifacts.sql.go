@@ -36,6 +36,18 @@ INSERT INTO run_artifacts (
 ) VALUES (
     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11
 )
+ON CONFLICT (run_id, source_artifact_id)
+    WHERE source_artifact_id IS NOT NULL
+DO UPDATE SET
+    artifact_type = EXCLUDED.artifact_type,
+    title = EXCLUDED.title,
+    content = EXCLUDED.content,
+    visibility = EXCLUDED.visibility,
+    mime_type = EXCLUDED.mime_type,
+    file_uri = EXCLUDED.file_uri,
+    file_name = EXCLUDED.file_name,
+    file_sha256 = EXCLUDED.file_sha256,
+    file_size_bytes = EXCLUDED.file_size_bytes
 RETURNING id, run_id, artifact_type, title, content, visibility, source_artifact_id,
           mime_type, file_uri, file_name, file_sha256, file_size_bytes, created_at`
 
