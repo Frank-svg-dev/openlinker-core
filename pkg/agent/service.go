@@ -1140,10 +1140,10 @@ func repairHintsForDryRun(agent *db.Agent, errMsg string) []string {
 	}
 	hints := []string{}
 	switch agent.ConnectionMode {
-	case ConnectionModeAgentNode:
+	case ConnectionModeRuntime:
 		hints = append(hints,
-			"确认 Agent Node 使用 mTLS 设备证书和含 agent:pull scope 的 Agent Token 建立 Runtime Session。",
-			"只需配置 OPENLINKER_URL；Agent Node 会自动发现连接地址。建议使用 auto：优先建立 WebSocket，网络不适合时自动切换到长轮询，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
+			"确认 Runtime Worker 使用 mTLS 设备证书和含 agent:pull scope 的 Agent Token 建立 Runtime Session。",
+			"只需配置 OPENLINKER_URL；Runtime Worker 会自动发现连接地址。建议使用 auto：优先建立 WebSocket，网络不适合时自动切换到长轮询，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
 		)
 	case ConnectionModeMCPServer:
 		hints = append(hints,

@@ -216,7 +216,7 @@ type RunAttempt struct {
 }
 
 // RuntimeResumeGrant is durable authorization evidence for a replacement
-// Session acting on an immutable Agent Node Attempt identity.
+// Session acting on an immutable Runtime Worker Attempt identity.
 type RuntimeResumeGrant struct {
 	ID                      uuid.UUID  `db:"id" json:"id"`
 	RunID                   uuid.UUID  `db:"run_id" json:"run_id"`

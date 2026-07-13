@@ -37,7 +37,7 @@ func TestRuntimeV2DelegationRequiresMatchingDomainCapabilities(t *testing.T) {
 	require.ErrorIs(t, err, ErrExpiredRuntimeInvocation)
 }
 
-func TestRuntimeV2DelegationAuthorizationBindsExactRequest(t *testing.T) {
+func TestRuntimeDelegationAuthorizationBindsExactRequest(t *testing.T) {
 	signer, err := NewRuntimeInvocationSigner(runtimeInvocationTestSecret)
 	require.NoError(t, err)
 	capability := runtimeInvocationCapabilityFixture()
@@ -53,7 +53,7 @@ func TestRuntimeV2DelegationAuthorizationBindsExactRequest(t *testing.T) {
 	}
 	proof, err := BuildRuntimeInvocationProof(token, proofRequest)
 	require.NoError(t, err)
-	authorization := RuntimeV2DelegationAuthorization{
+	authorization := RuntimeDelegationAuthorization{
 		Device: RuntimeDeviceIdentity{
 			NodeID:                       capability.NodeID,
 			CertificateSerial:            "abc",
@@ -66,21 +66,21 @@ func TestRuntimeV2DelegationAuthorizationBindsExactRequest(t *testing.T) {
 		IdempotencyKey:    proofRequest.IdempotencyKey,
 		ProofRequest:      proofRequest,
 	}
-	require.True(t, validRuntimeV2DelegationAuthorization(authorization))
+	require.True(t, validRuntimeDelegationAuthorization(authorization))
 	require.NoError(t, VerifyRuntimeInvocationProof(token, proof, proofRequest))
 
-	mutations := []func(*RuntimeV2DelegationAuthorization){
-		func(value *RuntimeV2DelegationAuthorization) { value.ProofRequest.Path += "/other" },
-		func(value *RuntimeV2DelegationAuthorization) { value.ProofRequest.Method = http.MethodPut },
-		func(value *RuntimeV2DelegationAuthorization) { value.ProofRequest.Context += "x" },
-		func(value *RuntimeV2DelegationAuthorization) { value.ProofRequest.IdempotencyKey += "x" },
-		func(value *RuntimeV2DelegationAuthorization) { value.ProofRequest.Body = nil },
-		func(value *RuntimeV2DelegationAuthorization) { value.Device.NodeID = uuid.Nil },
+	mutations := []func(*RuntimeDelegationAuthorization){
+		func(value *RuntimeDelegationAuthorization) { value.ProofRequest.Path += "/other" },
+		func(value *RuntimeDelegationAuthorization) { value.ProofRequest.Method = http.MethodPut },
+		func(value *RuntimeDelegationAuthorization) { value.ProofRequest.Context += "x" },
+		func(value *RuntimeDelegationAuthorization) { value.ProofRequest.IdempotencyKey += "x" },
+		func(value *RuntimeDelegationAuthorization) { value.ProofRequest.Body = nil },
+		func(value *RuntimeDelegationAuthorization) { value.Device.NodeID = uuid.Nil },
 	}
 	for _, mutate := range mutations {
 		changed := authorization
 		changed.ProofRequest.Body = append([]byte(nil), authorization.ProofRequest.Body...)
 		mutate(&changed)
-		require.False(t, validRuntimeV2DelegationAuthorization(changed))
+		require.False(t, validRuntimeDelegationAuthorization(changed))
 	}
 }

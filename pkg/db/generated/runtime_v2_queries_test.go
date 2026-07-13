@@ -96,7 +96,7 @@ func TestResultFinalizationQueries(t *testing.T) {
 	resultID, terminalEventID := uuid.New(), uuid.New()
 	attemptNo, finalSequence := int32(1), int64(4)
 	fence, durationMs := int64(7), int32(1234)
-	executorType, connectionMode := "agent_node", "agent_node"
+	executorType, connectionMode := "runtime", "runtime"
 	workerID, classification, outcome := "worker-a", "success", "success"
 	fingerprint := []byte("0123456789abcdef0123456789abcdef")
 	acceptedAt, finishedAt := now.Add(-time.Minute), now
@@ -256,7 +256,7 @@ func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
 	leaseExpiresAt := now.Add(time.Minute)
 	attemptDeadlineAt := now.Add(2 * time.Minute)
 	runDeadlineAt := now.Add(5 * time.Minute)
-	executorType, workerID := "agent_node", "worker-a"
+	executorType, workerID := "runtime", "worker-a"
 	dbtx := &fakeDBTX{row: fakeRow{values: []any{
 		runID, agentID, "running", "openlinker.runtime.v2", "executing",
 		&attemptID, &leaseID, fence, &executorType,
@@ -359,7 +359,7 @@ func TestRuntimeV2RunEventQueriesAndLockOrder(t *testing.T) {
 	}
 
 	attemptValues := []any{
-		attemptID, runID, agentID, int32(1), &attemptNo, "agent_node",
+		attemptID, runID, agentID, int32(1), &attemptNo, "runtime",
 		leaseID, fence, (*uuid.UUID)(nil), &workerID, &sessionID,
 		(*uuid.UUID)(nil), uuid.New(), uuid.New(), now, now.Add(time.Minute),
 		&leaseAcceptedAt, &leaseAcceptedAt, leaseExpiresAt, attemptDeadlineAt,

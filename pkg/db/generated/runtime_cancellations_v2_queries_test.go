@@ -19,7 +19,7 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 		"r.dispatch_state = 'terminal'",
 		"r.cancel_state = c.state",
 		"c.state IN ('requested', 'delivered', 'stopping')",
-		"a.executor_type = 'agent_node'",
+		"a.executor_type = 'runtime'",
 		"a.finished_at IS NULL",
 		"a.agent_id = $1",
 		"a.node_id = $2",
@@ -91,7 +91,7 @@ func TestRuntimeCancellationV2QueriesAreFencedAndOrdered(t *testing.T) {
 	}
 	for _, fragment := range []string{
 		"a.lease_id = $4", "a.fencing_token = $5",
-		"a.executor_type = 'agent_node'", "a.finished_at IS NULL",
+		"a.executor_type = 'runtime'", "a.finished_at IS NULL",
 		"c.target_attempt_id = a.id",
 		"c.state IN ('stopped', 'unconfirmed')",
 	} {

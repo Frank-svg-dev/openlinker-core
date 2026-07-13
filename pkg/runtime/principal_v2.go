@@ -12,7 +12,7 @@ import (
 )
 
 // runtimePrincipalLockQueries is intentionally shared by claim, lease,
-// Event, and Result transactions. Every Agent Node write must acquire these
+// Event, and Result transactions. Every Runtime Worker write must acquire these
 // locks in Session -> Node -> Credential order before it locks a Run.
 type runtimePrincipalLockQueries interface {
 	LockRuntimeSessionForPrincipalValidation(context.Context, db.LockRuntimeSessionForPrincipalValidationParams) (db.LockRuntimeSessionForPrincipalValidationRow, error)

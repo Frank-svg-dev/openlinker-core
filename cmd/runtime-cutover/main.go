@@ -1,4 +1,4 @@
-// Command runtime-cutover performs explicit, CAS-protected Runtime v2
+// Command runtime-cutover performs explicit, CAS-protected Runtime
 // maintenance transitions. It is intentionally separate from the API server:
 // browsers can inspect maintenance evidence but cannot mutate cluster mode.
 package main
@@ -31,19 +31,19 @@ const (
 )
 
 type commandConfig struct {
-	databaseURL      string
-	releaseID        string
-	gitSHA           string
-	signalMode       string
-	redisURL         string
-	requireExclusive bool
-	requireNoMembers bool
-	expectedVersion  int64
-	expectedReplicas int
-	cutoverID        string
-	drainDeadline    time.Duration
-	allowPreV2Noop   bool
-	commandTimeout   time.Duration
+	databaseURL                 string
+	releaseID                   string
+	gitSHA                      string
+	signalMode                  string
+	redisURL                    string
+	requireExclusive            bool
+	requireNoMembers            bool
+	expectedVersion             int64
+	expectedReplicas            int
+	cutoverID                   string
+	drainDeadline               time.Duration
+	allowRuntimeUninstalledNoop bool
+	commandTimeout              time.Duration
 }
 
 type redisHealth struct {
@@ -128,8 +128,8 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		SignalMode: cfg.signalMode, SignalHealth: signalHealth,
 	})
 	request := cutover.TransitionRequest{
-		ExpectedVersion: cfg.expectedVersion,
-		AllowPreV2Noop:  cfg.allowPreV2Noop,
+		ExpectedVersion:             cfg.expectedVersion,
+		AllowRuntimeUninstalledNoop: cfg.allowRuntimeUninstalledNoop,
 	}
 	if cfg.expectedReplicas > 0 {
 		request.ExpectedReplicas = int32(cfg.expectedReplicas)
@@ -211,10 +211,10 @@ func parseCommand(command string, args []string, stderr io.Writer, getenv func(s
 		fs.Int64Var(&cfg.expectedVersion, "expected-version", 0, "required runtime_cluster_control CAS version")
 		fs.IntVar(&cfg.expectedReplicas, "expected-replicas", 0, "required exact Core replica count")
 		fs.DurationVar(&cfg.drainDeadline, "deadline", 0, "optional drain deadline duration")
-		fs.BoolVar(&cfg.allowPreV2Noop, "pre-v2-ok", false, "return an explicit no-op when runtime v2 schema is not installed")
+		fs.BoolVar(&cfg.allowRuntimeUninstalledNoop, "runtime-uninstalled-ok", false, "return an explicit no-op when Runtime schema is not installed")
 	case "hard-maintenance":
 		fs.Int64Var(&cfg.expectedVersion, "expected-version", 0, "required runtime_cluster_control CAS version")
-		fs.BoolVar(&cfg.allowPreV2Noop, "pre-v2-ok", false, "return an explicit no-op when migration 063 will create hard maintenance")
+		fs.BoolVar(&cfg.allowRuntimeUninstalledNoop, "runtime-uninstalled-ok", false, "return an explicit no-op when migration 063 will create hard maintenance")
 	case "reopen":
 		fs.Int64Var(&cfg.expectedVersion, "expected-version", 0, "required runtime_cluster_control CAS version")
 		fs.StringVar(&cfg.cutoverID, "cutover-id", "", "required cutover identity")
@@ -231,10 +231,10 @@ func parseCommand(command string, args []string, stderr io.Writer, getenv func(s
 	if cfg.commandTimeout <= 0 {
 		return commandConfig{}, errors.New("timeout must be positive")
 	}
-	if command == "drain" && (cfg.expectedVersion < 1 || cfg.expectedReplicas < 1) && !cfg.allowPreV2Noop {
+	if command == "drain" && (cfg.expectedVersion < 1 || cfg.expectedReplicas < 1) && !cfg.allowRuntimeUninstalledNoop {
 		return commandConfig{}, errors.New("drain requires CAS version and replicas")
 	}
-	if (command == "hard-maintenance" || command == "reopen") && cfg.expectedVersion < 1 && !cfg.allowPreV2Noop {
+	if (command == "hard-maintenance" || command == "reopen") && cfg.expectedVersion < 1 && !cfg.allowRuntimeUninstalledNoop {
 		return commandConfig{}, errors.New("transition requires CAS version")
 	}
 	if command == "reopen" && cfg.cutoverID == "" {

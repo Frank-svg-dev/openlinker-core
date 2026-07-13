@@ -24,7 +24,7 @@ const (
 )
 
 // RuntimeLeaseConfig contains the database-enforced durations used by the
-// reliable runtime v2 offer and execution state machine. Zero values select
+// reliable Runtime offer and execution state machine. Zero values select
 // the protocol defaults; negative or sub-millisecond values fail closed.
 type RuntimeLeaseConfig struct {
 	OfferTTL     time.Duration
@@ -741,7 +741,7 @@ func stringPointerEqual(value *string, want string) bool {
 
 func attemptMatchesLeaseIdentity(attempt db.RunAttempt, principal RuntimeSessionPrincipal, identity AttemptIdentity) bool {
 	return attempt.ID == identity.AttemptID && attempt.RunID == identity.RunID && attempt.AgentID == identity.AgentID &&
-		attempt.ExecutorType == "agent_node" && attempt.LeaseID == identity.LeaseID && attempt.FencingToken == identity.FencingToken &&
+		attempt.ExecutorType == "runtime" && attempt.LeaseID == identity.LeaseID && attempt.FencingToken == identity.FencingToken &&
 		uuidPointerEqual(attempt.RuntimeTokenID, principal.CredentialID) && uuidPointerEqual(attempt.NodeID, identity.NodeID) &&
 		uuidPointerEqual(attempt.RuntimeSessionID, identity.RuntimeSessionID) && stringPointerEqual(attempt.RuntimeWorkerID, identity.WorkerID)
 }
@@ -893,7 +893,7 @@ func (s *RuntimeLeaseService) assignmentFromExisting(
 	}
 	attempt := db.RunAttempt{
 		ID: existing.AttemptID, RunID: existing.RunID, AgentID: existing.AgentID, OfferNo: existing.OfferNo,
-		ExecutorType: "agent_node", LeaseID: existing.LeaseID, FencingToken: existing.FencingToken, RuntimeTokenID: existing.RuntimeTokenID,
+		ExecutorType: "runtime", LeaseID: existing.LeaseID, FencingToken: existing.FencingToken, RuntimeTokenID: existing.RuntimeTokenID,
 		RuntimeWorkerID: existing.RuntimeWorkerID, RuntimeSessionID: existing.RuntimeSessionID, NodeID: existing.NodeID,
 		OfferedByCoreInstanceID: existing.OfferedByCoreInstanceID, AttachedCoreInstanceID: existing.AttachedCoreInstanceID,
 		OfferedAt: existing.OfferedAt, OfferExpiresAt: existing.OfferExpiresAt, LeaseExpiresAt: existing.LeaseExpiresAt,
@@ -968,7 +968,7 @@ func attemptIdentityFromRow(attempt db.RunAttempt) (AttemptIdentity, error) {
 }
 
 func decodeRuntimeJSONObject(raw []byte) (map[string]any, []byte, error) {
-	if len(raw) == 0 || int64(len(raw)) > MaxRuntimeV2MessageBytes {
+	if len(raw) == 0 || int64(len(raw)) > MaxRuntimeMessageBytes {
 		return nil, nil, errors.New("runtime JSON object is empty or too large")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))

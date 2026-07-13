@@ -388,7 +388,7 @@ func (f *runtimeResumeFixture) execution(runID, attemptID uuid.UUID) (AttemptIde
 	}
 	attempt := db.RunAttempt{
 		ID: attemptID, RunID: runID, AgentID: f.target.AgentID, OfferNo: 1,
-		AttemptNo: &attemptNo, ExecutorType: "agent_node", LeaseID: identity.LeaseID,
+		AttemptNo: &attemptNo, ExecutorType: "runtime", LeaseID: identity.LeaseID,
 		FencingToken: identity.FencingToken, RuntimeTokenID: &f.target.CredentialID,
 		RuntimeWorkerID: &identity.WorkerID, RuntimeSessionID: &identity.RuntimeSessionID,
 		NodeID: &identity.NodeID, OfferedByCoreInstanceID: f.target.CoreInstanceID,

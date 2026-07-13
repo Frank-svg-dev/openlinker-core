@@ -156,13 +156,13 @@ func TestDefaultResultClassifierUsesServerPolicy(t *testing.T) {
 	}
 
 	require.Equal(t, RuntimeResultClassificationSuccess, classifier.ClassifyResult(ResultClassificationInput{
-		ExecutorType: "agent_node", Request: success,
+		ExecutorType: "runtime", Request: success,
 	}))
 	require.Equal(t, RuntimeResultClassificationRetryable, classifier.ClassifyResult(ResultClassificationInput{
-		ExecutorType: "agent_node", Request: retryable,
+		ExecutorType: "runtime", Request: retryable,
 	}))
 	require.Equal(t, RuntimeResultClassificationNonRetryable, classifier.ClassifyResult(ResultClassificationInput{
-		ExecutorType: "agent_node", Request: permanent,
+		ExecutorType: "runtime", Request: permanent,
 	}))
 	require.Equal(t, RuntimeResultClassificationNonRetryable, classifier.ClassifyResult(ResultClassificationInput{
 		ExecutorType: "core_http", EndpointIdempotency: false, Request: retryable,

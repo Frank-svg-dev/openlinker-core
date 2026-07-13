@@ -691,7 +691,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
 		os.Exit(2)
 	}
-	if err := preflightRuntimeV2Credentials(cfg); err != nil {
+	if err := preflightRuntimeCredentials(cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "runtime-loadtest:", err)
 		os.Exit(2)
 	}
@@ -699,7 +699,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout)
 	defer cancel()
 
-	m := &metrics{startedAt: time.Now(), runtime: newRuntimeV2Metrics()}
+	m := &metrics{startedAt: time.Now(), runtime: newRuntimeMetrics()}
 	ctx = withMetrics(ctx, m)
 	tracker := newRunTracker()
 	api := newAPIClient(cfg)
@@ -740,7 +740,7 @@ func main() {
 				connectDelay = time.Duration(workerOrdinal) * cfg.ConnectStagger
 			}
 			workerOrdinal++
-			worker, workerErr := newRuntimeV2Worker(cfg, agent, token, i, tracker, m)
+			worker, workerErr := newRuntimeWorker(cfg, agent, token, i, tracker, m)
 			if workerErr != nil {
 				stopWorkers()
 				workerWG.Wait()
@@ -797,7 +797,7 @@ func main() {
 	}
 	var cancelErr error
 	if cfg.CancelCount > 0 {
-		cancelErr = driveRuntimeV2Cancellations(ctx, api, cfg, accounts, tracker, m)
+		cancelErr = driveRuntimeCancellations(ctx, api, cfg, accounts, tracker, m)
 	}
 	waitErr := waitForMeasuredPhase(ctx, cfg, tracker, cfg.Runs, cfg.Timeout)
 	if waitErr == nil && cancelErr != nil {
@@ -851,38 +851,38 @@ func parseFlags() config {
 	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_RUNTIME_URL"), "required dedicated Runtime mTLS origin (https)")
 	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_RUNTIME_URL_SECONDARY"), "second Runtime mTLS origin for Core A→B resume")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
-	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime v2 transport: ws, pull, or auto")
-	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime v2 scenarios; see cmd/runtime-loadtest/README.md")
+	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime transport: ws, pull, or auto")
+	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime scenarios; see cmd/runtime-loadtest/README.md")
 	flag.StringVar(&cfg.NodeID, "node-id", os.Getenv("OPENLINKER_NODE_ID"), "required enrolled Runtime Node UUID from the client certificate")
 	flag.StringVar(&cfg.NodeVersion, "node-version", envDefault("OPENLINKER_RUNTIME_LOADTEST_NODE_VERSION", runtimeLoadtestNodeVersion), "exact version registered for the Runtime Node")
 	flag.IntVar(&cfg.NodeCapacity, "node-capacity", intEnv("OPENLINKER_RUNTIME_LOADTEST_NODE_CAPACITY", 0), "Node capacity; defaults to agents × workers-per-agent")
-	flag.StringVar(&cfg.MTLSCertFile, "runtime-mtls-cert", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_CERT_FILE"), "required Runtime Node client certificate PEM")
-	flag.StringVar(&cfg.MTLSKeyFile, "runtime-mtls-key", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_KEY_FILE"), "required Runtime Node private key PEM")
-	flag.StringVar(&cfg.MTLSCAFile, "runtime-mtls-ca", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_CA_FILE"), "required Runtime server trust CA PEM")
-	flag.StringVar(&cfg.MTLSServerName, "runtime-mtls-server-name", os.Getenv("OPENLINKER_AGENT_NODE_MTLS_SERVER_NAME"), "optional Runtime TLS server-name override")
-	flag.StringVar(&cfg.StateDir, "state-dir", envDefault("OPENLINKER_RUNTIME_LOADTEST_STATE_DIR", filepath.Join(defaultReportBaseDir(), ".openlinker-dev", "performance", "runtime-loadtest-state")), "durable Runtime v2 Attempt/Event/Result journal directory")
+	flag.StringVar(&cfg.MTLSCertFile, "runtime-mtls-cert", os.Getenv("OPENLINKER_RUNTIME_MTLS_CERT_FILE"), "required Runtime Node client certificate PEM")
+	flag.StringVar(&cfg.MTLSKeyFile, "runtime-mtls-key", os.Getenv("OPENLINKER_RUNTIME_MTLS_KEY_FILE"), "required Runtime Node private key PEM")
+	flag.StringVar(&cfg.MTLSCAFile, "runtime-mtls-ca", os.Getenv("OPENLINKER_RUNTIME_MTLS_CA_FILE"), "required Runtime server trust CA PEM")
+	flag.StringVar(&cfg.MTLSServerName, "runtime-mtls-server-name", os.Getenv("OPENLINKER_RUNTIME_MTLS_SERVER_NAME"), "optional Runtime TLS server-name override")
+	flag.StringVar(&cfg.StateDir, "state-dir", envDefault("OPENLINKER_RUNTIME_LOADTEST_STATE_DIR", filepath.Join(defaultReportBaseDir(), ".openlinker-dev", "performance", "runtime-loadtest-state")), "durable Runtime Attempt/Event/Result journal directory")
 	flag.IntVar(&cfg.Users, "users", intEnv("OPENLINKER_RUNTIME_LOADTEST_USERS", 1), "number of creator/caller users")
 	flag.IntVar(&cfg.Agents, "agents", intEnv("OPENLINKER_RUNTIME_LOADTEST_AGENTS", 10), "number of runtime agents")
-	flag.IntVar(&cfg.WorkersPerAgent, "workers-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_WORKERS_PER_AGENT", 1), "Runtime v2 Agent Token workers per Agent")
+	flag.IntVar(&cfg.WorkersPerAgent, "workers-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_WORKERS_PER_AGENT", 1), "Runtime Agent Token workers per Agent")
 	flag.IntVar(&cfg.Runs, "runs", intEnv("OPENLINKER_RUNTIME_LOADTEST_RUNS", 100), "measured runs to submit")
 	flag.IntVar(&cfg.RunConcurrency, "run-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_RUN_CONCURRENCY", 20), "concurrent run submissions")
 	flag.IntVar(&cfg.SetupConcurrency, "setup-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_SETUP_CONCURRENCY", 16), "concurrent disposable user/agent setup operations")
 	flag.IntVar(&cfg.SetupUserConcurrency, "setup-user-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_SETUP_USER_CONCURRENCY", 0), "concurrent disposable user setup operations; default min(setup-concurrency, 8)")
 	flag.IntVar(&cfg.SetupAgentConcurrency, "setup-agent-concurrency", intEnv("OPENLINKER_RUNTIME_LOADTEST_SETUP_AGENT_CONCURRENCY", 0), "concurrent disposable agent setup operations; default setup-concurrency")
-	flag.IntVar(&cfg.EventsPerRun, "events-per-run", intEnv("OPENLINKER_RUNTIME_LOADTEST_EVENTS_PER_RUN", 1), "durable Runtime v2 Events per Run")
+	flag.IntVar(&cfg.EventsPerRun, "events-per-run", intEnv("OPENLINKER_RUNTIME_LOADTEST_EVENTS_PER_RUN", 1), "durable Runtime Events per Run")
 	flag.DurationVar(&cfg.ResultDelay, "result-delay", durationEnv("OPENLINKER_RUNTIME_LOADTEST_RESULT_DELAY", 0), "artificial execution delay before Result")
 	flag.DurationVar(&cfg.SubmitDuration, "submit-duration", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SUBMIT_DURATION", 0), "spread measured run submissions across this duration")
 	flag.IntVar(&cfg.HistoryPerAgent, "history-per-agent", intEnv("OPENLINKER_RUNTIME_LOADTEST_HISTORY_PER_AGENT", 0), "completed prior A2A-context runs per Agent")
 	flag.BoolVar(&cfg.ContextMode, "a2a-context", boolEnv("OPENLINKER_RUNTIME_LOADTEST_A2A_CONTEXT", true), "include A2A context IDs")
 	flag.StringVar(&cfg.AccountRunID, "account-run-id", os.Getenv("OPENLINKER_RUNTIME_LOADTEST_ACCOUNT_RUN_ID"), "reuse accounts from a previous run ID")
 	flag.DurationVar(&cfg.Timeout, "timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_TIMEOUT", 2*time.Minute), "overall timeout")
-	flag.DurationVar(&cfg.ReadyTimeout, "ready-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_READY_TIMEOUT", 30*time.Second), "timeout for authenticated Runtime v2 hello/ready")
+	flag.DurationVar(&cfg.ReadyTimeout, "ready-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_READY_TIMEOUT", 30*time.Second), "timeout for authenticated Runtime hello/ready")
 	flag.DurationVar(&cfg.RequestTimeout, "request-timeout", durationEnv("OPENLINKER_RUNTIME_LOADTEST_REQUEST_TIMEOUT", 20*time.Second), "per user/API request timeout")
-	flag.DurationVar(&cfg.PullWait, "pull-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_PULL_WAIT", 5*time.Second), "Runtime v2 assignment long-poll wait (1s-30s)")
-	flag.DurationVar(&cfg.CommandWait, "command-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_COMMAND_WAIT", time.Second), "Runtime v2 command long-poll wait (1s-30s)")
+	flag.DurationVar(&cfg.PullWait, "pull-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_PULL_WAIT", 5*time.Second), "Runtime assignment long-poll wait (1s-30s)")
+	flag.DurationVar(&cfg.CommandWait, "command-wait", durationEnv("OPENLINKER_RUNTIME_LOADTEST_COMMAND_WAIT", time.Second), "Runtime command long-poll wait (1s-30s)")
 	flag.DurationVar(&cfg.HeartbeatInterval, "heartbeat-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_HEARTBEAT_INTERVAL", 15*time.Second), "Pull session heartbeat / WS liveness interval")
 	flag.DurationVar(&cfg.WSProbeInterval, "ws-probe-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_WS_PROBE_INTERVAL", 10*time.Second), "auto-mode interval before probing WebSocket recovery")
-	flag.DurationVar(&cfg.ConnectStagger, "connect-stagger", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECT_STAGGER", 0), "delay increment between Runtime v2 worker connections")
+	flag.DurationVar(&cfg.ConnectStagger, "connect-stagger", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECT_STAGGER", 0), "delay increment between Runtime worker connections")
 	flag.DurationVar(&cfg.SwitchAfter, "switch-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_AFTER", 5*time.Second), "planned first transport/Core switch after worker start")
 	flag.DurationVar(&cfg.SwitchBackAfter, "switch-back-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_BACK_AFTER", 10*time.Second), "planned Pull→WebSocket switch after worker start")
 	flag.IntVar(&cfg.CancelCount, "cancel-count", intEnv("OPENLINKER_RUNTIME_LOADTEST_CANCEL_COUNT", 0), "number of measured Runs to cancel; cancel-race defaults to 1000")
@@ -916,8 +916,8 @@ func (c *config) validate() error {
 	if c.NodeCapacity == 0 {
 		c.NodeCapacity = c.Agents * c.WorkersPerAgent
 	}
-	if c.NodeCapacity < 1 || c.NodeCapacity > openlinker.RuntimeV2MaxNodeCapacity {
-		return fmt.Errorf("node-capacity must be between 1 and %d", openlinker.RuntimeV2MaxNodeCapacity)
+	if c.NodeCapacity < 1 || c.NodeCapacity > openlinker.RuntimeMaxNodeCapacity {
+		return fmt.Errorf("node-capacity must be between 1 and %d", openlinker.RuntimeMaxNodeCapacity)
 	}
 	if c.RunConcurrency <= 0 || c.SetupConcurrency <= 0 {
 		return errors.New("run/setup concurrency must be positive")
@@ -937,11 +937,11 @@ func (c *config) validate() error {
 	if c.HoldAfter < 0 || c.SubmitDuration < 0 || c.ConnectStagger < 0 {
 		return errors.New("hold/submit/connect durations cannot be negative")
 	}
-	if c.PullWait < time.Second || c.PullWait > time.Duration(openlinker.RuntimeV2MaxPullWaitSeconds)*time.Second {
-		return fmt.Errorf("pull-wait must be between 1s and %ds", openlinker.RuntimeV2MaxPullWaitSeconds)
+	if c.PullWait < time.Second || c.PullWait > time.Duration(openlinker.RuntimeMaxPullWaitSeconds)*time.Second {
+		return fmt.Errorf("pull-wait must be between 1s and %ds", openlinker.RuntimeMaxPullWaitSeconds)
 	}
-	if c.CommandWait < time.Second || c.CommandWait > time.Duration(openlinker.RuntimeV2MaxPullWaitSeconds)*time.Second {
-		return fmt.Errorf("command-wait must be between 1s and %ds", openlinker.RuntimeV2MaxPullWaitSeconds)
+	if c.CommandWait < time.Second || c.CommandWait > time.Duration(openlinker.RuntimeMaxPullWaitSeconds)*time.Second {
+		return fmt.Errorf("command-wait must be between 1s and %ds", openlinker.RuntimeMaxPullWaitSeconds)
 	}
 	if c.HeartbeatInterval <= 0 || c.WSProbeInterval <= 0 {
 		return errors.New("heartbeat and WebSocket probe intervals must be positive")
@@ -970,7 +970,7 @@ func (c *config) validate() error {
 		{"runtime-mtls-cert", c.MTLSCertFile}, {"runtime-mtls-key", c.MTLSKeyFile}, {"runtime-mtls-ca", c.MTLSCAFile},
 	} {
 		if strings.TrimSpace(required.value) == "" {
-			return fmt.Errorf("%s is required; Runtime v2 never falls back to token-only transport", required.name)
+			return fmt.Errorf("%s is required; Runtime never falls back to token-only transport", required.name)
 		}
 		if info, err := os.Stat(required.value); err != nil || info.IsDir() {
 			return fmt.Errorf("%s is not a readable file", required.name)
@@ -1055,7 +1055,7 @@ func setupAgents(ctx context.Context, api *apiClient, cfg config, runID string, 
 			"slug":            slug,
 			"name":            fmt.Sprintf("Perf Agent %s %03d", runID, i),
 			"description":     "Disposable runtime load-test agent",
-			"connection_mode": "agent_node",
+			"connection_mode": "runtime",
 			"visibility":      "private",
 			"tags":            []string{"perf", "runtime"},
 		}, tokenResp.PlaintextToken, &reg); err != nil {
@@ -1585,7 +1585,7 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		"result_ack_ms":           summaryStats(resultAckDur),
 		"completion_ms":           summaryStats(completeDur),
 		"measured_timeline":       measuredTimeline(measured, phases.measuredStart, phases.measuredEnd),
-		"runtime_v2":              runtimeReport,
+		"runtime":                 runtimeReport,
 		"http_ms_by_op":           httpByOp,
 		"http_status_by_op":       statusByOp,
 		"worker_counts": map[string]int64{

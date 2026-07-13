@@ -424,7 +424,7 @@ func offeredAttemptFixture(f *runtimeLeaseFixture, identity AttemptIdentity) db.
 	credentialID := f.principal.CredentialID
 	return db.RunAttempt{
 		ID: identity.AttemptID, RunID: identity.RunID, AgentID: identity.AgentID, OfferNo: 1,
-		ExecutorType: "agent_node", LeaseID: identity.LeaseID, FencingToken: identity.FencingToken,
+		ExecutorType: "runtime", LeaseID: identity.LeaseID, FencingToken: identity.FencingToken,
 		RuntimeTokenID: &credentialID, RuntimeWorkerID: &identity.WorkerID, RuntimeSessionID: &identity.RuntimeSessionID,
 		NodeID: &identity.NodeID, OfferedByCoreInstanceID: f.principal.CoreInstanceID,
 		AttachedCoreInstanceID: f.principal.CoreInstanceID, OfferedAt: f.databaseNow.Add(-time.Second),
@@ -595,7 +595,7 @@ func (f *runtimeLeaseTransactionFake) CreateAgentNodeRunOffer(_ context.Context,
 	workerID, sessionID, nodeID, credentialID := f.principal.WorkerID, f.principal.RuntimeSessionID, f.principal.NodeID, f.principal.CredentialID
 	f.createdAttempt = db.RunAttempt{
 		ID: params.AttemptID, RunID: params.RunID, AgentID: f.principal.AgentID, OfferNo: f.candidate.OfferCount + 1,
-		ExecutorType: "agent_node", LeaseID: params.LeaseID, FencingToken: f.candidate.FencingToken + 1,
+		ExecutorType: "runtime", LeaseID: params.LeaseID, FencingToken: f.candidate.FencingToken + 1,
 		RuntimeTokenID: &credentialID, RuntimeWorkerID: &workerID, RuntimeSessionID: &sessionID, NodeID: &nodeID,
 		OfferedByCoreInstanceID: params.CoreInstanceID, AttachedCoreInstanceID: params.CoreInstanceID,
 		OfferedAt: f.databaseNow, OfferExpiresAt: f.databaseNow.Add(time.Duration(params.OfferTtlMs) * time.Millisecond),

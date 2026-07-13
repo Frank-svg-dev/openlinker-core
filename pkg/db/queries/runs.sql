@@ -2,7 +2,7 @@
 --
 -- 模块 4（调用执行）+ 模块 6（双面板）共用的 runs 表查询。
 -- 文件分工约定：
---   模块 4（runtime，写）由 Runtime v2 的事务协调器维护：
+--   模块 4（runtime，写）由 Runtime 的事务协调器维护：
 --     CreateRun / GetRunByID；终态只能由 ResultFinalizer 写入
 --   模块 6（dashboard，读）由 subagent-6a 维护：
 --     ListRunsByUser / CountRunsByUserThisMonth
@@ -545,7 +545,7 @@ WHERE r.user_id = $1
   );
 
 -- name: ListRunsByCreatorAgentWithAgent :many
--- Creator-owned Run history. Runtime v2 progress comes from dispatch/Attempt
+-- Creator-owned Run history. Runtime progress comes from dispatch/Attempt
 -- fields; migration 063 removed the pre-v2 claimed columns.
 SELECT r.id, r.user_id, r.agent_id, r.input, r.output, r.status,
        r.error_code, r.error_message, r.cost_cents, r.platform_fee_cents,

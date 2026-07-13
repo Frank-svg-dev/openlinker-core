@@ -1,6 +1,6 @@
 -- runtime_nodes.sql
 --
--- Durable Agent Node presence, session ownership, and Core cluster coordination.
+-- Durable Runtime Worker presence, session ownership, and Core cluster coordination.
 -- Session/attachment create, resume, close and revoke methods are transaction
 -- primitives. The paired rows must reach one consistent state before commit;
 -- Node/Token revoke is the final step after attachments and Sessions close.

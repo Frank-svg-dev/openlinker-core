@@ -655,8 +655,8 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 
 	userID := insertRuntimeUser(t, pool)
 	creatorID := insertCreator(t, pool)
-	agentID := insertAgent(t, pool, creatorID, "openlinker-agent-node://ready-session", 0, "approved")
-	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode = 'agent_node' WHERE id = $1`, agentID)
+	agentID := insertAgent(t, pool, creatorID, "openlinker-runtime://ready-session", 0, "approved")
+	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode = 'runtime' WHERE id = $1`, agentID)
 	require.NoError(t, err)
 
 	tokenID, nodeID, sessionID := uuid.New(), uuid.New(), uuid.New()
@@ -672,7 +672,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 		INSERT INTO agent_tokens (
 			id, agent_id, creator_user_id, name, prefix, token_hash,
 			scopes, status, redeemed_at
-		) VALUES ($1, $2, $3, 'Agent Node ready Session', $4, $5,
+		) VALUES ($1, $2, $3, 'Runtime Worker ready Session', $4, $5,
 			ARRAY['agent:call', 'agent:pull']::text[], 'active_runtime', clock_timestamp())`,
 		tokenID, agentID, creatorID, prefix, "hash-"+tokenID.String())
 	require.NoError(t, err)
@@ -682,7 +682,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 			device_public_key_thumbprint, node_version, protocol_version,
 			runtime_contract_id, runtime_contract_digest, features,
 			capacity, last_seen_at
-		) VALUES ($1, 'Agent Node ready Session', $2, $3, 'test-v2', 2,
+		) VALUES ($1, 'Runtime Worker ready Session', $2, $3, 'test-v2', 2,
 			'openlinker.runtime.v2', $4, $5, 1, clock_timestamp())`,
 		nodeID, certificateSerial, thumbprint, runtime.RuntimeContractDigest,
 		runtime.RuntimeRequiredFeatures())
@@ -708,7 +708,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 	created, err := svc.Run(ctx, userID, makeRunReq(agentID, map[string]any{"task": "claim me"}), "api")
 	require.NoError(t, err)
 	require.Equal(t, "running", created.Status)
-	require.Equal(t, "agent_node", created.AgentConnectionMode)
+	require.Equal(t, "runtime", created.AgentConnectionMode)
 
 	signer, err := runtime.NewRuntimeInvocationSignerWithPrevious(
 		"test-current", "runtime-v2-integration-signing-secret-32-bytes", "", "",
@@ -741,7 +741,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 		WHERE r.id = $1`, assigned.AttemptIdentity.RunID).Scan(&dispatchState, &offerCount, &executorType))
 	require.Equal(t, "offered", dispatchState)
 	require.Equal(t, int32(1), offerCount)
-	require.Equal(t, "agent_node", executorType)
+	require.Equal(t, "runtime", executorType)
 }
 
 func TestRun_CreatesCallerOwnedTaskCallbackSubscription(t *testing.T) {

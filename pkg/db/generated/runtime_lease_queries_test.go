@@ -162,7 +162,7 @@ func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 
 	for _, fragment := range []string{
 		"r.agent_id = $1",
-		"r.connection_mode_snapshot = 'agent_node'",
+		"r.connection_mode_snapshot = 'runtime'",
 		"r.dispatch_state = 'pending'",
 		"r.next_attempt_at <= clock_timestamp()",
 		"r.offer_count < r.max_offer_count",
@@ -307,7 +307,7 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 	nodeID, coreID := uuid.New(), uuid.New()
 	workerID := "worker-runtime-v2"
 	attemptValues := []any{
-		attemptID, runID, agentID, int32(1), (*int32)(nil), "agent_node",
+		attemptID, runID, agentID, int32(1), (*int32)(nil), "runtime",
 		leaseID, int64(1), &tokenID, &workerID, &sessionID, &nodeID,
 		coreID, coreID, now, now.Add(30 * time.Second), (*time.Time)(nil),
 		(*time.Time)(nil), now.Add(time.Minute), now.Add(5 * time.Minute),

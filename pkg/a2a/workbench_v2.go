@@ -46,7 +46,7 @@ func (s *Service) GetRuntimeWorkbench(
 	snapshot, err := s.runtimeWorkbenchSnapshot(ctx, agentID)
 	if err != nil {
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("a2a.GetRuntimeWorkbench: snapshot")
-		return nil, httpx.Internal("查询 Agent Node 状态失败")
+		return nil, httpx.Internal("查询 Runtime Worker 状态失败")
 	}
 	recentRuns, err := s.runtimeWorkbenchRecentRuns(ctx, userID, agentID)
 	if err != nil {
@@ -302,8 +302,8 @@ func runtimeWorkbenchDiagnosticsV2(
 		return []RuntimeWorkbenchDiagnostic{{
 			Code:            "runtime_not_applicable",
 			Severity:        "info",
-			Summary:         "这个 Agent 不通过 Agent Node 运行，请在接入设置里检查它自己的 Endpoint 或 MCP 服务。",
-			TechnicalDetail: "connection_mode=" + agent.ConnectionMode + "; Agent Node Session inventory is not applicable.",
+			Summary:         "这个 Agent 不通过 Runtime Worker 运行，请在接入设置里检查它自己的 Endpoint 或 MCP 服务。",
+			TechnicalDetail: "connection_mode=" + agent.ConnectionMode + "; Runtime Worker Session inventory is not applicable.",
 			NextAction:      "check_endpoint",
 		}}
 	}
@@ -322,15 +322,15 @@ func runtimeWorkbenchDiagnosticsV2(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:            "runtime_session_offline",
 			Severity:        "warning",
-			Summary:         "Agent Node 还没连上。启动 Node 后会优先使用 WebSocket；网络不合适时会自动切到长轮询。",
+			Summary:         "Runtime Worker 还没连上。启动 Runtime Worker 后会优先使用 WebSocket；网络不合适时会自动切到长轮询。",
 			TechnicalDetail: "No live current-contract Runtime Session in the 15-second database-clock window; transport_policy=ws_primary_long_poll_fallback.",
-			NextAction:      "start_agent_node",
+			NextAction:      "start_runtime",
 		})
 	} else if snapshot.readySessionCount == 0 {
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:            "runtime_sessions_draining",
 			Severity:        "warning",
-			Summary:         "现有 Node 正在排空，会完成手上的运行，但不会再接新运行。",
+			Summary:         "现有 Runtime Worker 正在排空，会完成手上的运行，但不会再接新运行。",
 			TechnicalDetail: "All live Runtime Sessions or their Nodes are draining; new assignment offers are disabled.",
 			NextAction:      "restore_runtime_capacity",
 		})
@@ -340,7 +340,7 @@ func runtimeWorkbenchDiagnosticsV2(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:            "runtime_backlog_without_capacity",
 			Severity:        "error",
-			Summary:         "有运行在等可用的 Agent Node。先恢复 Node，再处理积压。",
+			Summary:         "有运行在等可用的 Runtime Worker。先恢复 Node，再处理积压。",
 			TechnicalDetail: "pending+retry_wait backlog exists while ready_session_count=0; transport switching does not change assignment semantics.",
 			NextAction:      "restore_runtime_capacity",
 		})
@@ -354,7 +354,7 @@ func runtimeWorkbenchDiagnosticsV2(
 			diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 				Code:            "recent_dispatch_timeout",
 				Severity:        "error",
-				Summary:         "最近有运行没能及时交给 Agent Node。请检查连接和可用容量。",
+				Summary:         "最近有运行没能及时交给 Runtime Worker。请检查连接和可用容量。",
 				TechnicalDetail: "Latest Run reached RUNTIME_DISPATCH_TIMEOUT before a confirmed Runtime assignment.",
 				NextAction:      "inspect_runtime_capacity",
 			})
@@ -373,7 +373,7 @@ func runtimeWorkbenchDiagnosticsV2(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:            "runtime_ready",
 			Severity:        "success",
-			Summary:         "Agent Node 已连接，可以接收运行。默认使用 WebSocket，网络受限时由长轮询接续。",
+			Summary:         "Runtime Worker 已连接，可以接收运行。默认使用 WebSocket，网络受限时由长轮询接续。",
 			TechnicalDetail: "A current-contract Runtime Session is ready; both transports share mTLS, assignment ACK, lease fencing, resume, Event/Result ACK, and persistent spool semantics.",
 			NextAction:      "none",
 		})

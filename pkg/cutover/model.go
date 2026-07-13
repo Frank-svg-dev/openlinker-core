@@ -115,18 +115,18 @@ type DatabaseEvidence struct {
 }
 
 type Report struct {
-	DatabaseTime    time.Time        `json:"database_time"`
-	SchemaInstalled bool             `json:"runtime_schema_installed"`
-	Control         *Control         `json:"control,omitempty"`
-	Current         Current          `json:"current"`
-	Members         []Member         `json:"members"`
-	Legacy          *LegacyEvidence  `json:"legacy,omitempty"`
-	Database        DatabaseEvidence `json:"database"`
-	Readiness       Readiness        `json:"readiness"`
-	ReopenReadiness *Readiness       `json:"reopen_readiness,omitempty"`
-	SignalBus       SignalBus        `json:"signal_bus"`
-	Changed         bool             `json:"changed,omitempty"`
-	PreV2Noop       bool             `json:"pre_v2_noop,omitempty"`
+	DatabaseTime           time.Time        `json:"database_time"`
+	SchemaInstalled        bool             `json:"runtime_schema_installed"`
+	Control                *Control         `json:"control,omitempty"`
+	Current                Current          `json:"current"`
+	Members                []Member         `json:"members"`
+	Legacy                 *LegacyEvidence  `json:"legacy,omitempty"`
+	Database               DatabaseEvidence `json:"database"`
+	Readiness              Readiness        `json:"readiness"`
+	ReopenReadiness        *Readiness       `json:"reopen_readiness,omitempty"`
+	SignalBus              SignalBus        `json:"signal_bus"`
+	Changed                bool             `json:"changed,omitempty"`
+	RuntimeUninstalledNoop bool             `json:"runtime_uninstalled_noop,omitempty"`
 }
 
 func (r Report) MarshalJSON() ([]byte, error) {
@@ -160,11 +160,11 @@ type PreflightOptions struct {
 }
 
 type TransitionRequest struct {
-	ExpectedVersion  int64
-	ExpectedReplicas int32
-	CutoverID        uuid.UUID
-	DrainDeadline    *time.Time
-	AllowPreV2Noop   bool
+	ExpectedVersion             int64
+	ExpectedReplicas            int32
+	CutoverID                   uuid.UUID
+	DrainDeadline               *time.Time
+	AllowRuntimeUninstalledNoop bool
 }
 
 type OperationError struct {

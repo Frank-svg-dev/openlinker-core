@@ -22,18 +22,18 @@ const (
 	defaultRuntimeV2DelegationRunning = 500
 )
 
-// RuntimeV2InvocationVerifier verifies the two domain-separated capabilities
+// RuntimeInvocationVerifier verifies the two domain-separated capabilities
 // emitted with one assignment. Both must decode to the same immutable Attempt
 // authority before an Agent may create a child Run.
-type RuntimeV2InvocationVerifier interface {
+type RuntimeInvocationVerifier interface {
 	VerifyNodeEnvelope(string, time.Time) (RuntimeInvocationCapability, error)
 	VerifyInvocationToken(string, time.Time) (RuntimeInvocationCapability, error)
 }
 
-// RuntimeV2DelegationAuthorization contains transport-authenticated evidence.
+// RuntimeDelegationAuthorization contains transport-authenticated evidence.
 // ProofRequest.Body is the exact byte sequence read from HTTP and later decoded
 // as Payload; callers must not marshal the body a second time.
-type RuntimeV2DelegationAuthorization struct {
+type RuntimeDelegationAuthorization struct {
 	Device            RuntimeDeviceIdentity
 	InvocationContext string
 	InvocationToken   string
@@ -42,25 +42,25 @@ type RuntimeV2DelegationAuthorization struct {
 	ProofRequest      RuntimeInvocationProofRequest
 }
 
-// RuntimeV2DelegationService creates a child Run only while the signed parent
+// RuntimeDelegationService creates a child Run only while the signed parent
 // Attempt is accepted, current, uncanceled, and unexpired. PostgreSQL locks and
 // time are authoritative; the preliminary capability read is only used to
 // assemble a candidate request before the creation transaction.
-type RuntimeV2DelegationService struct {
+type RuntimeDelegationService struct {
 	pool               *pgxpool.Pool
 	queries            *db.Queries
 	runtime            *Service
-	verifier           RuntimeV2InvocationVerifier
+	verifier           RuntimeInvocationVerifier
 	maxDepth           int32
 	maxRunningChildren int32
 }
 
-func NewRuntimeV2DelegationService(
+func NewRuntimeDelegationService(
 	pool *pgxpool.Pool,
 	runtimeService *Service,
-	verifier RuntimeV2InvocationVerifier,
-) *RuntimeV2DelegationService {
-	service := &RuntimeV2DelegationService{
+	verifier RuntimeInvocationVerifier,
+) *RuntimeDelegationService {
+	service := &RuntimeDelegationService{
 		pool:               pool,
 		runtime:            runtimeService,
 		verifier:           verifier,
@@ -73,14 +73,14 @@ func NewRuntimeV2DelegationService(
 	return service
 }
 
-func (s *RuntimeV2DelegationService) CallAgent(
+func (s *RuntimeDelegationService) CallAgent(
 	ctx context.Context,
-	authorization RuntimeV2DelegationAuthorization,
+	authorization RuntimeDelegationAuthorization,
 ) (RunSummary, error) {
 	if s == nil || s.pool == nil || s.queries == nil || s.runtime == nil || s.verifier == nil {
 		return RunSummary{}, runtimeV2UnavailableError()
 	}
-	if !validRuntimeV2DelegationAuthorization(authorization) {
+	if !validRuntimeDelegationAuthorization(authorization) {
 		return RunSummary{}, runtimeV2UnauthorizedError(ErrInvalidRuntimeInvocation)
 	}
 
@@ -202,7 +202,7 @@ func (s *RuntimeV2DelegationService) CallAgent(
 	return s.runSummary(ctx, runID)
 }
 
-func (s *RuntimeV2DelegationService) preliminaryParent(
+func (s *RuntimeDelegationService) preliminaryParent(
 	ctx context.Context,
 	runID uuid.UUID,
 ) (uuid.UUID, uuid.UUID, error) {
@@ -221,7 +221,7 @@ WHERE id = $1
 	return userID, agentID, nil
 }
 
-func (s *RuntimeV2DelegationService) validateDelegationTarget(
+func (s *RuntimeDelegationService) validateDelegationTarget(
 	ctx context.Context,
 	capability RuntimeInvocationCapability,
 	targetAgentID uuid.UUID,
@@ -285,7 +285,7 @@ func (s *RuntimeV2DelegationService) validateDelegationTarget(
 	return nil
 }
 
-func (s *RuntimeV2DelegationService) childA2AContext(
+func (s *RuntimeDelegationService) childA2AContext(
 	ctx context.Context,
 	capability RuntimeInvocationCapability,
 	targetAgentID uuid.UUID,
@@ -339,7 +339,7 @@ func (s *RuntimeV2DelegationService) childA2AContext(
 	}, nil
 }
 
-func (s *RuntimeV2DelegationService) runSummary(ctx context.Context, runID uuid.UUID) (RunSummary, error) {
+func (s *RuntimeDelegationService) runSummary(ctx context.Context, runID uuid.UUID) (RunSummary, error) {
 	var summary RunSummary
 	summary.RunID = runID
 	err := s.pool.QueryRow(ctx, `
@@ -361,10 +361,10 @@ WHERE id = $1
 	return summary, nil
 }
 
-func (s *RuntimeV2DelegationService) authorizeChildCreation(
+func (s *RuntimeDelegationService) authorizeChildCreation(
 	ctx context.Context,
 	tx pgx.Tx,
-	authorization RuntimeV2DelegationAuthorization,
+	authorization RuntimeDelegationAuthorization,
 	preliminary RuntimeInvocationCapability,
 	parentUserID uuid.UUID,
 ) error {
@@ -586,7 +586,7 @@ WHERE a.run_id = $1
   AND a.runtime_token_id = $7
   AND a.runtime_worker_id = $8
   AND a.runtime_session_id = $9
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
 FOR UPDATE OF a`,
 		capability.RunID,
 		capability.AttemptID,
@@ -620,7 +620,7 @@ func runtimeV2DelegatingRunOwnsCapability(
 }
 
 func verifyRuntimeV2DelegationCapabilityPair(
-	verifier RuntimeV2InvocationVerifier,
+	verifier RuntimeInvocationVerifier,
 	contextValue string,
 	token string,
 	databaseNow time.Time,
@@ -652,7 +652,7 @@ func runtimeV2InvocationCapabilitiesEqual(left, right RuntimeInvocationCapabilit
 		subtle.ConstantTimeCompare(left.InputSHA256[:], right.InputSHA256[:]) == 1
 }
 
-func validRuntimeV2DelegationAuthorization(value RuntimeV2DelegationAuthorization) bool {
+func validRuntimeDelegationAuthorization(value RuntimeDelegationAuthorization) bool {
 	return value.Device.NodeID != uuid.Nil &&
 		validCertificateSerial(value.Device.CertificateSerial) &&
 		validSHA256Hex(value.Device.CertificateFingerprintSHA256) &&
@@ -662,7 +662,7 @@ func validRuntimeV2DelegationAuthorization(value RuntimeV2DelegationAuthorizatio
 		value.ProofRequest.Path == runtimeV2CallAgentPath &&
 		value.ProofRequest.IdempotencyKey == value.IdempotencyKey &&
 		value.ProofRequest.Context == value.InvocationContext &&
-		len(value.ProofRequest.Body) > 0 && int64(len(value.ProofRequest.Body)) <= MaxRuntimeV2MessageBytes
+		len(value.ProofRequest.Body) > 0 && int64(len(value.ProofRequest.Body)) <= MaxRuntimeMessageBytes
 }
 
 func runtimeV2DelegationPrincipalLockError(err error) error {
@@ -682,4 +682,4 @@ func runtimeV2DatabaseUnavailable(cause error) *RuntimeTransportError {
 	return err
 }
 
-var _ RuntimeV2InvocationVerifier = (*RuntimeInvocationSigner)(nil)
+var _ RuntimeInvocationVerifier = (*RuntimeInvocationSigner)(nil)

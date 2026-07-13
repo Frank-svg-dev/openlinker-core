@@ -167,27 +167,27 @@ func TestNormalizeConnectionSettings(t *testing.T) {
 		{
 			name:        "agent node fills endpoint",
 			slug:        "node-agent",
-			mode:        ConnectionModeAgentNode,
-			wantMode:    ConnectionModeAgentNode,
-			wantURL:     agentNodeEndpointPrefix + "node-agent",
+			mode:        ConnectionModeRuntime,
+			wantMode:    ConnectionModeRuntime,
+			wantURL:     runtimeEndpointPrefix + "node-agent",
 			wantToolNil: true,
 		},
 		{
 			name:        "agent node replaces non canonical endpoint",
 			slug:        "node-agent",
 			endpoint:    "https://example.com/ignored",
-			mode:        ConnectionModeAgentNode,
-			wantMode:    ConnectionModeAgentNode,
-			wantURL:     agentNodeEndpointPrefix + "node-agent",
+			mode:        ConnectionModeRuntime,
+			wantMode:    ConnectionModeRuntime,
+			wantURL:     runtimeEndpointPrefix + "node-agent",
 			wantToolNil: true,
 		},
 		{
 			name:        "agent node preserves canonical endpoint",
 			slug:        "node-agent",
-			endpoint:    agentNodeEndpointPrefix + "custom",
-			mode:        ConnectionModeAgentNode,
-			wantMode:    ConnectionModeAgentNode,
-			wantURL:     agentNodeEndpointPrefix + "custom",
+			endpoint:    runtimeEndpointPrefix + "custom",
+			mode:        ConnectionModeRuntime,
+			wantMode:    ConnectionModeRuntime,
+			wantURL:     runtimeEndpointPrefix + "custom",
 			wantToolNil: true,
 		},
 		{
@@ -437,7 +437,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	if inactiveRuntime.Status != "unreachable" || inactiveRuntime.Label != "不可达" {
 		t.Fatalf("inactive Runtime Session remained callable: %#v", inactiveRuntime)
 	}
-	if !isQueuedRuntimeConnectionMode(ConnectionModeAgentNode) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
+	if !isQueuedRuntimeConnectionMode(ConnectionModeRuntime) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
 		t.Fatalf("queued runtime connection mode detection failed")
 	}
 
@@ -446,7 +446,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 		wantSignal string
 	}{
 		{mode: ConnectionModeDirectHTTP, wantSignal: "direct_endpoint_probe_and_run_result"},
-		{mode: ConnectionModeAgentNode, wantSignal: "runtime_ws_primary_long_poll_fallback_mtls_ack_lease_resume_fence_spool"},
+		{mode: ConnectionModeRuntime, wantSignal: "runtime_ws_primary_long_poll_fallback_mtls_ack_lease_resume_fence_spool"},
 		{mode: ConnectionModeMCPServer, wantSignal: "mcp_tool_call_and_run_result"},
 	} {
 		if got := agentCardRuntimeExt(tc.mode); got.Adapter != "openlinker_a2a_proxy" || got.ConnectionMode != tc.mode || got.OnlineSignal != tc.wantSignal {
@@ -457,7 +457,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	if hints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeDirectHTTP}, ""); hints != nil {
 		t.Fatalf("empty dry-run error should not produce hints: %#v", hints)
 	}
-	nodeHints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeAgentNode}, "schema timeout")
+	nodeHints := repairHintsForDryRun(&db.Agent{ConnectionMode: ConnectionModeRuntime}, "schema timeout")
 	if len(nodeHints) < 4 || !strings.Contains(strings.Join(nodeHints, " "), "schema") {
 		t.Fatalf("agent node hints did not include mode/schema/timeout help: %#v", nodeHints)
 	}

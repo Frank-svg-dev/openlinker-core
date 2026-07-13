@@ -182,7 +182,7 @@ func TestRegistryNodeHeartbeatAndRegistryListing(t *testing.T) {
 	assert.NotEmpty(t, synced.MetadataSyncedAt)
 
 	_, err = pool.Exec(ctx,
-		`UPDATE agents SET name='Bridge Agent Node Synced', description='node synced description', tags=ARRAY['bridge','node'] WHERE id=$1`,
+		`UPDATE agents SET name='Bridge Runtime Worker Synced', description='node synced description', tags=ARRAY['bridge','node'] WHERE id=$1`,
 		agentID)
 	require.NoError(t, err)
 	_, err = pool.Exec(ctx,
@@ -197,7 +197,7 @@ func TestRegistryNodeHeartbeatAndRegistryListing(t *testing.T) {
 	listings, err = svc.ListRegistryListings(ctx, ownerID)
 	require.NoError(t, err)
 	require.Len(t, listings, 1)
-	assert.Equal(t, "Bridge Agent Node Synced", listings[0].AgentName)
+	assert.Equal(t, "Bridge Runtime Worker Synced", listings[0].AgentName)
 	assert.Equal(t, "node synced description", listings[0].AgentDescription)
 	assert.Equal(t, "degraded", listings[0].AvailabilityStatus)
 

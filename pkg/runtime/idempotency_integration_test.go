@@ -221,11 +221,11 @@ func requireReliableRuntimeV2Schema(t *testing.T, pool *pgxpool.Pool) {
 		   )`).Scan(&ready)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			t.Fatalf("checking reliable runtime v2 schema: %v", err)
+			t.Fatalf("checking reliable Runtime schema: %v", err)
 		}
 		t.Skipf("migration 063 schema check unavailable: %v", err)
 	}
 	if !ready {
-		t.Skip("migration 063 reliable runtime v2 schema is not applied")
+		t.Skip("migration 063 reliable Runtime schema is not applied")
 	}
 }

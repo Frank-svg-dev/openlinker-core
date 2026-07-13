@@ -370,7 +370,7 @@ func (q *Queries) ListTopAgentsBySkill(ctx context.Context, arg ListTopAgentsByS
 }
 
 const listAgentsBySkillsWithVerified = `-- name: ListAgentsBySkillsWithVerified :many
--- RecommendAgentsBySkills 加 verified/availability 加权。Agent Node 必须有
+-- RecommendAgentsBySkills 加 verified/availability 加权。Runtime Worker 必须有
 -- PostgreSQL 证明的 current-contract ready Session；Agent Token 的使用时间
 -- 不是在线性证据。Direct/MCP Agent 仍需 healthy 或成功运行证据。
 -- 排序：命中 skill 数 desc → 可用性 → 最近 Session/成功证据 → verified 数 desc → total_calls desc。
@@ -443,11 +443,11 @@ WHERE ag.skill_id = ANY($1::text[])
   AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
   AND (
       (
-          a.connection_mode = 'agent_node'
+          a.connection_mode = 'runtime'
           AND runtime_ready.last_runtime_session_at IS NOT NULL
       )
       OR (
-          a.connection_mode <> 'agent_node'
+          a.connection_mode <> 'runtime'
           AND (
               COALESCE(av.availability_status, 'unknown') = 'healthy'
               OR av.last_successful_run_at IS NOT NULL

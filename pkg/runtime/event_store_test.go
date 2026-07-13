@@ -151,8 +151,8 @@ func TestRuntimeExecutorIdentityShapeSupportsNodeAndCoreAttempts(t *testing.T) {
 	sessionID := uuid.New()
 	workerID := "worker-a"
 
-	require.True(t, runtimeExecutorIdentityShapeValid("agent_node", &nodeID, &sessionID, &workerID))
-	require.False(t, runtimeExecutorIdentityShapeValid("agent_node", nil, nil, nil))
+	require.True(t, runtimeExecutorIdentityShapeValid("runtime", &nodeID, &sessionID, &workerID))
+	require.False(t, runtimeExecutorIdentityShapeValid("runtime", nil, nil, nil))
 	require.True(t, runtimeExecutorIdentityShapeValid("core_http", nil, nil, nil))
 	require.True(t, runtimeExecutorIdentityShapeValid("core_mcp", nil, nil, nil))
 	require.False(t, runtimeExecutorIdentityShapeValid("core_http", &nodeID, &sessionID, &workerID))

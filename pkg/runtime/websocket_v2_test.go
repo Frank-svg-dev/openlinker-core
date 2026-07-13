@@ -204,7 +204,7 @@ func TestRuntimeV2WebSocketRejectsMessageAboveFourMiB(t *testing.T) {
 	conn := dialRuntimeV2WS(t, target)
 	defer conn.Close()
 
-	oversized := make([]byte, MaxRuntimeV2MessageBytes+1)
+	oversized := make([]byte, MaxRuntimeMessageBytes+1)
 	for index := range oversized {
 		oversized[index] = ' '
 	}
@@ -550,7 +550,7 @@ type runtimeV2WSTestFixture struct {
 	leases        *runtimeV2WSLeaseServiceFake
 	events        *runtimeV2WSEventStoreFake
 	finalizer     *runtimeV2WSFinalizerFake
-	resume        RuntimeV2ResumeService
+	resume        RuntimeResumeAPI
 	cancellations *runtimeV2WSCancellationServiceFake
 	wakeHub       *RuntimeWakeHub
 }
@@ -628,8 +628,8 @@ func newRuntimeV2WSTestFixture() *runtimeV2WSTestFixture {
 	}
 }
 
-func (f *runtimeV2WSTestFixture) controller() *RuntimeV2HTTPController {
-	return NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{
+func (f *runtimeV2WSTestFixture) controller() *RuntimeHTTPController {
+	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
 		Sessions:            f.sessions,
@@ -1089,12 +1089,12 @@ func (f *runtimeV2WSFinalizerFake) lastPrincipal() RuntimeResultPrincipal {
 }
 
 var (
-	_ RuntimeV2TokenValidator      = (*runtimeV2WSTokenValidatorFake)(nil)
-	_ RuntimeV2DeviceAuthenticator = (*runtimeV2WSDeviceAuthenticatorFake)(nil)
-	_ RuntimeV2SessionService      = (*runtimeV2WSSessionServiceFake)(nil)
-	_ RuntimeV2LeaseService        = (*runtimeV2WSLeaseServiceFake)(nil)
-	_ RuntimeV2EventProjector      = (*runtimeV2WSEventStoreFake)(nil)
-	_ RuntimeV2ResultFinalizer     = (*runtimeV2WSFinalizerFake)(nil)
-	_ RuntimeV2ResumeService       = (*runtimeV2WSResumeServiceFake)(nil)
-	_ RuntimeV2CancellationService = (*runtimeV2WSCancellationServiceFake)(nil)
+	_ RuntimeTokenValidator      = (*runtimeV2WSTokenValidatorFake)(nil)
+	_ RuntimeDeviceAuthenticator = (*runtimeV2WSDeviceAuthenticatorFake)(nil)
+	_ RuntimeSessionAPI          = (*runtimeV2WSSessionServiceFake)(nil)
+	_ RuntimeLeaseAPI            = (*runtimeV2WSLeaseServiceFake)(nil)
+	_ RuntimeEventProjector      = (*runtimeV2WSEventStoreFake)(nil)
+	_ RuntimeResultFinalizer     = (*runtimeV2WSFinalizerFake)(nil)
+	_ RuntimeResumeAPI           = (*runtimeV2WSResumeServiceFake)(nil)
+	_ RuntimeCancellationAPI     = (*runtimeV2WSCancellationServiceFake)(nil)
 )

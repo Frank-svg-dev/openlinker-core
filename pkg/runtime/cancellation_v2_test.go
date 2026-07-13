@@ -247,7 +247,7 @@ func newRuntimeCancellationFixture(t *testing.T) *runtimeCancellationFixture {
 	attemptID, leaseID := uuid.New(), uuid.New()
 	attempt := db.RunAttempt{
 		ID: attemptID, RunID: runID, AgentID: agentID, OfferNo: 1, AttemptNo: runtimeCancellationInt32Pointer(1),
-		ExecutorType: "agent_node", LeaseID: leaseID, FencingToken: 3,
+		ExecutorType: "runtime", LeaseID: leaseID, FencingToken: 3,
 		RuntimeTokenID: &credentialID, RuntimeWorkerID: &workerID, RuntimeSessionID: &sessionID, NodeID: &nodeID,
 		OfferedByCoreInstanceID: coreID, AttachedCoreInstanceID: coreID,
 		OfferedAt: databaseNow.Add(-time.Minute), OfferExpiresAt: databaseNow.Add(time.Minute),
@@ -265,7 +265,7 @@ func newRuntimeCancellationFixture(t *testing.T) *runtimeCancellationFixture {
 	lockedRun := db.LockRunForResultFinalizationRow{
 		ID: runID, UserID: ownerID, AgentID: agentID, Status: string(RuntimeRunRunning),
 		DispatchState: string(RuntimeDispatchExecuting), RuntimeContractID: "openlinker.runtime.v2",
-		ConnectionModeSnapshot: runtimeCancellationStringPointer(connectionModeAgentNode),
+		ConnectionModeSnapshot: runtimeCancellationStringPointer(connectionModeRuntime),
 		AttemptCount:           1, MaxAttempts: 3, LatestAttemptID: &attemptID, ActiveAttemptID: &attemptID,
 		LeaseID: &leaseID, FencingToken: 3, RuntimeNodeID: &nodeID, RuntimeWorkerID: &workerID,
 		RuntimeSessionID: &sessionID, LeaseTokenID: &credentialID,

@@ -260,8 +260,8 @@ func configureRuntimeV2(
 	verifier := runtime.NewDBRuntimeNodeCredentialVerifier(pool)
 	cancellations := runtime.NewRuntimeCancellationCoordinator(pool)
 
-	var leases runtime.RuntimeV2LeaseService
-	var delegation runtime.RuntimeV2DelegationAPI
+	var leases runtime.RuntimeLeaseAPI
+	var delegation runtime.RuntimeDelegationAPI
 	signer, err := runtime.NewRuntimeInvocationSignerWithPrevious(
 		cfg.RuntimeInvocationSigningKeyID,
 		cfg.RuntimeInvocationSigningSecret,
@@ -272,7 +272,7 @@ func configureRuntimeV2(
 		log.Warn().Err(err).Msg("agent runtime assignment capabilities are disabled")
 	} else {
 		leases = runtime.NewRuntimeLeaseService(pool, coreInstanceID, signer, runtime.DefaultRuntimeLeaseConfig())
-		delegation = runtime.NewRuntimeV2DelegationService(pool, runtimeService, signer)
+		delegation = runtime.NewRuntimeDelegationService(pool, runtimeService, signer)
 	}
 
 	wakeHub := runtime.NewRuntimeWakeHub()
@@ -283,7 +283,7 @@ func configureRuntimeV2(
 			log.Warn().Err(err).Msg("agent runtime Redis presence is unavailable")
 		}
 	}
-	handler.SetRuntimeV2Dependencies(runtime.RuntimeV2HTTPDependencies{
+	handler.SetRuntimeDependencies(runtime.RuntimeHTTPDependencies{
 		TokenValidator:      runtimeService,
 		DeviceAuthenticator: runtime.NewMTLSRuntimeDeviceAuthenticator(verifier),
 		Sessions:            sessions,
@@ -297,11 +297,11 @@ func configureRuntimeV2(
 		Presence:            presence,
 		CoreInstanceID:      coreInstanceID,
 	})
-	go runtime.StartRuntimeV2MaintenanceWorker(
+	go runtime.StartRuntimeMaintenanceWorker(
 		rootCtx,
-		runtime.NewRuntimeV2DeadlineReconciler(pool, nil),
+		runtime.NewRuntimeDeadlineReconciler(pool, nil),
 		cancellations,
-		runtime.RuntimeV2MaintenanceWorkerConfig{},
+		runtime.RuntimeMaintenanceWorkerConfig{},
 	)
 	if signalBus != nil {
 		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)

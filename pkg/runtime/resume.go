@@ -21,7 +21,7 @@ const (
 	maximumRuntimeResumeGrantTTL = 24 * time.Hour
 )
 
-// RuntimeResumeService decides what a reconnecting Agent Node may do with
+// RuntimeResumeService decides what a reconnecting Runtime Worker may do with
 // each immutable Attempt identity. It never moves execution or capacity
 // ownership to a replacement Session: cross-Session recovery is restricted
 // to uploading an already durable local spool.
@@ -383,7 +383,7 @@ func runtimeResumeIdentityMatches(
 ) bool {
 	return run.ID == identity.RunID && run.AgentID == identity.AgentID &&
 		attempt.ID == identity.AttemptID && attempt.RunID == identity.RunID &&
-		attempt.AgentID == identity.AgentID && attempt.ExecutorType == "agent_node" &&
+		attempt.AgentID == identity.AgentID && attempt.ExecutorType == "runtime" &&
 		attempt.LeaseID == identity.LeaseID && attempt.FencingToken == identity.FencingToken &&
 		uuidPointerEqual(attempt.NodeID, identity.NodeID) &&
 		uuidPointerEqual(attempt.RuntimeSessionID, identity.RuntimeSessionID) &&

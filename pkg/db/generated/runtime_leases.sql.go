@@ -36,7 +36,7 @@ WHERE a.run_id = $3
   AND a.node_id = $8
   AND a.runtime_token_id = $9
   AND a.runtime_worker_id = $10
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.accepted_at IS NULL
   AND a.finished_at IS NULL
   AND a.offer_expires_at > c.database_now
@@ -154,7 +154,7 @@ INSERT INTO run_attempts (
 )
 SELECT
     $1, r.id, r.agent_id, r.offer_count + 1,
-    'agent_node', $2, r.fencing_token + 1,
+    'runtime', $2, r.fencing_token + 1,
     s.credential_id, s.worker_id, s.runtime_session_id, s.node_id,
     $3, $3, c.database_now,
     LEAST(
@@ -187,7 +187,7 @@ CROSS JOIN database_clock c
 WHERE r.id = $8
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
-  AND r.connection_mode_snapshot = 'agent_node'
+  AND r.connection_mode_snapshot = 'runtime'
   AND (
       r.dispatch_state = 'pending'
       OR (
@@ -306,7 +306,7 @@ WHERE a.run_id = $4
   AND a.node_id = $9
   AND a.runtime_token_id = $10
   AND a.runtime_worker_id = $11
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.accepted_at IS NULL
   AND a.attempt_no IS NULL
   AND a.finished_at IS NULL
@@ -567,7 +567,7 @@ WHERE a.run_id = $1
   AND a.node_id = $6
   AND a.runtime_token_id = $7
   AND a.runtime_worker_id = $8
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
 FOR UPDATE OF a
 `
 
@@ -643,7 +643,7 @@ FROM runs r
 WHERE r.agent_id = $1
   AND r.status = 'running'
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
-  AND r.connection_mode_snapshot = 'agent_node'
+  AND r.connection_mode_snapshot = 'runtime'
   AND (
       r.dispatch_state = 'pending'
       OR (
@@ -1074,7 +1074,7 @@ type LockRuntimeSessionForPrincipalValidationRow struct {
 	DatabaseNow             time.Time  `db:"database_now" json:"database_now"`
 }
 
-// Reliable runtime v2 Session principal, assignment offer, ACK and lease
+// Reliable Runtime Session principal, assignment offer, ACK and lease
 // primitives.
 //
 // Runtime transactions must acquire principal locks in this order before any
@@ -1132,7 +1132,7 @@ WITH capacity_owner AS MATERIALIZED (
       AND a.id = $2
       AND a.lease_id = $3
       AND a.fencing_token = $4
-      AND a.executor_type = 'agent_node'
+      AND a.executor_type = 'runtime'
       AND a.slot_acquired_at IS NOT NULL
       AND a.slot_released_at IS NULL
       AND a.active_runtime_session_id IS NOT NULL
@@ -1213,7 +1213,7 @@ WHERE r.id = $1
   AND a.runtime_token_id = $7
   AND a.runtime_worker_id = $8
   AND a.attached_core_instance_id = $9
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.accepted_at IS NULL
   AND a.finished_at IS NULL
   AND r.status = 'running'
@@ -1515,7 +1515,7 @@ WHERE a.run_id = $3
   AND a.node_id = $8
   AND a.runtime_token_id = $9
   AND a.runtime_worker_id = $10
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.accepted_at IS NOT NULL
   AND a.finished_at IS NULL
   AND a.lease_expires_at > c.database_now

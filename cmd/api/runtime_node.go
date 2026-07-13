@@ -38,7 +38,7 @@ import (
 )
 
 const (
-	defaultRuntimeNodeVersion  = "openlinker-agent-node/reliable-run-v2"
+	defaultRuntimeNodeVersion  = "openlinker-go/runtime-worker"
 	defaultRuntimeNodeValidity = 365 * 24 * time.Hour
 	minRuntimeNodeValidity     = time.Hour
 	maxRuntimeNodeValidity     = 397 * 24 * time.Hour
@@ -193,7 +193,7 @@ func parseRuntimeNodeIssueConfig(args []string, getenv func(string) string) (run
 	fs.StringVar(&cfg.KeyOut, "key-out", "", "new Node private key PEM path")
 	fs.StringVar(&nodeID, "node-id", "", "Node UUID; generated when omitted")
 	fs.StringVar(&cfg.DisplayName, "display-name", "", "operator-facing Node name")
-	fs.StringVar(&cfg.NodeVersion, "node-version", cfg.NodeVersion, "exact Agent Node runtime version")
+	fs.StringVar(&cfg.NodeVersion, "node-version", cfg.NodeVersion, "exact Runtime Worker version")
 	fs.IntVar(&capacity, "capacity", capacity, "maximum concurrent assignments (1-1024)")
 	fs.DurationVar(&cfg.ValidFor, "valid-for", cfg.ValidFor, "certificate lifetime (1h-9528h)")
 	if err := fs.Parse(args); err != nil {

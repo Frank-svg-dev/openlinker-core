@@ -1,4 +1,4 @@
--- Core-owned Runtime v2 HTTP/MCP Attempt lifecycle.
+-- Core-owned Runtime HTTP/MCP Attempt lifecycle.
 --
 -- The caller must execute these statements in one READ COMMITTED transaction
 -- in this order: LockCoreRunForExecution -> CreateRunAttempt ->

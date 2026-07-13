@@ -11,17 +11,17 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-func TestRuntimeV2DeadlineReconcilerRejectsInvalidConfigurationAndBatch(t *testing.T) {
-	_, err := (*RuntimeV2DeadlineReconciler)(nil).ReconcileBatch(t.Context(), 1)
-	require.ErrorIs(t, err, ErrRuntimeV2ReconcilerNotConfigured)
+func TestRuntimeDeadlineReconcilerRejectsInvalidConfigurationAndBatch(t *testing.T) {
+	_, err := (*RuntimeDeadlineReconciler)(nil).ReconcileBatch(t.Context(), 1)
+	require.ErrorIs(t, err, ErrRuntimeReconcilerNotConfigured)
 
-	reconciler := &RuntimeV2DeadlineReconciler{retryPlanner: fixedResultRetryPlanner{}}
+	reconciler := &RuntimeDeadlineReconciler{retryPlanner: fixedResultRetryPlanner{}}
 	_, err = reconciler.ReconcileBatch(t.Context(), 1)
-	require.ErrorIs(t, err, ErrRuntimeV2ReconcilerNotConfigured)
+	require.ErrorIs(t, err, ErrRuntimeReconcilerNotConfigured)
 
-	configured := &RuntimeV2DeadlineReconciler{pool: nil, retryPlanner: fixedResultRetryPlanner{}}
+	configured := &RuntimeDeadlineReconciler{pool: nil, retryPlanner: fixedResultRetryPlanner{}}
 	_, err = configured.ReconcileBatch(t.Context(), 0)
-	require.True(t, errors.Is(err, ErrRuntimeV2ReconcilerNotConfigured))
+	require.True(t, errors.Is(err, ErrRuntimeReconcilerNotConfigured))
 }
 
 func TestRuntimeV2ReconcileTerminalPrecedence(t *testing.T) {

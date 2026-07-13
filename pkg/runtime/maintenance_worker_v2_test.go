@@ -12,17 +12,17 @@ import (
 
 type runtimeV2MaintenanceReconcilerFake struct {
 	mu      sync.Mutex
-	results []RuntimeV2ReconcileBatchResult
+	results []RuntimeReconcileBatchResult
 	err     error
 	calls   int
 }
 
-func (f *runtimeV2MaintenanceReconcilerFake) ReconcileBatch(_ context.Context, _ int) (RuntimeV2ReconcileBatchResult, error) {
+func (f *runtimeV2MaintenanceReconcilerFake) ReconcileBatch(_ context.Context, _ int) (RuntimeReconcileBatchResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	if len(f.results) == 0 {
-		return RuntimeV2ReconcileBatchResult{}, f.err
+		return RuntimeReconcileBatchResult{}, f.err
 	}
 	result := f.results[0]
 	f.results = f.results[1:]
@@ -49,17 +49,17 @@ func (f *runtimeV2MaintenanceCancellationFake) ReapExpiredCancellations(_ contex
 }
 
 func TestRuntimeV2MaintenanceWorkerRunsBoundedCatchUp(t *testing.T) {
-	reconciler := &runtimeV2MaintenanceReconcilerFake{results: []RuntimeV2ReconcileBatchResult{
+	reconciler := &runtimeV2MaintenanceReconcilerFake{results: []RuntimeReconcileBatchResult{
 		{Scanned: 2, Reconciled: 2, Requeued: 1, TimedOut: 1},
 		{Scanned: 1, Reconciled: 1, DeadLettered: 1},
 	}}
 	cancellations := &runtimeV2MaintenanceCancellationFake{results: []int{2, 1}}
 
-	result, err := RunRuntimeV2MaintenanceOnce(context.Background(), reconciler, cancellations, RuntimeV2MaintenanceWorkerConfig{
+	result, err := RunRuntimeMaintenanceOnce(context.Background(), reconciler, cancellations, RuntimeMaintenanceWorkerConfig{
 		ReconcileBatchSize: 2, CancellationBatchSize: 2, MaxCatchUpBatches: 3,
 	})
 	require.NoError(t, err)
-	require.Equal(t, RuntimeV2MaintenanceResult{
+	require.Equal(t, RuntimeMaintenanceResult{
 		ReconcileBatches: 2, CancellationBatches: 2,
 		Reconciled: 3, Requeued: 1, TimedOut: 1, DeadLettered: 1,
 		CancellationsReaped: 3,
@@ -71,7 +71,7 @@ func TestRuntimeV2MaintenanceWorkerDoesNotHideIndependentFailure(t *testing.T) {
 	reconciler := &runtimeV2MaintenanceReconcilerFake{err: reconcileErr}
 	cancellations := &runtimeV2MaintenanceCancellationFake{results: []int{1}}
 
-	result, err := RunRuntimeV2MaintenanceOnce(context.Background(), reconciler, cancellations, RuntimeV2MaintenanceWorkerConfig{
+	result, err := RunRuntimeMaintenanceOnce(context.Background(), reconciler, cancellations, RuntimeMaintenanceWorkerConfig{
 		ReconcileBatchSize: 2, CancellationBatchSize: 2,
 	})
 	require.ErrorIs(t, err, reconcileErr)
@@ -85,7 +85,7 @@ func TestRuntimeV2MaintenanceWorkerStopsWithContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		StartRuntimeV2MaintenanceWorker(ctx, reconciler, cancellations, RuntimeV2MaintenanceWorkerConfig{Interval: time.Millisecond})
+		StartRuntimeMaintenanceWorker(ctx, reconciler, cancellations, RuntimeMaintenanceWorkerConfig{Interval: time.Millisecond})
 		close(done)
 	}()
 
@@ -98,6 +98,6 @@ func TestRuntimeV2MaintenanceWorkerStopsWithContext(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("runtime v2 maintenance worker did not stop")
+		t.Fatal("Runtime maintenance worker did not stop")
 	}
 }

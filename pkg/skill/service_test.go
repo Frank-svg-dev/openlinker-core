@@ -88,8 +88,8 @@ func insertSkillRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, creatorID uui
 		`INSERT INTO agents (
 			id, creator_id, slug, name, description, endpoint_url, price_per_call_cents,
 			tags, lifecycle_status, visibility, certification_status, total_calls, connection_mode
-		) VALUES ($1, $2, $3, $4, 'Skill test runtime agent', $5, 100, '{data}', 'active', 'public', 'unreviewed', $6, 'agent_node')`,
-		id, creatorID, slug, "Skill Runtime "+slug, "openlinker-agent-node://"+slug, totalCalls)
+		) VALUES ($1, $2, $3, $4, 'Skill test runtime agent', $5, 100, '{data}', 'active', 'public', 'unreviewed', $6, 'runtime')`,
+		id, creatorID, slug, "Skill Runtime "+slug, "openlinker-runtime://"+slug, totalCalls)
 	require.NoError(t, err)
 	_, err = pool.Exec(context.Background(),
 		`INSERT INTO agent_tokens (

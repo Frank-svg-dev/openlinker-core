@@ -55,7 +55,7 @@ WHERE a.run_id = sqlc.arg(run_id)
   AND a.id = sqlc.arg(attempt_id)
   AND a.lease_id = sqlc.arg(lease_id)
   AND a.fencing_token = sqlc.arg(fencing_token)
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.accepted_at IS NOT NULL
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
   AND source.runtime_session_id <> target.runtime_session_id

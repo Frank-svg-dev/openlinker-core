@@ -60,7 +60,7 @@ func TestDecodeRuntimeEnvelopeStrict(t *testing.T) {
 func TestRuntimeDecoderRejectsOversizeCompleteBody(t *testing.T) {
 	t.Parallel()
 
-	body := bytes.NewReader(bytes.Repeat([]byte{' '}, int(MaxRuntimeV2MessageBytes)+1))
+	body := bytes.NewReader(bytes.Repeat([]byte{' '}, int(MaxRuntimeMessageBytes)+1))
 	_, err := DecodeRuntimeBody[RuntimeClaimRequest](body)
 	requireRuntimeTransportCode(t, err, RuntimeErrorBadRequest)
 }

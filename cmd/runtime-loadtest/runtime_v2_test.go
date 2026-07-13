@@ -22,8 +22,8 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestRuntimeV2DuplicateAssignmentExecutesExactlyOnce(t *testing.T) {
-	fixture := newRuntimeV2WorkerTestFixture(t)
+func TestRuntimeDuplicateAssignmentExecutesExactlyOnce(t *testing.T) {
+	fixture := newRuntimeWorkerTestFixture(t)
 	fixture.worker.cfg.DuplicateAssignments = 2
 	fixture.worker.handleAssignment(context.Background(), fixture.connection, fixture.assignment, false)
 	waitForTestRunCompletion(t, fixture.tracker, fixture.assignment.AttemptIdentity.RunID)
@@ -34,7 +34,7 @@ func TestRuntimeV2DuplicateAssignmentExecutesExactlyOnce(t *testing.T) {
 
 	fixture.fake.mu.Lock()
 	ackCalls := fixture.fake.assignmentACKCalls
-	executionIdentities := append([]openlinker.RuntimeV2AttemptIdentity(nil), fixture.fake.executionIdentities...)
+	executionIdentities := append([]openlinker.RuntimeAttemptIdentity(nil), fixture.fake.executionIdentities...)
 	fixture.fake.mu.Unlock()
 	if ackCalls != 2 {
 		t.Fatalf("assignment ACK calls = %d, want 2", ackCalls)
@@ -76,8 +76,8 @@ func TestRuntimeV2DuplicateAssignmentExecutesExactlyOnce(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2AssignmentACKResponseLossRetriesSameIdentity(t *testing.T) {
-	fixture := newRuntimeV2WorkerTestFixture(t)
+func TestRuntimeAssignmentACKResponseLossRetriesSameIdentity(t *testing.T) {
+	fixture := newRuntimeWorkerTestFixture(t)
 	fixture.fake.dropAssignmentACK = true
 	fixture.worker.handleAssignment(context.Background(), fixture.connection, fixture.assignment, false)
 	waitForTestRunCompletion(t, fixture.tracker, fixture.assignment.AttemptIdentity.RunID)
@@ -95,8 +95,8 @@ func TestRuntimeV2AssignmentACKResponseLossRetriesSameIdentity(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2ReportPinsPublishedContract(t *testing.T) {
-	report := newRuntimeV2Metrics().report(config{Scenarios: []string{"baseline"}})
+func TestRuntimeReportPinsPublishedContract(t *testing.T) {
+	report := newRuntimeMetrics().report(config{Scenarios: []string{"baseline"}})
 	if got := report["protocol_version"]; got != openlinker.RuntimeProtocolVersion {
 		t.Fatalf("protocol version = %v", got)
 	}
@@ -108,25 +108,25 @@ func TestRuntimeV2ReportPinsPublishedContract(t *testing.T) {
 	}
 }
 
-func TestRuntimeV2CredentialPreflightBindsCertificateNodeAndKeyPermissions(t *testing.T) {
+func TestRuntimeCredentialPreflightBindsCertificateNodeAndKeyPermissions(t *testing.T) {
 	nodeID := uuid.New()
-	cert, key, ca := writeRuntimeV2TestCredentials(t, nodeID)
+	cert, key, ca := writeRuntimeTestCredentials(t, nodeID)
 	cfg := config{
 		NodeID: nodeID.String(), MTLSCertFile: cert, MTLSKeyFile: key, MTLSCAFile: ca,
 		StateDir: filepath.Join(t.TempDir(), "state"),
 	}
-	if err := preflightRuntimeV2Credentials(cfg); err != nil {
+	if err := preflightRuntimeCredentials(cfg); err != nil {
 		t.Fatalf("preflight valid credentials: %v", err)
 	}
 	cfg.NodeID = uuid.NewString()
-	if err := preflightRuntimeV2Credentials(cfg); err == nil {
+	if err := preflightRuntimeCredentials(cfg); err == nil {
 		t.Fatal("preflight accepted a Node ID that does not match the certificate")
 	}
 	cfg.NodeID = nodeID.String()
 	if err := os.Chmod(key, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := preflightRuntimeV2Credentials(cfg); err == nil {
+	if err := preflightRuntimeCredentials(cfg); err == nil {
 		t.Fatal("preflight accepted a group-readable private key")
 	}
 }
@@ -149,7 +149,7 @@ func TestCancelRaceScenarioRequiresOneExecutingWorkerPerCancellation(t *testing.
 	}
 }
 
-func TestRuntimeV2ScenarioTransportConstraintsFailClosed(t *testing.T) {
+func TestRuntimeScenarioTransportConstraintsFailClosed(t *testing.T) {
 	tests := []config{
 		{Transport: transportWS, Scenarios: []string{"ack-response-loss"}},
 		{Transport: transportAuto, Scenarios: []string{"core-a-b-resume"}, SwitchAfter: time.Second},
@@ -166,16 +166,16 @@ func TestRuntimeV2ScenarioTransportConstraintsFailClosed(t *testing.T) {
 type runtimeV2WorkerTestFixture struct {
 	worker     *runtimeV2Worker
 	connection *runtimeV2Connection
-	assignment openlinker.RuntimeV2RunAssignedPayload
-	fake       *fakeRuntimeV2Client
+	assignment openlinker.RuntimeRunAssignedPayload
+	fake       *fakeRuntimeClient
 	tracker    *runTracker
 	metrics    *metrics
 }
 
-func newRuntimeV2WorkerTestFixture(t *testing.T) runtimeV2WorkerTestFixture {
+func newRuntimeWorkerTestFixture(t *testing.T) runtimeV2WorkerTestFixture {
 	t.Helper()
 	now := time.Now().UTC()
-	identity := openlinker.RuntimeV2AttemptIdentity{
+	identity := openlinker.RuntimeAttemptIdentity{
 		RunID: uuid.NewString(), AttemptID: uuid.NewString(), LeaseID: uuid.NewString(),
 		FencingToken: 7, NodeID: uuid.NewString(), AgentID: uuid.NewString(),
 		WorkerID: "worker-test", RuntimeSessionID: uuid.NewString(),
@@ -184,13 +184,13 @@ func newRuntimeV2WorkerTestFixture(t *testing.T) runtimeV2WorkerTestFixture {
 	tracker := newRunTracker()
 	tracker.upsertSubmitted(clientID, identity.AgentID, uuid.NewString(), "", "measured", now.Add(-time.Second))
 	tracker.markCreated(clientID, identity.RunID, now.Add(-900*time.Millisecond), "")
-	metrics := &metrics{startedAt: now, runtime: newRuntimeV2Metrics()}
-	fake := &fakeRuntimeV2Client{leaseExpiresAt: now.Add(time.Minute)}
+	metrics := &metrics{startedAt: now, runtime: newRuntimeMetrics()}
+	fake := &fakeRuntimeClient{leaseExpiresAt: now.Add(time.Minute)}
 	connection := &runtimeV2Connection{kind: transportPull, client: fake, generation: 1}
 	worker := &runtimeV2Worker{
 		cfg:   config{NodeCapacity: 1, EventsPerRun: 1},
 		agent: agentRef{ID: identity.AgentID}, workerIndex: 0, tracker: tracker, metrics: metrics,
-		hello: openlinker.RuntimeV2HelloPayload{
+		hello: openlinker.RuntimeHelloPayload{
 			NodeID: identity.NodeID, AgentID: identity.AgentID, WorkerID: identity.WorkerID,
 			RuntimeSessionID: identity.RuntimeSessionID, SessionEpoch: 1,
 		},
@@ -200,7 +200,7 @@ func newRuntimeV2WorkerTestFixture(t *testing.T) runtimeV2WorkerTestFixture {
 	worker.publishConnection(connection)
 	return runtimeV2WorkerTestFixture{
 		worker: worker, connection: connection, fake: fake, tracker: tracker, metrics: metrics,
-		assignment: openlinker.RuntimeV2RunAssignedPayload{
+		assignment: openlinker.RuntimeRunAssignedPayload{
 			AttemptIdentity: identity, OfferNo: 1, OfferExpiresAt: now.Add(time.Minute),
 			AttemptDeadlineAt: now.Add(time.Minute), RunDeadlineAt: now.Add(time.Minute),
 			Input:        map[string]any{"client_task_id": clientID},
@@ -224,28 +224,28 @@ func waitForTestRunCompletion(t *testing.T, tracker *runTracker, runID string) {
 	t.Fatal("timed out waiting for test Run completion")
 }
 
-type fakeRuntimeV2Client struct {
+type fakeRuntimeClient struct {
 	mu sync.Mutex
 
 	leaseExpiresAt      time.Time
 	assignmentACKCalls  int
 	dropAssignmentACK   bool
-	executionIdentities []openlinker.RuntimeV2AttemptIdentity
+	executionIdentities []openlinker.RuntimeAttemptIdentity
 }
 
-func (f *fakeRuntimeV2Client) CreateRuntimeV2Session(context.Context, openlinker.RuntimeV2HelloPayload) (*openlinker.RuntimeV2ReadyPayload, error) {
+func (f *fakeRuntimeClient) CreateRuntimeSession(context.Context, openlinker.RuntimeHelloPayload) (*openlinker.RuntimeReadyPayload, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeRuntimeV2Client) HeartbeatRuntimeV2Session(context.Context, openlinker.RuntimeV2HelloPayload) (*openlinker.RuntimeV2ReadyPayload, error) {
+func (f *fakeRuntimeClient) HeartbeatRuntimeSession(context.Context, openlinker.RuntimeHelloPayload) (*openlinker.RuntimeReadyPayload, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeRuntimeV2Client) CloseRuntimeV2Session(context.Context, openlinker.RuntimeV2SessionCloseRequest) error {
+func (f *fakeRuntimeClient) CloseRuntimeSession(context.Context, openlinker.RuntimeSessionCloseRequest) error {
 	return nil
 }
-func (f *fakeRuntimeV2Client) ClaimRuntimeV2Run(context.Context, int, openlinker.RuntimeV2ClaimRequest) (*openlinker.RuntimeV2RunAssignedPayload, error) {
+func (f *fakeRuntimeClient) ClaimRuntimeRun(context.Context, int, openlinker.RuntimeClaimRequest) (*openlinker.RuntimeRunAssignedPayload, error) {
 	return nil, errors.New("unused")
 }
-func (f *fakeRuntimeV2Client) AckRuntimeV2Assignment(_ context.Context, request openlinker.RuntimeV2AssignmentAckPayload) (*openlinker.RuntimeV2AssignmentConfirmedPayload, error) {
+func (f *fakeRuntimeClient) AckRuntimeAssignment(_ context.Context, request openlinker.RuntimeAssignmentAckPayload) (*openlinker.RuntimeAssignmentConfirmedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.assignmentACKCalls++
@@ -253,46 +253,46 @@ func (f *fakeRuntimeV2Client) AckRuntimeV2Assignment(_ context.Context, request 
 		f.dropAssignmentACK = false
 		return nil, errACKResponseLost
 	}
-	return &openlinker.RuntimeV2AssignmentConfirmedPayload{
+	return &openlinker.RuntimeAssignmentConfirmedPayload{
 		AttemptIdentity: request.AttemptIdentity, AttemptNo: 1, LeaseExpiresAt: f.leaseExpiresAt,
 	}, nil
 }
-func (f *fakeRuntimeV2Client) RenewRuntimeV2Lease(_ context.Context, request openlinker.RuntimeV2LeaseRenewPayload) (*openlinker.RuntimeV2LeaseRenewedPayload, error) {
+func (f *fakeRuntimeClient) RenewRuntimeLease(_ context.Context, request openlinker.RuntimeLeaseRenewPayload) (*openlinker.RuntimeLeaseRenewedPayload, error) {
 	f.mu.Lock()
 	f.executionIdentities = append(f.executionIdentities, request.AttemptIdentity)
 	f.mu.Unlock()
-	return &openlinker.RuntimeV2LeaseRenewedPayload{AttemptIdentity: request.AttemptIdentity, LeaseExpiresAt: f.leaseExpiresAt}, nil
+	return &openlinker.RuntimeLeaseRenewedPayload{AttemptIdentity: request.AttemptIdentity, LeaseExpiresAt: f.leaseExpiresAt}, nil
 }
-func (f *fakeRuntimeV2Client) AppendRuntimeV2Event(_ context.Context, request openlinker.RuntimeV2RunEventPayload) (*openlinker.RuntimeV2RunEventAckPayload, error) {
+func (f *fakeRuntimeClient) AppendRuntimeEvent(_ context.Context, request openlinker.RuntimeRunEventPayload) (*openlinker.RuntimeRunEventAckPayload, error) {
 	f.mu.Lock()
 	f.executionIdentities = append(f.executionIdentities, request.AttemptIdentity)
 	f.mu.Unlock()
-	return &openlinker.RuntimeV2RunEventAckPayload{ClientEventID: request.ClientEventID, ClientEventSeq: request.ClientEventSeq, Sequence: request.ClientEventSeq}, nil
+	return &openlinker.RuntimeRunEventAckPayload{ClientEventID: request.ClientEventID, ClientEventSeq: request.ClientEventSeq, Sequence: request.ClientEventSeq}, nil
 }
-func (f *fakeRuntimeV2Client) FinalizeRuntimeV2Result(_ context.Context, request openlinker.RuntimeV2RunResultPayload) (*openlinker.RuntimeV2RunResultAckPayload, error) {
+func (f *fakeRuntimeClient) FinalizeRuntimeResult(_ context.Context, request openlinker.RuntimeRunResultPayload) (*openlinker.RuntimeRunResultAckPayload, error) {
 	f.mu.Lock()
 	f.executionIdentities = append(f.executionIdentities, request.AttemptIdentity)
 	f.mu.Unlock()
-	return &openlinker.RuntimeV2RunResultAckPayload{
-		ResultID: request.ResultID, Classification: openlinker.RuntimeV2ResultSuccess,
-		RunStatus: openlinker.RuntimeV2RunSuccess, DispatchState: openlinker.RuntimeV2DispatchTerminal,
+	return &openlinker.RuntimeRunResultAckPayload{
+		ResultID: request.ResultID, Classification: openlinker.RuntimeResultSuccess,
+		RunStatus: openlinker.RuntimeRunSuccess, DispatchState: openlinker.RuntimeDispatchTerminal,
 	}, nil
 }
-func (f *fakeRuntimeV2Client) ResumeRuntimeV2Runs(context.Context, openlinker.RuntimeV2ResumePayload) (*openlinker.RuntimeV2ResumeResponse, error) {
-	return &openlinker.RuntimeV2ResumeResponse{Decisions: []openlinker.RuntimeV2ResumeAcceptedPayload{}}, nil
+func (f *fakeRuntimeClient) ResumeRuntimeRuns(context.Context, openlinker.RuntimeResumePayload) (*openlinker.RuntimeResumeResponse, error) {
+	return &openlinker.RuntimeResumeResponse{Decisions: []openlinker.RuntimeResumeAcceptedPayload{}}, nil
 }
-func (f *fakeRuntimeV2Client) PollRuntimeV2Commands(context.Context, string, int) (*openlinker.RuntimeV2CommandsResponse, error) {
-	return &openlinker.RuntimeV2CommandsResponse{Commands: []openlinker.RuntimeV2PendingCommand{}, DatabaseTime: time.Now()}, nil
+func (f *fakeRuntimeClient) PollRuntimeCommands(context.Context, string, int) (*openlinker.RuntimeCommandsResponse, error) {
+	return &openlinker.RuntimeCommandsResponse{Commands: []openlinker.RuntimePendingCommand{}, DatabaseTime: time.Now()}, nil
 }
-func (f *fakeRuntimeV2Client) AckRuntimeV2Cancel(_ context.Context, request openlinker.RuntimeV2RunCancelAckPayload) (*openlinker.RuntimeV2RunCancellationState, error) {
-	return &openlinker.RuntimeV2RunCancellationState{
+func (f *fakeRuntimeClient) AckRuntimeCancel(_ context.Context, request openlinker.RuntimeRunCancelAckPayload) (*openlinker.RuntimeRunCancellationState, error) {
+	return &openlinker.RuntimeRunCancellationState{
 		CancellationID: request.CancellationID, CancelState: request.CancelState, UpdatedAt: time.Now(),
 	}, nil
 }
 
-var _ runtimeV2Client = (*fakeRuntimeV2Client)(nil)
+var _ runtimeV2Client = (*fakeRuntimeClient)(nil)
 
-func writeRuntimeV2TestCredentials(t *testing.T, nodeID uuid.UUID) (string, string, string) {
+func writeRuntimeTestCredentials(t *testing.T, nodeID uuid.UUID) (string, string, string) {
 	t.Helper()
 	now := time.Now()
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

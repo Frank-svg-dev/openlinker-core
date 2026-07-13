@@ -30,7 +30,7 @@ WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
   AND r.dispatch_state = 'terminal'
   AND r.cancel_state = c.state
   AND c.state IN ('requested', 'delivered', 'stopping')
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.run_id = r.id
   AND a.agent_id = $1
@@ -94,7 +94,7 @@ WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
   AND c.requested_at
       + ($1::bigint * INTERVAL '1 millisecond')
       <= clock_timestamp()
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.outcome IS NULL
   AND a.slot_acquired_at IS NOT NULL
@@ -213,7 +213,7 @@ WHERE r.id = $1
   AND c.requested_at
       + ($6::bigint * INTERVAL '1 millisecond')
       <= clock_timestamp()
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.outcome IS NULL
   AND a.slot_acquired_at IS NOT NULL
@@ -509,7 +509,7 @@ WHERE a.run_id = $2
   AND a.id = $3
   AND a.lease_id = $4
   AND a.fencing_token = $5
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.outcome IS NULL
   AND a.result_id IS NULL

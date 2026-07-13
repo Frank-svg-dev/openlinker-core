@@ -364,7 +364,7 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			     id, creator_id, slug, name, description, endpoint_url,
 			     price_per_call_cents, connection_mode
 			 ) VALUES ($1, $2, $3, 'Runtime Lease Test', 'runtime test fixture',
-			           'openlinker-agent-node://test', 0, 'agent_node')`,
+			           'openlinker-runtime://test', 0, 'runtime')`,
 			[]any{f.agentID, f.userID, "runtime-lease-" + suffix},
 		},
 		{
@@ -412,7 +412,7 @@ func insertRuntimeLeaseFixture(t *testing.T, ctx context.Context, pool *pgxpool.
 			 ) VALUES ($1, $2, $3, '{"prompt":"lease test"}'::jsonb,
 			           'running', 0, 0, 0, 'api', decode(repeat('aa', 32), 'hex'),
 			           decode(repeat('bb', 32), 'hex'), '{}'::jsonb,
-			           'agent_node', NULL, 5, 3,
+			           'runtime', NULL, 5, 3,
 			           clock_timestamp() + INTERVAL '5 minutes',
 			           clock_timestamp() + INTERVAL '15 minutes')`,
 			[]any{f.runID, f.userID, f.agentID},
@@ -536,7 +536,7 @@ func TestRuntimeSessionScopeTriggerRejectsCallOnlyCredential(t *testing.T) {
 		{`INSERT INTO agents (id, creator_id, slug, name, description, endpoint_url,
 		      price_per_call_cents, connection_mode)
 		  VALUES ($1, $2, $3, 'Scope Test', 'scope fixture',
-		      'openlinker-agent-node://test', 0, 'agent_node')`, []any{f.agentID, f.userID, "runtime-scope-" + suffix}},
+		      'openlinker-runtime://test', 0, 'runtime')`, []any{f.agentID, f.userID, "runtime-scope-" + suffix}},
 		{`INSERT INTO agent_tokens (id, agent_id, creator_user_id, name, prefix,
 		      token_hash, scopes, status, redeemed_at)
 		  VALUES ($1, $2, $3, 'Scope Test', $4, 'hash', ARRAY['agent:call']::text[],

@@ -18,7 +18,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-func TestRetiredVersionedRuntimeRoutesAreAbsentWithoutCallingService(t *testing.T) {
+func TestRetiredRuntimeHeartbeatRouteIsAbsentWithoutCallingService(t *testing.T) {
 	svc := &mockRuntimeService{}
 	e := echo.New()
 	NewHandler(svc).RegisterAgentRuntime(e.Group("/api/v1"))
@@ -26,13 +26,7 @@ func TestRetiredVersionedRuntimeRoutesAreAbsentWithoutCallingService(t *testing.
 	tests := []struct {
 		method string
 		path   string
-	}{
-		{method: http.MethodPost, path: "/api/v1/agent-runtime/heartbeat"},
-		{method: http.MethodPost, path: "/api/v1/agent-runtime/v2/sessions"},
-		{method: http.MethodPost, path: "/api/v1/agent-runtime/v2/runs/claim"},
-		{method: http.MethodGet, path: "/api/v1/agent-runtime/v2/ws"},
-		{method: http.MethodPost, path: "/api/v1/agent-runtime/v2/call-agent"},
-	}
+	}{{method: http.MethodPost, path: "/api/v1/agent-runtime/heartbeat"}}
 	for _, test := range tests {
 		req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{"legacy":true}`))
 		req.Header.Set(echo.HeaderAuthorization, "Bearer must-not-be-validated")
@@ -913,7 +907,7 @@ func (m *mockRuntimeService) ValidateRuntimeToken(_ context.Context, token strin
 	if m.err != nil {
 		return db.AgentRuntimeToken{}, m.err
 	}
-	return db.AgentRuntimeToken{ID: uuid.New(), AgentID: uuid.New(), ConnectionMode: "agent_node"}, nil
+	return db.AgentRuntimeToken{ID: uuid.New(), AgentID: uuid.New(), ConnectionMode: "runtime"}, nil
 }
 
 type pollingRuntimeService struct {

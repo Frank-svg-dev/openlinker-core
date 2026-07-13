@@ -50,7 +50,7 @@ type runtimeNodeRecord struct {
 	updatedAt             time.Time
 }
 
-// ListRuntimeNodes returns a database-clock snapshot of enrolled Runtime v2
+// ListRuntimeNodes returns a database-clock snapshot of enrolled Runtime
 // Nodes. Session counts intentionally use the same 15-second liveness window
 // as runtime availability; an attached but stale Session is not presented as
 // online to an operator.

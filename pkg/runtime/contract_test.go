@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -81,15 +82,16 @@ func TestRuntimeV2ContractMatchesExportedConstants(t *testing.T) {
 	require.Equal(t, 5, contract.Limits.HelloTimeoutSeconds)
 	require.Equal(t, 30, contract.Limits.MaxPullWaitSeconds)
 
-	digest := sha256.Sum256(corecontracts.RuntimeV2)
+	digest := sha256.Sum256(corecontracts.RuntimeContract)
 	require.Equal(t, RuntimeContractDigest, fmt.Sprintf("%x", digest))
 }
 
 func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	contract := decodeRuntimeContract(t)
+	versionedRuntimePath := regexp.MustCompile(`/agent-runtime/v[0-9]+/`)
 
 	require.Equal(t, "/api/v1/agent-runtime/ws", contract.WebSocket.Path)
-	require.NotContains(t, contract.WebSocket.Path, "/agent-runtime/v2/")
+	require.False(t, versionedRuntimePath.MatchString(contract.WebSocket.Path))
 	require.Equal(t, "agent_principal_and_node_device", contract.WebSocket.Auth)
 	require.Equal(t, "#/$defs/RuntimeMessage", contract.WebSocket.EnvelopeSchema.Ref)
 	require.Equal(t, map[string]string{
@@ -135,7 +137,7 @@ func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	for _, endpoint := range contract.Endpoints {
 		require.NotEmpty(t, endpoint.ClientMethod)
 		require.True(t, strings.HasPrefix(endpoint.Path, "/api/v1/agent-runtime/"), endpoint.Path)
-		require.NotContains(t, endpoint.Path, "/agent-runtime/v2/")
+		require.False(t, versionedRuntimePath.MatchString(endpoint.Path))
 		require.True(t, endpoint.SuccessResponseSchema != nil || endpoint.EmptyResponseStatus != nil, endpoint.Path)
 		if endpoint.SuccessResponseSchema != nil {
 			requireDefinitionRef(t, contract.Definitions, endpoint.SuccessResponseSchema.Ref)
@@ -293,7 +295,7 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 func TestRuntimeV2ContractReferencesExistingDefinitions(t *testing.T) {
 	contract := decodeRuntimeContract(t)
 	var document any
-	require.NoError(t, json.Unmarshal(corecontracts.RuntimeV2, &document))
+	require.NoError(t, json.Unmarshal(corecontracts.RuntimeContract, &document))
 	var refs []string
 	collectContractRefs(document, &refs)
 	require.NotEmpty(t, refs)
@@ -310,7 +312,7 @@ func TestRuntimeRequiredFeaturesReturnsCopy(t *testing.T) {
 
 func decodeRuntimeContract(t *testing.T) runtimeContractManifest {
 	t.Helper()
-	decoder := json.NewDecoder(bytes.NewReader(corecontracts.RuntimeV2))
+	decoder := json.NewDecoder(bytes.NewReader(corecontracts.RuntimeContract))
 	decoder.DisallowUnknownFields()
 	var contract runtimeContractManifest
 	require.NoError(t, decoder.Decode(&contract))

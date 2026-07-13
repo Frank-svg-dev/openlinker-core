@@ -432,7 +432,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 				$1, $2, $3, '{}'::jsonb, 'running',
 				0, 0, 0, 'api',
 				'openlinker.runtime.v2', $4, $5,
-				'{}'::jsonb, 'agent_node', NULL,
+				'{}'::jsonb, 'runtime', NULL,
 				'pending', 20, 3, $6, $7
 			)`,
 			runID,
@@ -454,7 +454,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 				accepted_at, lease_expires_at, attempt_deadline_at,
 				slot_acquired_at, active_runtime_session_id
 			) VALUES (
-				$1, $2, $3, 1, 1, 'agent_node',
+				$1, $2, $3, 1, 1, 'runtime',
 				$4, 1, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13,
 				$10, $7
 			)`,
@@ -483,7 +483,7 @@ func insertEventStoreExecutingAttempt(t *testing.T, pool *pgxpool.Pool, leaseTTL
 				active_attempt_id = $2,
 				lease_id = $3,
 				fencing_token = 1,
-				executor_type = 'agent_node',
+				executor_type = 'runtime',
 				active_core_instance_id = $4,
 				runtime_node_id = $5,
 				runtime_worker_id = $6,
@@ -620,7 +620,7 @@ func rotateEventStoreAttempt(t *testing.T, pool *pgxpool.Pool, fixture eventStor
 				accepted_at, lease_expires_at, attempt_deadline_at,
 				slot_acquired_at, active_runtime_session_id
 			) VALUES (
-				$1, $2, $3, 2, 2, 'agent_node',
+				$1, $2, $3, 2, 2, 'runtime',
 				$4, 2, $5, $6, $7, $8, $9, $9, $10, $11, $10, $12, $13,
 				$10, $7
 			)`,
@@ -650,7 +650,7 @@ func rotateEventStoreAttempt(t *testing.T, pool *pgxpool.Pool, fixture eventStor
 				active_attempt_id = $2,
 				lease_id = $3,
 				fencing_token = 2,
-				executor_type = 'agent_node',
+				executor_type = 'runtime',
 				active_core_instance_id = $4,
 				runtime_node_id = $5,
 				runtime_worker_id = $6,

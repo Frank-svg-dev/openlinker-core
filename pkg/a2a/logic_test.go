@@ -892,19 +892,19 @@ func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
 	if svc := NewService(nil, nil); svc == nil || svc.queries == nil {
 		t.Fatalf("NewService did not initialize queries: %#v", svc)
 	}
-	if !isQueuedRuntimeConnectionMode("agent_node") || !isQueuedRuntimeConnectionMode("agent_node") || isQueuedRuntimeConnectionMode("direct_http") {
+	if !isQueuedRuntimeConnectionMode("runtime") || !isQueuedRuntimeConnectionMode("runtime") || isQueuedRuntimeConnectionMode("direct_http") {
 		t.Fatalf("isQueuedRuntimeConnectionMode failed")
 	}
 
 	connection, availability, callable := runtimeWorkbenchState(
-		db.Agent{LifecycleStatus: "active", ConnectionMode: "agent_node"},
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime"},
 		runtimeWorkbenchSnapshot{activeSessionCount: 1, readySessionCount: 1},
 	)
 	if connection != "online" || availability != "healthy" || !callable {
 		t.Fatalf("ready workbench state = %q, %q, %t", connection, availability, callable)
 	}
 	connection, availability, callable = runtimeWorkbenchState(
-		db.Agent{LifecycleStatus: "active", ConnectionMode: "agent_node"},
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime"},
 		runtimeWorkbenchSnapshot{activeSessionCount: 1, drainingSessionCount: 1},
 	)
 	if connection != "draining" || availability != "degraded" || callable {
@@ -917,7 +917,7 @@ func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
 	}
 	dispatchTimeout := "RUNTIME_DISPATCH_TIMEOUT"
 	diagnostics = runtimeWorkbenchDiagnosticsV2(
-		db.Agent{LifecycleStatus: "active", ConnectionMode: "agent_node"},
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime"},
 		runtimeWorkbenchSnapshot{pendingRunCount: 2},
 		[]RuntimeWorkbenchRun{{ErrorCode: &dispatchTimeout}},
 	)
@@ -928,7 +928,7 @@ func TestA2ARuntimeWorkbenchV2AndPushHelpers(t *testing.T) {
 		}
 	}
 	diagnostics = runtimeWorkbenchDiagnosticsV2(
-		db.Agent{LifecycleStatus: "active", ConnectionMode: "agent_node"},
+		db.Agent{LifecycleStatus: "active", ConnectionMode: "runtime"},
 		runtimeWorkbenchSnapshot{activeSessionCount: 1, readySessionCount: 1}, nil,
 	)
 	if len(diagnostics) != 1 || diagnostics[0].Code != "runtime_ready" {
@@ -2419,7 +2419,7 @@ func (f *controlA2AService) GetRuntimeWorkbench(_ context.Context, userID, agent
 			ID:             agentID.String(),
 			Slug:           "runtime-agent",
 			Name:           "Runtime Agent",
-			ConnectionMode: "agent_node",
+			ConnectionMode: "runtime",
 		},
 		Runtime: RuntimeWorkbenchRuntime{
 			TransportPolicy:   "ws_primary_long_poll_fallback",

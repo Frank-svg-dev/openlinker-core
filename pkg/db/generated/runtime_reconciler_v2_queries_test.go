@@ -112,7 +112,7 @@ func TestRuntimeV2ReconcilerQueriesFenceFinishTransitionsAndTerminalFacts(t *tes
 func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 	now := time.Date(2026, 7, 11, 21, 0, 0, 0, time.UTC)
 	runID, attemptID, sessionID, nodeID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	executor := "agent_node"
+	executor := "runtime"
 	rows := &fakeRows{rows: [][]any{{
 		runID, &attemptID, &executor, &sessionID, &nodeID, now, now,
 	}}}
@@ -131,7 +131,7 @@ func TestRuntimeV2ReconcilerGeneratedScanAndArgumentOrder(t *testing.T) {
 
 	lockedValues := []any{
 		runID, uuid.New(), uuid.New(), "running", "executing",
-		stringPointer("agent_node"), (*bool)(nil), int32(1), int32(3),
+		stringPointer("runtime"), (*bool)(nil), int32(1), int32(3),
 		int32(1), int32(3), &attemptID, &attemptID, uuidPointer(uuid.New()),
 		int64(4), &executor, &nodeID, stringPointer("worker"), &sessionID,
 		now.Add(time.Minute), now.Add(2 * time.Minute), (*uuid.UUID)(nil),

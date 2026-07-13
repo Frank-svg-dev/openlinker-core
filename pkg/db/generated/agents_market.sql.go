@@ -15,7 +15,7 @@ import (
 )
 
 const listPublicAgents = `-- name: ListPublicAgents :many
-WITH active_runtime_v2_agents AS (
+WITH active_runtime_agents AS (
     SELECT DISTINCT s.agent_id
     FROM runtime_sessions s
     JOIN runtime_nodes n
@@ -88,7 +88,7 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
 FROM agents a
 JOIN users u ON u.id = a.creator_id
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
-LEFT JOIN active_runtime_v2_agents runtime_truth ON runtime_truth.agent_id = a.id
+LEFT JOIN active_runtime_agents runtime_truth ON runtime_truth.agent_id = a.id
 LEFT JOIN LATERAL (
     SELECT MAX(last_used_at) AS last_runtime_token_used_at
     FROM agent_tokens
@@ -158,11 +158,11 @@ WHERE a.visibility = 'public'
   AND (
     NOT $5::bool
     OR (
-      a.connection_mode = 'agent_node'
+      a.connection_mode = 'runtime'
       AND runtime_truth.agent_id IS NOT NULL
     )
     OR (
-      a.connection_mode <> 'agent_node'
+      a.connection_mode <> 'runtime'
       AND (
         COALESCE(av.availability_status, 'unknown') = 'healthy'
         OR (
@@ -175,11 +175,11 @@ WHERE a.visibility = 'public'
 ORDER BY CASE
     WHEN (
       (
-        a.connection_mode = 'agent_node'
+        a.connection_mode = 'runtime'
         AND runtime_truth.agent_id IS NOT NULL
       )
       OR (
-        a.connection_mode <> 'agent_node'
+        a.connection_mode <> 'runtime'
         AND (
           COALESCE(av.availability_status, 'unknown') = 'healthy'
           OR (
@@ -192,7 +192,7 @@ ORDER BY CASE
     ELSE 1
 END ASC,
 CASE
-    WHEN a.connection_mode = 'agent_node' THEN
+    WHEN a.connection_mode = 'runtime' THEN
       CASE WHEN runtime_truth.agent_id IS NOT NULL THEN 0 ELSE 3 END
     ELSE CASE COALESCE(av.availability_status, 'unknown')
     WHEN 'healthy' THEN 0
@@ -294,7 +294,7 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 }
 
 const countPublicAgents = `-- name: CountPublicAgents :one
-WITH active_runtime_v2_agents AS (
+WITH active_runtime_agents AS (
     SELECT DISTINCT s.agent_id
     FROM runtime_sessions s
     JOIN runtime_nodes n
@@ -349,7 +349,7 @@ WITH active_runtime_v2_agents AS (
 SELECT COUNT(*)::int AS total
 FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
-LEFT JOIN active_runtime_v2_agents runtime_truth ON runtime_truth.agent_id = a.id
+LEFT JOIN active_runtime_agents runtime_truth ON runtime_truth.agent_id = a.id
 WHERE a.visibility = 'public'
   AND a.lifecycle_status = 'active'
   AND NOT EXISTS (
@@ -387,11 +387,11 @@ WHERE a.visibility = 'public'
   AND (
     NOT $3::bool
     OR (
-      a.connection_mode = 'agent_node'
+      a.connection_mode = 'runtime'
       AND runtime_truth.agent_id IS NOT NULL
     )
     OR (
-      a.connection_mode <> 'agent_node'
+      a.connection_mode <> 'runtime'
       AND (
         COALESCE(av.availability_status, 'unknown') = 'healthy'
         OR (

@@ -346,7 +346,7 @@ func (s *Service) SetAgentSkills(ctx context.Context, agentID uuid.UUID, skillID
 // 由子轮 2.4 task 模块调用：传入 LLM 解析出的 skill_id 列表 + top-N，
 // 拿到候选 Agent。limit <= 0 时不截断。
 //
-// agent_node Agent 复用市场 readiness，并且必须有 PostgreSQL 证明的
+// runtime Agent 复用市场 readiness，并且必须有 PostgreSQL 证明的
 // current-contract ready Session。Agent Token 使用记录不是在线性证据。
 // Direct/MCP Agent 则需要 healthy 或成功运行证据，避免推荐到当前不可执行的供给。
 // 排序：match_count desc → availability → recent Session/success evidence → verified_count desc → total_calls desc → agent_id（稳定）。

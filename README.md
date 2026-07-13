@@ -31,7 +31,7 @@ Included:
 - Agent registry, visibility, categories, skills, and benchmarks
 - Agent Tokens for self-registration and runtime access
 - run creation, run state, event streams, artifacts, and messages
-- direct HTTP, MCP server, and transport-neutral Agent Node invocation modes
+- direct HTTP, MCP server, and transport-neutral Runtime Worker invocation modes
 - A2A JSON-RPC / HTTP+JSON surfaces, Agent Card support, and optional gRPC
 - MCP HTTP entrypoints and REST fallback APIs
 - task, workflow, delivery, webhook, and local admin APIs
@@ -55,7 +55,7 @@ boundary, but closed product modules are intentionally not part of this diagram.
 ```mermaid
 flowchart LR
   CoreWeb["openlinker-core-web<br/>self-hosted UI"] -->|"REST / session APIs"| Core
-  SDKs["openlinker-js / openlinker-go<br/>client and runtime SDKs"] -->|"HTTP / A2A / MCP bindings"| Core
+  SDKs["openlinker-go / openlinker-js / openlinker-python<br/>client and runtime SDKs"] -->|"HTTP / A2A / MCP bindings"| Core
   MCPCaller["MCP or A2A caller"] -->|"tool call / message/send"| Core
 
   HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"authorized Core APIs"| Core
@@ -64,9 +64,12 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
-  Core -->|"agent_node<br/>WebSocket first, long polling fallback"| AgentNode["openlinker-agent-node"]
-  AgentNode -->|"http / command / a2a / codex adapter"| Backend["Agent backend"]
-  Backend -->|"events / result"| AgentNode
+  Core -->|"runtime<br/>WebSocket first, long polling fallback"| RuntimeWorker["SDK Runtime Worker"]
+  RuntimeWorker -->|"typed RuntimeContext"| Handler["Application handler"]
+
+  Core -.->|"runtime<br/>optional compatibility path"| AdapterWorker["Go SDK Runtime Worker"]
+  AdapterWorker --> AgentNode["Agent Node Adapter"]
+  AgentNode -->|"http / command / a2a / codex"| Backend["Existing agent backend"]
 ```
 
 ## Quick Start
@@ -216,7 +219,7 @@ make test              # go test ./... -race -cover
 make fmt               # gofmt and go vet
 make migrate-up        # apply migrations
 make migrate-down      # roll back one migration
-make runtime-loadtest  # exercise Agent Node over WebSocket and long polling
+make runtime-loadtest  # exercise Runtime Worker over WebSocket and long polling
 ```
 
 ## Runtime Modes
@@ -245,13 +248,13 @@ Use the simplest reachable mode for each Agent:
 
 1. `direct_http`: Core calls a stable HTTPS Agent endpoint.
 2. `mcp_server`: Core calls an existing remote HTTP JSON-RPC or MCP endpoint.
-3. `agent_node`: Agent Node receives assigned runs. Its transport policy is
+3. `runtime`: Runtime Worker receives assigned runs. Its transport policy is
    `auto` by default: outbound WebSocket first, long polling when the network cannot
    keep the socket alive. Both transports reuse one Session, lease, ACK, resume,
    fence, and local spool contract.
 
-Normal Agent Node setup only needs `OPENLINKER_URL`, the public OpenLinker
-origin. The Node reads `/.well-known/openlinker.json` without Runtime
+Normal Runtime Worker setup only needs `OPENLINKER_URL`, the public OpenLinker
+origin. The SDK reads `/.well-known/openlinker.json` without Runtime
 credentials and obtains the dedicated mTLS origin from `base_urls.runtime`.
 `RUNTIME_MTLS_API_URL` is deployment-side publication metadata, not a second
 address that Agent creators need to enter.
@@ -260,7 +263,7 @@ Every assigned or claimed run must finish with exactly one terminal result.
 
 ### Runtime Node certificate provisioning
 
-Reliable OpenLinker Runtime authenticates every Agent Node with a dedicated client
+Reliable OpenLinker Runtime authenticates every Runtime Worker with a dedicated client
 certificate and a matching `runtime_nodes` record. Keep the client CA private
 key on an operator-controlled provisioning host; never copy it into the Core
 container, put it in `.env`, or mount it beside the serving keys. Core only
@@ -286,11 +289,11 @@ P-256 key and a client-auth-only certificate, registers its random serial and
 SPKI SHA-256 thumbprint against the current OpenLinker Runtime contract, and then emits
 an audit record as JSON. It refuses to overwrite any file. The private key is
 written with mode `0600`; the certificate uses `0644`. `--node-id` is optional
-and otherwise generated. `--node-version` defaults to the exact version used by
-the current Agent Node release; override it only when the Node binary
-advertises a different value.
+and otherwise generated. `--node-version` defaults to
+`openlinker-go/runtime-worker`. An Adapter that advertises another implementation,
+such as Agent Node, must enroll with that implementation's exact version.
 
-Inspect a delivered pair before installing it on an Agent Node:
+Inspect a delivered pair before installing it on a Runtime Worker:
 
 ```bash
 ./bin/api runtime-node inspect \
@@ -299,11 +302,12 @@ Inspect a delivered pair before installing it on an Agent Node:
   --ca-cert /secure/runtime-client-ca.crt
 ```
 
-Configure the JSON `node_id` as `OPENLINKER_NODE_ID`, keep
-`OPENLINKER_AGENT_NODE_CAPACITY` equal to the registered capacity, and point
-`OPENLINKER_AGENT_NODE_MTLS_CERT_FILE` / `OPENLINKER_AGENT_NODE_MTLS_KEY_FILE`
-at the delivered pair. Agent Node separately needs the Runtime server trust CA
-in `OPENLINKER_AGENT_NODE_MTLS_CA_FILE`. Distribute the client CA certificate
+Pass the JSON `node_id`, the registered capacity, the delivered certificate and
+private key, and the Runtime server trust CA into the SDK `RuntimeWorker`
+configuration. The optional Agent Node Adapter exposes the same values through
+`OPENLINKER_NODE_ID`, `OPENLINKER_AGENT_NODE_CAPACITY`,
+`OPENLINKER_AGENT_NODE_MTLS_CERT_FILE`, `OPENLINKER_AGENT_NODE_MTLS_KEY_FILE`,
+and `OPENLINKER_AGENT_NODE_MTLS_CA_FILE`. Distribute the client CA certificate
 to Core only; its private key remains outside all running OpenLinker services.
 
 ## Invocation Architecture
@@ -331,23 +335,23 @@ flowchart TB
   subgraph CalleeModes["Callee connection modes"]
     Direct["direct_http<br/>Core calls HTTPS endpoint"]
     MCPServer["mcp_server<br/>Core calls remote JSON-RPC / MCP tool"]
-    AgentNode["agent_node<br/>WebSocket first, long polling fallback"]
+    RuntimeWorker["runtime<br/>SDK Runtime Worker"]
   end
 
   Core --> Direct
   Core --> MCPServer
-  Core --> AgentNode
+  Core --> RuntimeWorker
 ```
 
 Important rules:
 
 - A2A bindings are external caller-facing transports. They are not the private
-  Agent Node runtime channel.
+  Runtime Worker channel.
 - `message/send` creates a real Core run. Synchronous endpoints may complete
   immediately; runtime connectors normally return a working task first.
-- `agent_node` is the marketplace connection mode. WebSocket and long polling are
-  transport choices inside the Node, never separate seller-facing modes.
-- WebSocket is outbound from Agent Node to Core. Long polling is its fallback; both
+- `runtime` is the marketplace connection mode. WebSocket and long polling are
+  transport choices inside the Runtime Worker, never separate seller-facing modes.
+- WebSocket is outbound from Runtime Worker to Core. Long polling is its fallback; both
   keep PostgreSQL as truth and share the same Session, lease, ACK and resume state.
 
 ## API Areas
@@ -367,8 +371,8 @@ Important rules:
 - `/api/v1/delivery/*`
 - `/api/v1/admin/*`
 
-The exact contract is still being stabilized through SDK contract files and
-tests.
+The canonical Runtime contract is embedded in Core and mirrored byte-for-byte by
+the official SDKs; tests lock its ID, protocol version, digest and feature set.
 
 ## Testing
 

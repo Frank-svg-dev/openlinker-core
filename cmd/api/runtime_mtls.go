@@ -15,10 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-const (
-	runtimePathPrefix       = "/api/v1/agent-runtime/"
-	runtimeLegacyPathPrefix = "/api/v1/agent-runtime/v2/"
-)
+const runtimePathPrefix = "/api/v1/agent-runtime/"
 
 type runtimeListenerContextKey struct{}
 
@@ -103,9 +100,7 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 
 func runtimeOnlyHandler(application http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if application == nil ||
-			!strings.HasPrefix(r.URL.Path, runtimePathPrefix) ||
-			strings.HasPrefix(r.URL.Path, runtimeLegacyPathPrefix) {
+		if application == nil || !strings.HasPrefix(r.URL.Path, runtimePathPrefix) {
 			http.NotFound(w, r)
 			return
 		}
@@ -121,8 +116,7 @@ func runtimeOnlyHandler(application http.Handler) http.Handler {
 func runtimeListenerIsolation(next echo.HandlerFunc) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		path := c.Request().URL.Path
-		isRuntimePath := strings.HasPrefix(path, runtimePathPrefix) ||
-			strings.HasPrefix(path, runtimeLegacyPathPrefix)
+		isRuntimePath := strings.HasPrefix(path, runtimePathPrefix)
 		fromRuntimeListener, _ := c.Request().Context().Value(runtimeListenerContextKey{}).(bool)
 		if isRuntimePath && !fromRuntimeListener {
 			return echo.ErrNotFound

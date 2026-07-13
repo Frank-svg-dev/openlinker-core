@@ -10,10 +10,10 @@ import (
 const (
 	ConnectionModeDirectHTTP = "direct_http"
 	ConnectionModeMCPServer  = "mcp_server"
-	ConnectionModeAgentNode  = "agent_node"
+	ConnectionModeRuntime    = "runtime"
 )
 
-const agentNodeEndpointPrefix = "openlinker-agent-node://"
+const runtimeEndpointPrefix = "openlinker-runtime://"
 
 type connectionSettings struct {
 	Mode        string
@@ -49,9 +49,9 @@ func normalizeConnectionSettings(slug, endpointURL, mode, mcpToolName string, al
 			return connectionSettings{}, httpx.Unprocessable(err.Error())
 		}
 		return connectionSettings{Mode: mode, EndpointURL: endpointURL, MCPToolName: &mcpToolName}, nil
-	case ConnectionModeAgentNode:
-		if endpointURL == "" || !strings.HasPrefix(endpointURL, agentNodeEndpointPrefix) {
-			endpointURL = agentNodeEndpointPrefix + slug
+	case ConnectionModeRuntime:
+		if endpointURL == "" || !strings.HasPrefix(endpointURL, runtimeEndpointPrefix) {
+			endpointURL = runtimeEndpointPrefix + slug
 		}
 		return connectionSettings{Mode: mode, EndpointURL: endpointURL}, nil
 	default:

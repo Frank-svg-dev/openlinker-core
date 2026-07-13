@@ -1,4 +1,4 @@
--- Reliable runtime v2 cancellation coordinator primitives.
+-- Reliable Runtime cancellation coordinator primitives.
 --
 -- Every mutation transaction locks capacity owner Session -> Node when it may
 -- release a slot, then Run -> Attempt -> Cancellation. These queries never
@@ -22,7 +22,7 @@ WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
   AND r.dispatch_state = 'terminal'
   AND r.cancel_state = c.state
   AND c.state IN ('requested', 'delivered', 'stopping')
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.run_id = r.id
   AND a.agent_id = sqlc.arg(agent_id)
@@ -59,7 +59,7 @@ WHERE r.runtime_contract_id = 'openlinker.runtime.v2'
   AND c.requested_at
       + (sqlc.arg(command_deadline_ms)::bigint * INTERVAL '1 millisecond')
       <= clock_timestamp()
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.outcome IS NULL
   AND a.slot_acquired_at IS NOT NULL
@@ -107,7 +107,7 @@ WHERE r.id = sqlc.arg(run_id)
   AND c.requested_at
       + (sqlc.arg(command_deadline_ms)::bigint * INTERVAL '1 millisecond')
       <= clock_timestamp()
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.outcome IS NULL
   AND a.slot_acquired_at IS NOT NULL
@@ -269,7 +269,7 @@ WHERE a.run_id = sqlc.arg(run_id)
   AND a.id = sqlc.arg(attempt_id)
   AND a.lease_id = sqlc.arg(lease_id)
   AND a.fencing_token = sqlc.arg(fencing_token)
-  AND a.executor_type = 'agent_node'
+  AND a.executor_type = 'runtime'
   AND a.finished_at IS NULL
   AND a.outcome IS NULL
   AND a.result_id IS NULL

@@ -17,20 +17,20 @@ import (
 
 const runtimeV2TokenScope = "agent:pull"
 
-// RuntimeV2TokenValidator authenticates the Agent half of a runtime principal.
+// RuntimeTokenValidator authenticates the Agent half of a runtime principal.
 // Implementations must check revocation, expiry, and the requested scope.
-type RuntimeV2TokenValidator interface {
+type RuntimeTokenValidator interface {
 	ValidateRuntimeToken(context.Context, string, ...string) (db.AgentRuntimeToken, error)
 }
 
-// RuntimeV2DeviceAuthenticator authenticates the independently enrolled Node
+// RuntimeDeviceAuthenticator authenticates the independently enrolled Node
 // device. An implementation must use the verified TLS peer certificate, never
 // forwarded certificate or identity headers.
-type RuntimeV2DeviceAuthenticator interface {
+type RuntimeDeviceAuthenticator interface {
 	AuthenticateHTTP(context.Context, *http.Request) (RuntimeDeviceIdentity, error)
 }
 
-type RuntimeV2SessionService interface {
+type RuntimeSessionAPI interface {
 	CreateOrAttachSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionRequest) (RuntimeSessionState, error)
 	HeartbeatSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error)
 	CloseSession(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionCloseRequest) (RuntimeSessionState, error)
@@ -41,7 +41,7 @@ type RuntimeV2SessionService interface {
 	ResolveWorkerSessionPrincipal(context.Context, AuthenticatedRuntimePrincipal, string) (RuntimeSessionPrincipal, error)
 }
 
-type RuntimeV2LeaseService interface {
+type RuntimeLeaseAPI interface {
 	ClaimOffer(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error)
 	AckAssignment(context.Context, RuntimeSessionPrincipal, RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error)
 	RejectAssignment(context.Context, RuntimeSessionPrincipal, RunAssignmentRejectPayload) (RunAssignmentRejectedPayload, error)
@@ -49,82 +49,82 @@ type RuntimeV2LeaseService interface {
 	ReleaseUnackedOffer(context.Context, RuntimeSessionPrincipal, ...string) error
 }
 
-// RuntimeV2EventProjector is the only execution-event entrypoint exposed to
+// RuntimeEventProjector is the only execution-event entrypoint exposed to
 // transport adapters. Persistence and message/artifact/callback projections
 // must stay behind this boundary so WebSocket and Pull cannot diverge.
-type RuntimeV2EventProjector interface {
+type RuntimeEventProjector interface {
 	AppendRuntimeEvent(context.Context, RuntimeEventPrincipal, RuntimeAttemptIdentity, RuntimeEventRequest) (RuntimeEventAck, error)
 }
 
-type RuntimeV2ResultFinalizer interface {
+type RuntimeResultFinalizer interface {
 	Finalize(context.Context, RuntimeResultPrincipal, RuntimeResultRequest) (RuntimeResultAck, error)
 }
 
-type RuntimeV2DelegationAPI interface {
-	CallAgent(context.Context, RuntimeV2DelegationAuthorization) (RunSummary, error)
+type RuntimeDelegationAPI interface {
+	CallAgent(context.Context, RuntimeDelegationAuthorization) (RunSummary, error)
 }
 
-type RuntimeV2CancellationService interface {
+type RuntimeCancellationAPI interface {
 	NextCommand(context.Context, RuntimeSessionPrincipal) (*PendingCommand, time.Time, error)
 	PollCommands(context.Context, RuntimeSessionPrincipal) (RuntimeCommandsResponse, error)
 	AckCancel(context.Context, RuntimeSessionPrincipal, RunCancelAckPayload) (RunCancellationState, error)
 }
 
-// RuntimeV2HTTPDependencies are deliberately narrow so the HTTP adapter has
+// RuntimeHTTPDependencies are deliberately narrow so the HTTP adapter has
 // no database access and cannot reconstruct trusted principals from JSON.
-type RuntimeV2HTTPDependencies struct {
-	TokenValidator      RuntimeV2TokenValidator
-	DeviceAuthenticator RuntimeV2DeviceAuthenticator
-	Sessions            RuntimeV2SessionService
-	Leases              RuntimeV2LeaseService
-	EventProjector      RuntimeV2EventProjector
-	Finalizer           RuntimeV2ResultFinalizer
-	Resume              RuntimeV2ResumeService
-	Delegation          RuntimeV2DelegationAPI
-	Cancellations       RuntimeV2CancellationService
+type RuntimeHTTPDependencies struct {
+	TokenValidator      RuntimeTokenValidator
+	DeviceAuthenticator RuntimeDeviceAuthenticator
+	Sessions            RuntimeSessionAPI
+	Leases              RuntimeLeaseAPI
+	EventProjector      RuntimeEventProjector
+	Finalizer           RuntimeResultFinalizer
+	Resume              RuntimeResumeAPI
+	Delegation          RuntimeDelegationAPI
+	Cancellations       RuntimeCancellationAPI
 	WakeHub             *RuntimeWakeHub
 	Presence            RuntimePresenceStore
 	CoreInstanceID      uuid.UUID
 }
 
-// RuntimeV2HTTPController is the strict HTTP transport adapter for the durable
-// runtime v2 state machine.
-type RuntimeV2HTTPController struct {
-	dependencies RuntimeV2HTTPDependencies
+// RuntimeHTTPController is the strict HTTP transport adapter for the durable
+// Runtime state machine.
+type RuntimeHTTPController struct {
+	dependencies RuntimeHTTPDependencies
 }
 
-func NewRuntimeV2HTTPController(dependencies RuntimeV2HTTPDependencies) *RuntimeV2HTTPController {
-	return &RuntimeV2HTTPController{dependencies: dependencies}
+func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
+	return &RuntimeHTTPController{dependencies: dependencies}
 }
 
-func newRuntimeV2HTTPControllerForService(service runtimeService) *RuntimeV2HTTPController {
-	dependencies := RuntimeV2HTTPDependencies{}
-	if validator, ok := any(service).(RuntimeV2TokenValidator); ok {
+func newRuntimeHTTPControllerForService(service runtimeService) *RuntimeHTTPController {
+	dependencies := RuntimeHTTPDependencies{}
+	if validator, ok := any(service).(RuntimeTokenValidator); ok {
 		dependencies.TokenValidator = validator
 	}
-	return NewRuntimeV2HTTPController(dependencies)
+	return NewRuntimeHTTPController(dependencies)
 }
 
-// SetRuntimeV2Dependencies completes explicit production wiring. The legacy
-// runtime service remains a token-validator fallback for source compatibility.
-func (h *Handler) SetRuntimeV2Dependencies(dependencies RuntimeV2HTTPDependencies) {
+// SetRuntimeDependencies completes explicit production wiring. When the token
+// validator is omitted, Handler's runtime service supplies authentication.
+func (h *Handler) SetRuntimeDependencies(dependencies RuntimeHTTPDependencies) {
 	if h == nil {
 		return
 	}
 	if dependencies.TokenValidator == nil {
-		if validator, ok := any(h.svc).(RuntimeV2TokenValidator); ok {
+		if validator, ok := any(h.svc).(RuntimeTokenValidator); ok {
 			dependencies.TokenValidator = validator
 		}
 	}
-	h.runtimeV2 = NewRuntimeV2HTTPController(dependencies)
+	h.runtimeV2 = NewRuntimeHTTPController(dependencies)
 }
 
-func (h *RuntimeV2HTTPController) Register(api *echo.Group) {
+func (h *RuntimeHTTPController) Register(api *echo.Group) {
 	if api == nil {
 		return
 	}
 	if h == nil {
-		h = NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{})
+		h = NewRuntimeHTTPController(RuntimeHTTPDependencies{})
 	}
 	api.POST("/agent-runtime/sessions", h.CreateSession)
 	api.POST("/agent-runtime/sessions/:id/heartbeat", h.HeartbeatSession)
@@ -142,7 +142,7 @@ func (h *RuntimeV2HTTPController) Register(api *echo.Group) {
 	api.GET("/agent-runtime/ws", h.WebSocket)
 }
 
-func (h *RuntimeV2HTTPController) CreateSession(c echo.Context) error {
+func (h *RuntimeHTTPController) CreateSession(c echo.Context) error {
 	principal, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -167,7 +167,7 @@ func (h *RuntimeV2HTTPController) CreateSession(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, ready)
 }
 
-func (h *RuntimeV2HTTPController) HeartbeatSession(c echo.Context) error {
+func (h *RuntimeHTTPController) HeartbeatSession(c echo.Context) error {
 	principal, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -200,7 +200,7 @@ func (h *RuntimeV2HTTPController) HeartbeatSession(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, ready)
 }
 
-func (h *RuntimeV2HTTPController) CloseSession(c echo.Context) error {
+func (h *RuntimeHTTPController) CloseSession(c echo.Context) error {
 	principal, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -227,7 +227,7 @@ func (h *RuntimeV2HTTPController) CloseSession(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-func (h *RuntimeV2HTTPController) ClaimRun(c echo.Context) error {
+func (h *RuntimeHTTPController) ClaimRun(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -260,7 +260,7 @@ func (h *RuntimeV2HTTPController) ClaimRun(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, *assignment)
 }
 
-func (h *RuntimeV2HTTPController) AckAssignment(c echo.Context) error {
+func (h *RuntimeHTTPController) AckAssignment(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -290,7 +290,7 @@ func (h *RuntimeV2HTTPController) AckAssignment(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
-func (h *RuntimeV2HTTPController) RejectAssignment(c echo.Context) error {
+func (h *RuntimeHTTPController) RejectAssignment(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -320,7 +320,7 @@ func (h *RuntimeV2HTTPController) RejectAssignment(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
-func (h *RuntimeV2HTTPController) RenewLease(c echo.Context) error {
+func (h *RuntimeHTTPController) RenewLease(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -350,7 +350,7 @@ func (h *RuntimeV2HTTPController) RenewLease(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
-func (h *RuntimeV2HTTPController) AppendEvent(c echo.Context) error {
+func (h *RuntimeHTTPController) AppendEvent(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -388,7 +388,7 @@ func (h *RuntimeV2HTTPController) AppendEvent(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
-func (h *RuntimeV2HTTPController) FinalizeResult(c echo.Context) error {
+func (h *RuntimeHTTPController) FinalizeResult(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -434,7 +434,7 @@ func (h *RuntimeV2HTTPController) FinalizeResult(c echo.Context) error {
 // Session. Attempt identities in the payload continue to name their immutable
 // source Sessions; the body therefore cannot be resolved through an Attempt's
 // source runtime_session_id.
-func (h *RuntimeV2HTTPController) ResumeRuns(c echo.Context) error {
+func (h *RuntimeHTTPController) ResumeRuns(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -474,7 +474,7 @@ func (h *RuntimeV2HTTPController) ResumeRuns(c echo.Context) error {
 // PollCommands long-polls commands for one explicit Session. A token and
 // device may legitimately own several worker Sessions, so resolving a command
 // poll from authentication alone would deliver work to an arbitrary process.
-func (h *RuntimeV2HTTPController) PollCommands(c echo.Context) error {
+func (h *RuntimeHTTPController) PollCommands(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -497,7 +497,7 @@ func (h *RuntimeV2HTTPController) PollCommands(c echo.Context) error {
 	return writeRuntimeV2Payload(c, http.StatusOK, response)
 }
 
-func (h *RuntimeV2HTTPController) AckCancel(c echo.Context) error {
+func (h *RuntimeHTTPController) AckCancel(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -531,7 +531,7 @@ func (h *RuntimeV2HTTPController) AckCancel(c echo.Context) error {
 // capabilities before the exact request bytes are decoded as business input.
 // The invocation capability, not a long-lived Agent Token, is the Bearer
 // credential for this endpoint.
-func (h *RuntimeV2HTTPController) CallAgent(c echo.Context) error {
+func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 	if h == nil || h.dependencies.DeviceAuthenticator == nil || h.dependencies.Delegation == nil {
 		return writeRuntimeV2Error(c, runtimeV2UnavailableError())
 	}
@@ -552,7 +552,7 @@ func (h *RuntimeV2HTTPController) CallAgent(c echo.Context) error {
 	if err != nil {
 		return writeRuntimeV2Error(c, mapRuntimeV2HTTPError(err))
 	}
-	authorization := RuntimeV2DelegationAuthorization{
+	authorization := RuntimeDelegationAuthorization{
 		Device:            device,
 		InvocationContext: c.Request().Header.Get("OpenLinker-Invocation-Context"),
 		InvocationToken:   invocationToken,
@@ -571,7 +571,7 @@ func (h *RuntimeV2HTTPController) CallAgent(c echo.Context) error {
 	return writeRuntimeV2Payload(c, status, summary)
 }
 
-func (h *RuntimeV2HTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
+func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRuntimePrincipal, *RuntimeTransportError) {
 	if h == nil || h.dependencies.TokenValidator == nil || h.dependencies.DeviceAuthenticator == nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeV2UnavailableError()
 	}
@@ -594,7 +594,7 @@ func (h *RuntimeV2HTTPController) authenticate(c echo.Context) (AuthenticatedRun
 	return principal, nil
 }
 
-func (h *RuntimeV2HTTPController) resolveSession(
+func (h *RuntimeHTTPController) resolveSession(
 	c echo.Context,
 	authenticated AuthenticatedRuntimePrincipal,
 	sessionID uuid.UUID,
@@ -609,7 +609,7 @@ func (h *RuntimeV2HTTPController) resolveSession(
 	return principal, nil
 }
 
-func (h *RuntimeV2HTTPController) resolveEventResultSession(
+func (h *RuntimeHTTPController) resolveEventResultSession(
 	c echo.Context,
 	authenticated AuthenticatedRuntimePrincipal,
 	workerID string,
@@ -628,7 +628,7 @@ func (h *RuntimeV2HTTPController) resolveEventResultSession(
 	return principal, nil
 }
 
-func (h *RuntimeV2HTTPController) claimWithWait(
+func (h *RuntimeHTTPController) claimWithWait(
 	ctx context.Context,
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,
@@ -657,7 +657,7 @@ func (h *RuntimeV2HTTPController) claimWithWait(
 	}
 }
 
-func (h *RuntimeV2HTTPController) pollCommandsWithWait(
+func (h *RuntimeHTTPController) pollCommandsWithWait(
 	ctx context.Context,
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,

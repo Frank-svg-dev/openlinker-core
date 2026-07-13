@@ -423,7 +423,7 @@ func normalizeAgentTokenScopes(scopes []string, agent *db.Agent) ([]string, erro
 
 func runtimeScopesForConnection(connectionMode string) []string {
 	scopes := []string{"agent:call"}
-	if connectionMode == ConnectionModeAgentNode {
+	if connectionMode == ConnectionModeRuntime {
 		scopes = append(scopes, "agent:pull")
 	}
 	return scopes

@@ -34,7 +34,7 @@ func DecodeRuntimeEnvelope(reader io.Reader) (RuntimeEnvelope, error) {
 
 // ParseRuntimeEnvelope is the byte-slice form used by WebSocket readers.
 func ParseRuntimeEnvelope(frame []byte) (RuntimeEnvelope, error) {
-	if int64(len(frame)) > MaxRuntimeV2MessageBytes {
+	if int64(len(frame)) > MaxRuntimeMessageBytes {
 		return RuntimeEnvelope{}, runtimeMessageTooLargeError()
 	}
 	return parseRuntimeEnvelope(frame)
@@ -97,7 +97,7 @@ func DecodeRuntimeTypedMessage[P any](reader io.Reader, expected RuntimeMessageT
 	return message, nil
 }
 
-// DecodeRuntimeBody decodes one strict HTTP runtime v2 request body.
+// DecodeRuntimeBody decodes one strict HTTP Runtime request body.
 func DecodeRuntimeBody[P any](reader io.Reader) (P, error) {
 	var payload P
 	raw, err := readRuntimeJSON(reader)
@@ -143,7 +143,7 @@ func NewRuntimeTypedMessage[P any](messageType RuntimeMessageType, replyTo *uuid
 }
 
 // ValidateRuntimeEnvelope enforces the version, contract, identity, message
-// set, payload-object, and reply-presence rules in core-runtime.v2.json.
+// set, payload-object, and reply-presence rules in core-runtime.json.
 func ValidateRuntimeEnvelope(envelope RuntimeEnvelope) error {
 	if envelope.ProtocolVersion != RuntimeProtocolVersion || envelope.RuntimeContractID != RuntimeContractID {
 		return newRuntimeTransportError(
@@ -393,7 +393,7 @@ func ValidateRuntimePayload(payload any) error {
 	case RuntimeError:
 		return validateRuntimeErrorBody(value.Error)
 	default:
-		return runtimeValidationError("unsupported runtime v2 payload type", nil)
+		return runtimeValidationError("unsupported Runtime payload type", nil)
 	}
 	return nil
 }
@@ -799,11 +799,11 @@ func readRuntimeJSON(reader io.Reader) ([]byte, error) {
 	if reader == nil {
 		return nil, runtimeValidationError("runtime request body is required", nil)
 	}
-	raw, err := io.ReadAll(io.LimitReader(reader, MaxRuntimeV2MessageBytes+1))
+	raw, err := io.ReadAll(io.LimitReader(reader, MaxRuntimeMessageBytes+1))
 	if err != nil {
 		return nil, newRuntimeTransportError(RuntimeErrorBadRequest, runtimeErrorDefaultMessage(RuntimeErrorBadRequest), err)
 	}
-	if int64(len(raw)) > MaxRuntimeV2MessageBytes {
+	if int64(len(raw)) > MaxRuntimeMessageBytes {
 		return nil, runtimeMessageTooLargeError()
 	}
 	return raw, nil

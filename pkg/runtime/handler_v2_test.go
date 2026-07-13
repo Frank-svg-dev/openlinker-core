@@ -21,7 +21,7 @@ import (
 
 func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	e := echo.New()
-	NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{}).Register(e.Group("/api/v1"))
+	NewRuntimeHTTPController(RuntimeHTTPDependencies{}).Register(e.Group("/api/v1"))
 
 	routes := make(map[string]bool)
 	for _, route := range e.Routes() {
@@ -64,7 +64,7 @@ func TestRuntimeV2PullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 			return assignment, nil
 		},
 	}
-	controller := NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		Leases: leases, WakeHub: wakeHub,
 	})
 	type result struct {
@@ -523,7 +523,7 @@ func TestRuntimeV2WaitAndMissingDependenciesFailClosed(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
 	require.Equal(t, 0, fixture.leases.claimCalls)
 
-	controller := NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      fixture.tokens,
 		DeviceAuthenticator: fixture.devices,
 	})
@@ -621,8 +621,8 @@ func newRuntimeV2HandlerFixture() *runtimeV2HandlerFixture {
 	return fixture
 }
 
-func (f *runtimeV2HandlerFixture) controller() *RuntimeV2HTTPController {
-	return NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{
+func (f *runtimeV2HandlerFixture) controller() *RuntimeHTTPController {
+	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
 		Sessions:            f.sessions,
@@ -681,14 +681,14 @@ func (f *runtimeV2HandlerFixture) attemptIdentity() AttemptIdentity {
 	}
 }
 
-func serveRuntimeV2(t *testing.T, controller *RuntimeV2HTTPController, method, target string, payload any) *httptest.ResponseRecorder {
+func serveRuntimeV2(t *testing.T, controller *RuntimeHTTPController, method, target string, payload any) *httptest.ResponseRecorder {
 	t.Helper()
 	body, err := json.Marshal(payload)
 	require.NoError(t, err)
 	return serveRuntimeV2Raw(t, controller, method, target, string(body))
 }
 
-func serveRuntimeV2Raw(t *testing.T, controller *RuntimeV2HTTPController, method, target, body string) *httptest.ResponseRecorder {
+func serveRuntimeV2Raw(t *testing.T, controller *RuntimeHTTPController, method, target, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	e := echo.New()
 	controller.Register(e.Group("/api/v1"))
@@ -868,7 +868,7 @@ type runtimeV2ResumeServiceFake struct {
 type runtimeV2DelegationServiceFake struct {
 	summary       RunSummary
 	err           error
-	authorization RuntimeV2DelegationAuthorization
+	authorization RuntimeDelegationAuthorization
 	calls         int
 }
 
@@ -917,7 +917,7 @@ func (f *runtimeV2CancellationServiceFake) AckCancel(
 
 func (f *runtimeV2DelegationServiceFake) CallAgent(
 	_ context.Context,
-	authorization RuntimeV2DelegationAuthorization,
+	authorization RuntimeDelegationAuthorization,
 ) (RunSummary, error) {
 	f.calls++
 	f.authorization = authorization
@@ -942,13 +942,13 @@ func (f *runtimeV2ResultFinalizerFake) Finalize(_ context.Context, principal Run
 }
 
 var (
-	_ RuntimeV2TokenValidator      = (*runtimeV2TokenValidatorFake)(nil)
-	_ RuntimeV2DeviceAuthenticator = (*runtimeV2DeviceAuthenticatorFake)(nil)
-	_ RuntimeV2SessionService      = (*runtimeV2SessionServiceFake)(nil)
-	_ RuntimeV2LeaseService        = (*runtimeV2LeaseServiceFake)(nil)
-	_ RuntimeV2EventProjector      = (*runtimeV2EventStoreFake)(nil)
-	_ RuntimeV2ResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
-	_ RuntimeV2ResumeService       = (*runtimeV2ResumeServiceFake)(nil)
-	_ RuntimeV2DelegationAPI       = (*runtimeV2DelegationServiceFake)(nil)
-	_ RuntimeV2CancellationService = (*runtimeV2CancellationServiceFake)(nil)
+	_ RuntimeTokenValidator      = (*runtimeV2TokenValidatorFake)(nil)
+	_ RuntimeDeviceAuthenticator = (*runtimeV2DeviceAuthenticatorFake)(nil)
+	_ RuntimeSessionAPI          = (*runtimeV2SessionServiceFake)(nil)
+	_ RuntimeLeaseAPI            = (*runtimeV2LeaseServiceFake)(nil)
+	_ RuntimeEventProjector      = (*runtimeV2EventStoreFake)(nil)
+	_ RuntimeResultFinalizer     = (*runtimeV2ResultFinalizerFake)(nil)
+	_ RuntimeResumeAPI           = (*runtimeV2ResumeServiceFake)(nil)
+	_ RuntimeDelegationAPI       = (*runtimeV2DelegationServiceFake)(nil)
+	_ RuntimeCancellationAPI     = (*runtimeV2CancellationServiceFake)(nil)
 )

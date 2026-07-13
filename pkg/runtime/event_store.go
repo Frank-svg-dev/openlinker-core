@@ -33,7 +33,7 @@ const (
 
 var (
 	// ErrInvalidRuntimeEvent is returned before touching PostgreSQL when the
-	// request cannot satisfy the runtime v2 event contract.
+	// request cannot satisfy the Runtime event contract.
 	ErrInvalidRuntimeEvent = errors.New("invalid runtime event")
 	errNilEventStore       = errors.New("runtime event store is not configured")
 )
@@ -85,11 +85,11 @@ func newRuntimeEventError(code RuntimeEventErrorCode, cause error) error {
 	return &RuntimeEventError{Code: code, cause: cause}
 }
 
-// RuntimeAttemptIdentity is the immutable identity from the runtime v2 wire
+// RuntimeAttemptIdentity is the immutable identity from the Runtime wire
 // contract. AttemptNo is intentionally absent: Core derives it from the
 // locked run_attempts row after assignment confirmation.
 //
-// NodeID, RuntimeSessionID, and WorkerID are required for agent_node attempts
+// NodeID, RuntimeSessionID, and WorkerID are required for runtime attempts
 // and absent for Core-owned HTTP/MCP attempts.
 type RuntimeAttemptIdentity struct {
 	RunID            uuid.UUID  `json:"run_id"`
@@ -160,7 +160,7 @@ func NewRuntimeEventStore(pool *pgxpool.Pool) *EventStore {
 
 const runtimeEventFingerprintVersion = "openlinker.runtime-event.v1"
 
-// MaxRuntimeEventPayloadBytes is the runtime v2 max_non_artifact_message_bytes
+// MaxRuntimeEventPayloadBytes is the Runtime max_non_artifact_message_bytes
 // limit. It is applied to RFC 8785 canonical payload bytes, not to a
 // transport-dependent encoded envelope.
 const MaxRuntimeEventPayloadBytes = 4 * 1024 * 1024
@@ -525,7 +525,7 @@ func lockRuntimeEventRun(ctx context.Context, queries *db.Queries, runID uuid.UU
 		return runtimeEventRun{}, err
 	}
 	if locked.RunDeadlineAt == nil {
-		return runtimeEventRun{}, errors.New("runtime v2 Run is missing run deadline")
+		return runtimeEventRun{}, errors.New("Runtime Run is missing run deadline")
 	}
 	return runtimeEventRun{
 		agentID:           locked.AgentID,
@@ -692,7 +692,7 @@ func runtimePrincipalMatchesAttempt(principal RuntimeEventPrincipal, attempt run
 
 func runtimeExecutorIdentityShapeValid(executorType string, nodeID, sessionID *uuid.UUID, workerID *string) bool {
 	switch executorType {
-	case "agent_node":
+	case "runtime":
 		return nodeID != nil && *nodeID != uuid.Nil && sessionID != nil && *sessionID != uuid.Nil &&
 			workerID != nil && *workerID != ""
 	case "core_http", "core_mcp":

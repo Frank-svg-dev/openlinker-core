@@ -142,10 +142,10 @@ func TestRunStartedEventPayloadIncludesConnectionDetails(t *testing.T) {
 			name: "runtime ws",
 			agent: db.Agent{
 				ID:             uuid.New(),
-				ConnectionMode: connectionModeAgentNode,
+				ConnectionMode: connectionModeRuntime,
 			},
-			wantMode:      connectionModeAgentNode,
-			wantTransport: "agent_node",
+			wantMode:      connectionModeRuntime,
+			wantTransport: "runtime",
 		},
 	}
 
@@ -240,17 +240,17 @@ func TestRuntimeCallAgentDispatchAndDryRun(t *testing.T) {
 	require.Nil(t, dryOutput)
 	require.Equal(t, "UPSTREAM_BAD: upstream refused", dryErr)
 
-	agent.ConnectionMode = connectionModeAgentNode
+	agent.ConnectionMode = connectionModeRuntime
 	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
 	require.Error(t, callErr)
 	require.Nil(t, agentErr)
-	require.Contains(t, callErr.Error(), "agent_node")
+	require.Contains(t, callErr.Error(), "runtime")
 
-	agent.ConnectionMode = connectionModeAgentNode
+	agent.ConnectionMode = connectionModeRuntime
 	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
 	require.Error(t, callErr)
 	require.Nil(t, agentErr)
-	require.Contains(t, callErr.Error(), "agent_node")
+	require.Contains(t, callErr.Error(), "runtime")
 
 	agent.ConnectionMode = "unsupported"
 	_, _, agentErr, callErr = svc.callAgent(context.Background(), agent, runID, userID, &RunRequest{}, nil)
@@ -1150,10 +1150,6 @@ func TestRuntimeRoutes(t *testing.T) {
 	for _, key := range []string{
 		http.MethodPost + " /api/v1/runs/:id/events",
 		http.MethodPost + " /api/v1/agent-runtime/heartbeat",
-		http.MethodPost + " /api/v1/agent-runtime/v2/runs/claim",
-		http.MethodPost + " /api/v1/agent-runtime/v2/runs/:id/result",
-		http.MethodGet + " /api/v1/agent-runtime/v2/ws",
-		http.MethodPost + " /api/v1/agent-runtime/v2/call-agent",
 	} {
 		require.False(t, routes[key], key)
 	}

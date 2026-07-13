@@ -1,6 +1,6 @@
-# Runtime v2 load test
+# Runtime load test
 
-`runtime-loadtest` drives the same reliable Runtime v2 state machine through
+`runtime-loadtest` drives the same reliable Runtime state machine through
 two transports:
 
 - WebSocket is the primary transport. It performs an authenticated upgrade,
@@ -29,7 +29,7 @@ Sessions. The client CA key stays on the provisioning host:
 DATABASE_URL='postgres://...' ./bin/api runtime-node issue \
   --ca-cert /secure/runtime-client-ca.crt \
   --ca-key /secure/runtime-client-ca.key \
-  --display-name 'Runtime v2 load generator' \
+  --display-name 'Runtime load generator' \
   --capacity 100 \
   --cert-out ./node-pki/loadtest.crt \
   --key-out ./node-pki/loadtest.key
@@ -43,9 +43,9 @@ the Node certificate.
 export OPENLINKER_NODE_ID='00000000-0000-4000-8000-000000000001'
 export OPENLINKER_API_ROOT='http://127.0.0.1:8080/api/v1'
 export OPENLINKER_RUNTIME_URL='https://127.0.0.1:8443'
-export OPENLINKER_AGENT_NODE_MTLS_CERT_FILE="$PWD/node-pki/loadtest.crt"
-export OPENLINKER_AGENT_NODE_MTLS_KEY_FILE="$PWD/node-pki/loadtest.key"
-export OPENLINKER_AGENT_NODE_MTLS_CA_FILE="$PWD/node-pki/runtime-server-ca.crt"
+export OPENLINKER_RUNTIME_MTLS_CERT_FILE="$PWD/node-pki/loadtest.crt"
+export OPENLINKER_RUNTIME_MTLS_KEY_FILE="$PWD/node-pki/loadtest.key"
+export OPENLINKER_RUNTIME_MTLS_CA_FILE="$PWD/node-pki/runtime-server-ca.crt"
 ```
 
 The private key, certificate, CA, Node ID, and HTTPS Runtime origin are
@@ -56,7 +56,7 @@ advancing the wire protocol. Tokens and invocation capabilities are not stored.
 
 ## Baseline transports
 
-The default `auto` mode connects with WebSocket first, falls back to Runtime v2
+The default `auto` mode connects with WebSocket first, falls back to Runtime
 Pull after a transport failure, probes WebSocket recovery, then resumes the
 same in-flight Attempts before switching back.
 
@@ -143,8 +143,8 @@ go run ./cmd/runtime-loadtest \
 
 ## Report contract
 
-The JSON report separates `runtime_v2.transports.ws`,
-`runtime_v2.transports.pull`, and their aggregate. Each section includes:
+The JSON report separates `runtime.transports.ws`,
+`runtime.transports.pull`, and their aggregate. Each section includes:
 
 - hello/ready connection latency;
 - offer-to-confirm and assignment latency;
@@ -152,8 +152,8 @@ The JSON report separates `runtime_v2.transports.ws`,
 - replayed Event/Result ACKs and recovered assignment ACK response loss;
 - stable error-code counts.
 
-`runtime_v2.switches` records endpoint and transport transitions;
-`runtime_v2.resume` records decisions and latency. The safety section must show
+`runtime.switches` records endpoint and transport transitions;
+`runtime.resume` records decisions and latency. The safety section must show
 `duplicate_execution: 0` and `stale_fence_accepts: 0`. The Redis scenario also
 requires `redis_signal_outage_observed: true` and a positive
 `db_polling_fallback_completions` count.

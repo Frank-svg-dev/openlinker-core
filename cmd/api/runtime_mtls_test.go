@@ -81,12 +81,6 @@ func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
 	if runtimeRequest.Code != http.StatusNoContent || called != 1 {
 		t.Fatalf("runtime path code=%d called=%v", runtimeRequest.Code, called)
 	}
-	legacyRequest := httptest.NewRecorder()
-	handler.ServeHTTP(legacyRequest, httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/v2/sessions", nil))
-	if legacyRequest.Code != http.StatusNotFound || called != 1 {
-		t.Fatalf("legacy runtime path code=%d called=%v", legacyRequest.Code, called)
-	}
-
 	e := echo.New()
 	e.Use(runtimeListenerIsolation)
 	e.POST("/api/v1/agent-runtime/sessions", func(c echo.Context) error {
@@ -97,10 +91,7 @@ func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
 		called++
 		return c.NoContent(http.StatusNoContent)
 	})
-	for _, path := range []string{
-		"/api/v1/agent-runtime/sessions",
-		"/api/v1/agent-runtime/v2/sessions",
-	} {
+	for _, path := range []string{"/api/v1/agent-runtime/sessions"} {
 		recorder := httptest.NewRecorder()
 		e.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
 		if recorder.Code != http.StatusNotFound || called != 1 {

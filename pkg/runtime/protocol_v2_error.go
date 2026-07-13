@@ -7,7 +7,7 @@ import (
 )
 
 // RuntimeErrorCode is the stable error vocabulary shared by HTTP and
-// WebSocket runtime v2 transports.
+// WebSocket Runtime transports.
 type RuntimeErrorCode string
 
 const (

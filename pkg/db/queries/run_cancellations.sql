@@ -1,4 +1,4 @@
--- Reliable runtime v2 cancellation evidence.
+-- Reliable Runtime cancellation evidence.
 --
 -- Writes must update the runs cancellation summary in the same transaction.
 -- The initial cancellation request belongs to the canceled terminal transaction

@@ -1323,11 +1323,11 @@ func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, 
 	if snapshot.AvailabilityStatus == "unreachable" {
 		return false, nil
 	}
-	if requireRuntimeOnline && agentRow.ConnectionMode == "agent_node" {
+	if requireRuntimeOnline && agentRow.ConnectionMode == "runtime" {
 		hasActiveSession, err := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agentRow.ID)
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeV2SessionForAgent")
-			return false, httpx.Internal("校验 Workflow 的 Agent Node 连接状态失败")
+			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")
 		}
 		if !hasActiveSession {
 			return false, nil

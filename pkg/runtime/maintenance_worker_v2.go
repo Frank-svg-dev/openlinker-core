@@ -15,24 +15,24 @@ const (
 )
 
 type runtimeV2DeadlineReconcileWorker interface {
-	ReconcileBatch(context.Context, int) (RuntimeV2ReconcileBatchResult, error)
+	ReconcileBatch(context.Context, int) (RuntimeReconcileBatchResult, error)
 }
 
 type runtimeV2CancellationReapWorker interface {
 	ReapExpiredCancellations(context.Context, int) (int, error)
 }
 
-// RuntimeV2MaintenanceWorkerConfig bounds every tick so a large stale queue
+// RuntimeMaintenanceWorkerConfig bounds every tick so a large stale queue
 // cannot monopolize a Core process. A full batch triggers a small, bounded
 // catch-up loop; the next tick continues any remaining work.
-type RuntimeV2MaintenanceWorkerConfig struct {
+type RuntimeMaintenanceWorkerConfig struct {
 	Interval              time.Duration
 	ReconcileBatchSize    int
 	CancellationBatchSize int
 	MaxCatchUpBatches     int
 }
 
-type RuntimeV2MaintenanceResult struct {
+type RuntimeMaintenanceResult struct {
 	ReconcileBatches    int
 	CancellationBatches int
 	Reconciled          int
@@ -42,7 +42,7 @@ type RuntimeV2MaintenanceResult struct {
 	CancellationsReaped int
 }
 
-func normalizeRuntimeV2MaintenanceWorkerConfig(cfg RuntimeV2MaintenanceWorkerConfig) RuntimeV2MaintenanceWorkerConfig {
+func normalizeRuntimeMaintenanceWorkerConfig(cfg RuntimeMaintenanceWorkerConfig) RuntimeMaintenanceWorkerConfig {
 	if cfg.Interval <= 0 {
 		cfg.Interval = defaultRuntimeV2MaintenanceInterval
 	}
@@ -58,21 +58,21 @@ func normalizeRuntimeV2MaintenanceWorkerConfig(cfg RuntimeV2MaintenanceWorkerCon
 	return cfg
 }
 
-// RunRuntimeV2MaintenanceOnce executes lease/deadline reconciliation and
+// RunRuntimeMaintenanceOnce executes lease/deadline reconciliation and
 // cancellation deadline recovery independently. An error in one path does not
 // suppress the other path; errors are joined after both bounded passes finish.
-func RunRuntimeV2MaintenanceOnce(
+func RunRuntimeMaintenanceOnce(
 	ctx context.Context,
 	reconciler runtimeV2DeadlineReconcileWorker,
 	cancellations runtimeV2CancellationReapWorker,
-	cfg RuntimeV2MaintenanceWorkerConfig,
-) (RuntimeV2MaintenanceResult, error) {
-	cfg = normalizeRuntimeV2MaintenanceWorkerConfig(cfg)
-	var result RuntimeV2MaintenanceResult
+	cfg RuntimeMaintenanceWorkerConfig,
+) (RuntimeMaintenanceResult, error) {
+	cfg = normalizeRuntimeMaintenanceWorkerConfig(cfg)
+	var result RuntimeMaintenanceResult
 	var errs []error
 
 	if reconciler == nil {
-		errs = append(errs, ErrRuntimeV2ReconcilerNotConfigured)
+		errs = append(errs, ErrRuntimeReconcilerNotConfigured)
 	} else {
 		for batch := 0; batch < cfg.MaxCatchUpBatches; batch++ {
 			if err := ctx.Err(); err != nil {
@@ -119,20 +119,20 @@ func RunRuntimeV2MaintenanceOnce(
 	return result, errors.Join(errs...)
 }
 
-// StartRuntimeV2MaintenanceWorker runs an immediate pass and then continues
+// StartRuntimeMaintenanceWorker runs an immediate pass and then continues
 // until shutdown. PostgreSQL remains the truth source; failures are logged and
 // retried on the next tick instead of terminating the API process.
-func StartRuntimeV2MaintenanceWorker(
+func StartRuntimeMaintenanceWorker(
 	ctx context.Context,
 	reconciler runtimeV2DeadlineReconcileWorker,
 	cancellations runtimeV2CancellationReapWorker,
-	cfg RuntimeV2MaintenanceWorkerConfig,
+	cfg RuntimeMaintenanceWorkerConfig,
 ) {
-	cfg = normalizeRuntimeV2MaintenanceWorkerConfig(cfg)
+	cfg = normalizeRuntimeMaintenanceWorkerConfig(cfg)
 	run := func() {
-		result, err := RunRuntimeV2MaintenanceOnce(ctx, reconciler, cancellations, cfg)
+		result, err := RunRuntimeMaintenanceOnce(ctx, reconciler, cancellations, cfg)
 		if err != nil && ctx.Err() == nil {
-			log.Error().Err(err).Msg("runtime v2 maintenance pass failed")
+			log.Error().Err(err).Msg("Runtime maintenance pass failed")
 			return
 		}
 		if result.Reconciled > 0 || result.CancellationsReaped > 0 {
@@ -142,7 +142,7 @@ func StartRuntimeV2MaintenanceWorker(
 				Int("timed_out", result.TimedOut).
 				Int("dead_lettered", result.DeadLettered).
 				Int("cancellations_reaped", result.CancellationsReaped).
-				Msg("runtime v2 maintenance pass committed")
+				Msg("Runtime maintenance pass committed")
 		}
 	}
 

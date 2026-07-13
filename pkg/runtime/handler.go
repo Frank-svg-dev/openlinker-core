@@ -28,7 +28,7 @@ type Handler struct {
 	svc       runtimeService
 	validator *validator.Validate
 	cfg       *config.Config
-	runtimeV2 *RuntimeV2HTTPController
+	runtimeV2 *RuntimeHTTPController
 }
 
 type runtimeService interface {
@@ -47,7 +47,7 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 	h := &Handler{
 		svc:       svc,
 		validator: validator.New(validator.WithRequiredStructEnabled()),
-		runtimeV2: newRuntimeV2HTTPControllerForService(svc),
+		runtimeV2: newRuntimeHTTPControllerForService(svc),
 	}
 	if len(cfg) > 0 {
 		h.cfg = cfg[0]

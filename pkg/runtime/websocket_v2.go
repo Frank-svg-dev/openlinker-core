@@ -34,17 +34,17 @@ var runtimeV2WSUpgrader = websocket.Upgrader{
 	},
 }
 
-// RuntimeV2ResumeService is optional while the HTTP/WS recovery surface is
+// RuntimeResumeAPI is optional while the HTTP/WS recovery surface is
 // being wired. A missing implementation produces a correlated runtime.error;
 // it never acknowledges recovery that Core did not durably authorize.
-type RuntimeV2ResumeService interface {
+type RuntimeResumeAPI interface {
 	Resume(context.Context, RuntimeSessionPrincipal, RuntimeResumePayload) (RuntimeResumeResponse, error)
 }
 
 // WebSocket authenticates both Agent Token and Node certificate before the
 // HTTP connection is upgraded. No unauthenticated peer can consume a socket or
 // create/attach a durable Session.
-func (h *RuntimeV2HTTPController) WebSocket(c echo.Context) error {
+func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 	authenticated, transportErr := h.authenticate(c)
 	if transportErr != nil {
 		return writeRuntimeV2Error(c, transportErr)
@@ -76,7 +76,7 @@ func (h *RuntimeV2HTTPController) WebSocket(c echo.Context) error {
 }
 
 type runtimeV2WSConnection struct {
-	controller      *RuntimeV2HTTPController
+	controller      *RuntimeHTTPController
 	socket          *websocket.Conn
 	authenticated   AuthenticatedRuntimePrincipal
 	ctx             context.Context
@@ -117,7 +117,7 @@ type runtimeV2WSCancellationCorrelation struct {
 
 func newRuntimeV2WSConnection(
 	parent context.Context,
-	controller *RuntimeV2HTTPController,
+	controller *RuntimeHTTPController,
 	socket *websocket.Conn,
 	authenticated AuthenticatedRuntimePrincipal,
 ) *runtimeV2WSConnection {
@@ -234,13 +234,13 @@ func (c *runtimeV2WSConnection) readEnvelope() (RuntimeEnvelope, error) {
 	if messageType != websocket.TextMessage {
 		return RuntimeEnvelope{}, runtimeV2ValidationError()
 	}
-	frame, err := io.ReadAll(io.LimitReader(reader, MaxRuntimeV2MessageBytes+1))
+	frame, err := io.ReadAll(io.LimitReader(reader, MaxRuntimeMessageBytes+1))
 	if err != nil {
 		return RuntimeEnvelope{}, newRuntimeTransportError(
 			RuntimeErrorBadRequest, runtimeErrorDefaultMessage(RuntimeErrorBadRequest), err,
 		)
 	}
-	if int64(len(frame)) > MaxRuntimeV2MessageBytes {
+	if int64(len(frame)) > MaxRuntimeMessageBytes {
 		return RuntimeEnvelope{}, runtimeMessageTooLargeError()
 	}
 	return ParseRuntimeEnvelope(frame)
@@ -513,7 +513,7 @@ func (c *runtimeV2WSConnection) commandAndSend() {
 		return
 	}
 	if decoded.Type != RuntimeMessageRunCancel || decoded.Cancel == nil {
-		c.closeForError(runtimeV2WSOutboundError(errors.New("unexpected runtime v2 websocket command type")))
+		c.closeForError(runtimeV2WSOutboundError(errors.New("unexpected Runtime websocket command type")))
 		return
 	}
 	if c.cancellationAlreadySent(*decoded.Cancel) {
@@ -753,7 +753,7 @@ func (c *runtimeV2WSConnection) enqueueWrite(request runtimeV2WSWriteRequest) er
 	case <-c.ctx.Done():
 		return c.ctx.Err()
 	case <-c.writerDone:
-		return errors.New("runtime v2 websocket writer stopped")
+		return errors.New("Runtime websocket writer stopped")
 	case c.writes <- request:
 	}
 	select {
@@ -764,7 +764,7 @@ func (c *runtimeV2WSConnection) enqueueWrite(request runtimeV2WSWriteRequest) er
 		case err := <-request.result:
 			return err
 		default:
-			return errors.New("runtime v2 websocket writer stopped")
+			return errors.New("Runtime websocket writer stopped")
 		}
 	case err := <-request.result:
 		return err
@@ -791,7 +791,7 @@ func (c *runtimeV2WSConnection) writeLoop() {
 					request.controlType, request.controlData, time.Now().Add(runtimeV2WSWriteWait),
 				)
 			default:
-				err = errors.New("empty runtime v2 websocket write")
+				err = errors.New("empty Runtime websocket write")
 			}
 			request.result <- err
 			if err != nil || request.controlType == websocket.CloseMessage {
@@ -817,7 +817,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 			select {
 			case <-c.maintenanceDone:
 			case <-time.After(runtimeV2WSCleanupTimeout):
-				log.Warn().Msg("runtime v2 websocket maintenance did not stop before cleanup")
+				log.Warn().Msg("Runtime websocket maintenance did not stop before cleanup")
 			}
 		}
 		if c.attached {
@@ -832,7 +832,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 				},
 			)
 			if closeErr != nil {
-				log.Warn().Err(closeErr).Msg("runtime v2 websocket close Session")
+				log.Warn().Err(closeErr).Msg("Runtime websocket close Session")
 			} else {
 				c.controller.removePresence(closeCtx, state, c.connectionID)
 			}
@@ -845,7 +845,7 @@ func (c *runtimeV2WSConnection) cleanup() {
 				if releaseErr := c.controller.dependencies.Leases.ReleaseUnackedOffer(
 					releaseCtx, c.sessionPrincipal, "SESSION_DISCONNECTED",
 				); releaseErr != nil {
-					log.Warn().Err(releaseErr).Msg("runtime v2 websocket release unacked offer")
+					log.Warn().Err(releaseErr).Msg("Runtime websocket release unacked offer")
 				}
 				releaseCancel()
 			}

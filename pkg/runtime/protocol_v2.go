@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	// MaxRuntimeV2MessageBytes is the contract's limit for every non-artifact
+	// MaxRuntimeMessageBytes is the contract's limit for every non-artifact
 	// HTTP body and WebSocket message. The limit applies to the complete wire
 	// message, not only to its business payload.
-	MaxRuntimeV2MessageBytes int64 = 4 * 1024 * 1024
+	MaxRuntimeMessageBytes int64 = 4 * 1024 * 1024
 
 	RuntimeOfferTTLSeconds       = 30
 	RuntimeLeaseTTLSeconds       = 60
@@ -21,7 +21,7 @@ const (
 	RuntimeMaximumResumeAttempts = 1024
 )
 
-// RuntimeMessageType is the closed set of runtime v2 WebSocket message types.
+// RuntimeMessageType is the closed set of Runtime WebSocket message types.
 type RuntimeMessageType string
 
 const (
@@ -47,7 +47,7 @@ const (
 	RuntimeMessageError               RuntimeMessageType = "runtime.error"
 )
 
-// RuntimeEnvelopeFields are common to every runtime v2 WebSocket message.
+// RuntimeEnvelopeFields are common to every Runtime WebSocket message.
 // Payload is deliberately not part of this struct so concrete messages keep a
 // strongly typed payload while the router can use RuntimeEnvelope below.
 type RuntimeEnvelopeFields struct {
@@ -93,7 +93,7 @@ type RunLeaseRevokedMessage = RuntimeTypedEnvelope[RunLeaseRevokedPayload]
 type RuntimeDrainMessage = RuntimeTypedEnvelope[RuntimeDrainPayload]
 type RuntimeErrorMessage = RuntimeTypedEnvelope[RuntimeErrorBody]
 
-// AttemptIdentity is the exact agent_node wire identity. Unlike the
+// AttemptIdentity is the exact runtime wire identity. Unlike the
 // transport-neutral RuntimeAttemptIdentity, every Node/session field is
 // mandatory here.
 type AttemptIdentity struct {

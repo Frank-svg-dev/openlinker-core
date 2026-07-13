@@ -1,4 +1,4 @@
--- Reliable runtime v2 dead-letter inventory.
+-- Reliable Runtime dead-letter inventory.
 
 -- name: CreateRunDeadLetter :one
 INSERT INTO run_dead_letters (

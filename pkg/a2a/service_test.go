@@ -191,8 +191,8 @@ func makeRuntimePullAgent(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {
 	t.Helper()
 	_, err := pool.Exec(context.Background(),
 		`UPDATE agents
-		    SET connection_mode='agent_node',
-		        endpoint_url='openlinker-agent-node://' || slug
+		    SET connection_mode='runtime',
+		        endpoint_url='openlinker-runtime://' || slug
 		  WHERE id=$1`,
 		agentID)
 	require.NoError(t, err)
@@ -209,7 +209,7 @@ func TestRuntimeWorkbenchShowsV2SessionAndBacklog(t *testing.T) {
 	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
 	assert.Equal(t, agentID.String(), workbench.Agent.ID)
-	assert.Equal(t, "agent_node", workbench.Agent.ConnectionMode)
+	assert.Equal(t, "runtime", workbench.Agent.ConnectionMode)
 	assert.True(t, workbench.Agent.ReadinessCallable)
 	assert.Equal(t, "ws_primary_long_poll_fallback", workbench.Runtime.TransportPolicy)
 	assert.Equal(t, "websocket", workbench.Runtime.PrimaryTransport)

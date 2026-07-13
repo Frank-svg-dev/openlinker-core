@@ -63,7 +63,7 @@ type RegisterAgentViaTokenRequest struct {
 	AbilityTags        []string `json:"ability_tags" validate:"omitempty,max=5,dive,min=2,max=30"`
 	SkillIDs           []string `json:"skill_ids" validate:"omitempty,max=5,dive,min=3,max=80"`
 	Visibility         string   `json:"visibility" validate:"omitempty,oneof=public unlisted private"`
-	ConnectionMode     string   `json:"connection_mode" validate:"omitempty,oneof=direct_http mcp_server agent_node"`
+	ConnectionMode     string   `json:"connection_mode" validate:"omitempty,oneof=direct_http mcp_server runtime"`
 	MCPToolName        string   `json:"mcp_tool_name" validate:"omitempty,min=1,max=120"`
 }
 

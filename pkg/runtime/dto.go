@@ -181,7 +181,7 @@ type RuntimeDeadLetterListItem struct {
 	ReplayedAsRunIDs []string   `json:"replayed_as_run_ids"`
 }
 
-// RuntimeNodeListResponse is the admin-only Runtime v2 Node inventory. The
+// RuntimeNodeListResponse is the admin-only Runtime Node inventory. The
 // database timestamp and current contract make freshness/compatibility
 // decisions reproducible without trusting the API host clock.
 type RuntimeNodeListResponse struct {

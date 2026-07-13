@@ -489,18 +489,18 @@ func TestUpdateAgentNodeVisibilityAndDisabledBoundaries(t *testing.T) {
 	agentID := uuid.MustParse(created.ID)
 
 	updated, err := svc.UpdateAgent(ctx, agentID, ownerID, &agent.UpdateAgentRequest{
-		Name:               "Agent Node",
-		Description:        "Updated to the transport-neutral Agent Node mode.",
+		Name:               "Runtime Worker",
+		Description:        "Updated to the transport-neutral Runtime Worker mode.",
 		EndpointURL:        "https://example.com/ignored-for-agent-node",
 		EndpointAuthHeader: "  Bearer node-secret  ",
 		PricePerCallCents:  321,
 		Tags:               []string{" Runtime ", "WS"},
 		Visibility:         "unlisted",
-		ConnectionMode:     "agent_node",
+		ConnectionMode:     "runtime",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "agent_node", updated.ConnectionMode)
-	assert.Equal(t, "openlinker-agent-node://"+created.Slug, updated.EndpointURL)
+	assert.Equal(t, "runtime", updated.ConnectionMode)
+	assert.Equal(t, "openlinker-runtime://"+created.Slug, updated.EndpointURL)
 	assert.Equal(t, "unlisted", updated.Visibility)
 	assert.ElementsMatch(t, []string{"runtime", "ws"}, updated.Tags)
 	assert.Nil(t, updated.MCPToolName)

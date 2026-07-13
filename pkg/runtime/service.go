@@ -47,7 +47,7 @@ const maxConversationHistoryMessages = 120
 const (
 	connectionModeDirectHTTP = "direct_http"
 	connectionModeMCPServer  = "mcp_server"
-	connectionModeAgentNode  = "agent_node"
+	connectionModeRuntime    = "runtime"
 
 	runtimeTokenPrefixLen = credential.PrefixLen
 )
@@ -63,7 +63,7 @@ type TaskCallbackEnqueuer interface {
 	EnqueueRunEvent(ctx context.Context, event db.RunEvent) error
 }
 
-// Service invokes Agents and maintains the Runtime v2 Run/Attempt state.
+// Service invokes Agents and maintains the Runtime Run/Attempt state.
 // Core-owned HTTP/MCP calls create and confirm a fenced Attempt before any
 // network I/O. Progress is written through EventStore and terminal facts only
 // through ResultFinalizer (or the database deadline reconciler after a crash).
@@ -177,7 +177,7 @@ func (s *Service) ConfigureCoreRuntime(coreInstanceID uuid.UUID) {
 	s.coreInstanceID = coreInstanceID
 }
 
-// FinalizeRuntimeResult is the transport-neutral runtime v2 Result entrypoint.
+// FinalizeRuntimeResult is the transport-neutral Runtime Result entrypoint.
 // Task 6 adapters authenticate and decode envelopes before calling it.
 func (s *Service) FinalizeRuntimeResult(
 	ctx context.Context,
@@ -190,7 +190,7 @@ func (s *Service) FinalizeRuntimeResult(
 	return s.resultFinalizer.Finalize(ctx, principal, req)
 }
 
-// AppendRuntimeEvent persists one runtime v2 execution Event and emits
+// AppendRuntimeEvent persists one Runtime execution Event and emits
 // projections only for the transaction winner. A replay receives its original
 // ACK without duplicating callbacks, messages, or artifacts.
 func (s *Service) AppendRuntimeEvent(
@@ -750,7 +750,7 @@ func (s *Service) isQueuedRuntime(invocation *runInvocation) bool {
 }
 
 func isQueuedRuntimeMode(mode string) bool {
-	return mode == connectionModeAgentNode
+	return mode == connectionModeRuntime
 }
 
 func (s *Service) createRunningRun(
@@ -824,7 +824,7 @@ func (s *Service) createRunningRun(
 		available, checkErr := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agent.ID)
 		if checkErr != nil {
 			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeV2SessionForAgent")
-			return nil, nil, httpx.Internal("检查 Agent Node 连接状态失败")
+			return nil, nil, httpx.Internal("检查 Runtime Worker 连接状态失败")
 		}
 		if !available && !opts.allowOfflineQueuedRuntime {
 			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
@@ -1172,8 +1172,8 @@ func runStartedEventPayload(agent db.Agent, userID uuid.UUID) map[string]interfa
 		if agent.MCPToolName != nil && strings.TrimSpace(*agent.MCPToolName) != "" {
 			payload["mcp_tool_name"] = strings.TrimSpace(*agent.MCPToolName)
 		}
-	case connectionModeAgentNode:
-		payload["transport"] = "agent_node"
+	case connectionModeRuntime:
+		payload["transport"] = "runtime"
 	default:
 		payload["transport"] = "http_endpoint"
 		if host := endpointHost(agent.EndpointURL); host != "" {
@@ -1383,8 +1383,8 @@ func (s *Service) callAgent(
 		return s.callAgentEndpoint(ctx, agent, runID, userID, req, delegation)
 	case connectionModeMCPServer:
 		return s.callMCPServer(ctx, agent, runID, userID, req, delegation)
-	case connectionModeAgentNode:
-		return nil, nil, nil, errors.New("agent_node run must be assigned through OpenLinker Runtime")
+	case connectionModeRuntime:
+		return nil, nil, nil, errors.New("runtime run must be assigned through OpenLinker Runtime")
 	default:
 		return nil, nil, &AgentError{Code: "UNSUPPORTED_CONNECTION_MODE", Message: "Agent connection_mode 不支持"}, nil
 	}
@@ -1499,7 +1499,7 @@ func (s *Service) attachRunEvidenceSummary(ctx context.Context, runID uuid.UUID,
 	resp.EvidenceSummary = summary
 }
 
-// CancelRun cancels an owned Runtime v2 Run through the durable coordinator.
+// CancelRun cancels an owned Runtime Run through the durable coordinator.
 func (s *Service) CancelRun(ctx context.Context, userID, runID uuid.UUID) (*RunResponse, error) {
 	return s.cancelRuntimeV2(ctx, userID, runID)
 }
@@ -1521,7 +1521,7 @@ func (s *Service) cancelRuntimeV2(ctx context.Context, userID, runID uuid.UUID) 
 			return nil, httpx.Conflict("run 状态已变化，请重试")
 		default:
 			log.Error().Err(err).Str("run_id", runID.String()).Str("user_id", userID.String()).
-				Msg("runtime.CancelRun: durable runtime v2 cancellation")
+				Msg("runtime.CancelRun: durable Runtime cancellation")
 			return nil, httpx.Internal("取消调用失败")
 		}
 	}
@@ -2768,7 +2768,7 @@ func queuedRuntimeWaitingNextAction(runID string, agentID uuid.UUID) *RunNextAct
 	return &RunNextAction{
 		Type:          "start_runtime_worker",
 		Label:         "启动 Agent runtime",
-		Hint:          "运行已进入 Runtime 队列，但当前没有在线 Node。请启动 Agent Node；它会从 OpenLinker 地址自动发现连接入口，优先使用 WebSocket，网络受限时切换到长轮询，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
+		Hint:          "运行已进入 Runtime 队列，但当前没有在线 Runtime Worker。请启动 Runtime Worker；它会从 OpenLinker 地址自动发现连接入口，优先使用 WebSocket，网络受限时切换到长轮询，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
 		Href:          "/hub/agents/" + agentID.String() + "/onboarding",
 		ResourceType:  "run",
 		ResourceID:    runID,
@@ -2812,7 +2812,7 @@ func nextActionForFailure(status, code, message string) *RunNextAction {
 	hint := "运行失败。请检查输入、Agent endpoint 或认证配置，然后重新运行。"
 	if status == "timeout" {
 		label = "检查超时并重试"
-		hint = "Agent 没有在超时时间内返回。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的可靠运行队列。"
+		hint = "Agent 没有在超时时间内返回。请检查 endpoint 响应时间和网络连通性；长任务请使用 Runtime Worker 的可靠运行队列。"
 	}
 	props := map[string]interface{}{}
 	if code != "" {
@@ -2964,7 +2964,7 @@ func createRunMessage(ctx context.Context, q *db.Queries, runID uuid.UUID, event
 func (s *Service) recordRunEventBestEffort(ctx context.Context, runID uuid.UUID, eventType string, payload map[string]interface{}) *db.RunEvent {
 	if _, terminal := coreOwnedRuntimeEventTypes[eventType]; terminal {
 		log.Error().Str("run_id", runID.String()).Str("event_type", eventType).
-			Msg("runtime: terminal Event rejected outside Runtime v2 finalizer")
+			Msg("runtime: terminal Event rejected outside Runtime finalizer")
 		return nil
 	}
 	event, err := createRunEventRecord(ctx, s.queries, runID, nil, eventType, payload)

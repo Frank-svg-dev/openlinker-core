@@ -28,7 +28,7 @@ func TestParseCommandRequiresExplicitCASAndCutoverIdentity(t *testing.T) {
 	}
 }
 
-func TestPreV2MaintenanceNoopStillNeedsExplicitFlag(t *testing.T) {
+func TestRuntimeUninstalledMaintenanceNoopStillNeedsExplicitFlag(t *testing.T) {
 	getenv := func(key string) string {
 		if key == "DATABASE_URL" {
 			return "postgres://openlinker:secret@postgres/openlinker"
@@ -36,12 +36,12 @@ func TestPreV2MaintenanceNoopStillNeedsExplicitFlag(t *testing.T) {
 		return ""
 	}
 	var stderr bytes.Buffer
-	cfg, err := parseCommand("hard-maintenance", []string{"--pre-v2-ok"}, &stderr, getenv)
-	if err != nil || !cfg.allowPreV2Noop {
+	cfg, err := parseCommand("hard-maintenance", []string{"--runtime-uninstalled-ok"}, &stderr, getenv)
+	if err != nil || !cfg.allowRuntimeUninstalledNoop {
 		t.Fatalf("cfg=%#v err=%v", cfg, err)
 	}
 	if _, err = parseCommand("hard-maintenance", nil, &stderr, getenv); err == nil {
-		t.Fatal("hard-maintenance accepted neither CAS nor explicit pre-v2 mode")
+		t.Fatal("hard-maintenance accepted neither CAS nor explicit runtime-uninstalled mode")
 	}
 }
 

@@ -16,14 +16,14 @@ import (
 const maxRuntimeV2ReconcileBatch = 1000
 
 var (
-	ErrRuntimeV2ReconcilerNotConfigured = errors.New("runtime v2 deadline reconciler is not configured")
-	ErrRuntimeV2ReconcileBatchInvalid   = errors.New("runtime v2 deadline reconcile batch must be between 1 and 1000")
+	ErrRuntimeReconcilerNotConfigured = errors.New("Runtime deadline reconciler is not configured")
+	ErrRuntimeReconcileBatchInvalid   = errors.New("Runtime deadline reconcile batch must be between 1 and 1000")
 )
 
-// RuntimeV2ReconcileBatchResult reports committed state changes. Scanned is
+// RuntimeReconcileBatchResult reports committed state changes. Scanned is
 // bounded by the requested limit; candidates skipped because another worker
 // held a SKIP LOCKED row are not counted as reconciled.
-type RuntimeV2ReconcileBatchResult struct {
+type RuntimeReconcileBatchResult struct {
 	Scanned       int `json:"scanned"`
 	Reconciled    int `json:"reconciled"`
 	Requeued      int `json:"requeued"`
@@ -32,23 +32,23 @@ type RuntimeV2ReconcileBatchResult struct {
 	ResultUnknown int `json:"result_unknown"`
 }
 
-// RuntimeV2DeadlineReconciler is a standalone worker boundary. It is not
+// RuntimeDeadlineReconciler is a standalone worker boundary. It is not
 // wired to coreapi here: callers choose scheduling, cadence, and shutdown.
-type RuntimeV2DeadlineReconciler struct {
+type RuntimeDeadlineReconciler struct {
 	pool         *pgxpool.Pool
 	retryPlanner ResultRetryPlanner
 }
 
-// NewRuntimeV2DeadlineReconciler builds the lease/deadline worker. A nil retry
+// NewRuntimeDeadlineReconciler builds the lease/deadline worker. A nil retry
 // planner uses the same bounded retry policy as ResultFinalizer.
-func NewRuntimeV2DeadlineReconciler(
+func NewRuntimeDeadlineReconciler(
 	pool *pgxpool.Pool,
 	retryPlanner ResultRetryPlanner,
-) *RuntimeV2DeadlineReconciler {
+) *RuntimeDeadlineReconciler {
 	if retryPlanner == nil {
 		retryPlanner = fixedResultRetryPlanner{}
 	}
-	return &RuntimeV2DeadlineReconciler{pool: pool, retryPlanner: retryPlanner}
+	return &RuntimeDeadlineReconciler{pool: pool, retryPlanner: retryPlanner}
 }
 
 type runtimeV2ReconcileDisposition uint8
@@ -64,22 +64,22 @@ const (
 // ReconcileBatch discovers at most limit due Runs with PostgreSQL's clock and
 // commits each winner independently. A failed candidate rolls back its entire
 // Attempt/capacity/Run/artifact transaction and stops the batch.
-func (r *RuntimeV2DeadlineReconciler) ReconcileBatch(
+func (r *RuntimeDeadlineReconciler) ReconcileBatch(
 	ctx context.Context,
 	limit int,
-) (RuntimeV2ReconcileBatchResult, error) {
+) (RuntimeReconcileBatchResult, error) {
 	if r == nil || r.pool == nil || r.retryPlanner == nil {
-		return RuntimeV2ReconcileBatchResult{}, ErrRuntimeV2ReconcilerNotConfigured
+		return RuntimeReconcileBatchResult{}, ErrRuntimeReconcilerNotConfigured
 	}
 	if limit < 1 || limit > maxRuntimeV2ReconcileBatch {
-		return RuntimeV2ReconcileBatchResult{}, ErrRuntimeV2ReconcileBatchInvalid
+		return RuntimeReconcileBatchResult{}, ErrRuntimeReconcileBatchInvalid
 	}
 
 	candidates, err := db.New(r.pool).ListDueRuntimeV2ReconcileCandidates(ctx, int32(limit))
 	if err != nil {
-		return RuntimeV2ReconcileBatchResult{}, err
+		return RuntimeReconcileBatchResult{}, err
 	}
-	result := RuntimeV2ReconcileBatchResult{Scanned: len(candidates)}
+	result := RuntimeReconcileBatchResult{Scanned: len(candidates)}
 	for _, candidate := range candidates {
 		disposition, reconcileErr := r.reconcileCandidate(ctx, candidate)
 		if reconcileErr != nil {
@@ -97,26 +97,26 @@ func (r *RuntimeV2DeadlineReconciler) ReconcileBatch(
 		case runtimeV2ReconcileResultUnknown:
 			result.ResultUnknown++
 		default:
-			return result, errors.New("runtime v2 reconciler returned an unknown disposition")
+			return result, errors.New("Runtime reconciler returned an unknown disposition")
 		}
 		result.Reconciled++
 	}
 	return result, nil
 }
 
-func (r *RuntimeV2DeadlineReconciler) reconcileCandidate(
+func (r *RuntimeDeadlineReconciler) reconcileCandidate(
 	ctx context.Context,
 	candidate db.ListDueRuntimeV2ReconcileCandidatesRow,
 ) (runtimeV2ReconcileDisposition, error) {
 	if candidate.RunID == uuid.Nil || candidate.DatabaseNow.IsZero() || candidate.DueAt.IsZero() {
-		return runtimeV2ReconcileSkipped, errors.New("runtime v2 reconcile candidate is incomplete")
+		return runtimeV2ReconcileSkipped, errors.New("Runtime reconcile candidate is incomplete")
 	}
 	if candidate.AttemptID == nil {
 		if candidate.ExecutorType != nil || candidate.RuntimeSessionID != nil || candidate.NodeID != nil {
-			return runtimeV2ReconcileSkipped, errors.New("runtime v2 deadline-only candidate has Attempt identity")
+			return runtimeV2ReconcileSkipped, errors.New("Runtime deadline-only candidate has Attempt identity")
 		}
 	} else if candidate.ExecutorType == nil {
-		return runtimeV2ReconcileSkipped, errors.New("runtime v2 Attempt candidate has no executor type")
+		return runtimeV2ReconcileSkipped, errors.New("Runtime Attempt candidate has no executor type")
 	}
 
 	disposition := runtimeV2ReconcileSkipped
@@ -134,7 +134,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileCandidate(
 			}
 			terminal := runtimeV2DeadlineTerminalForRun(locked)
 			if terminal == nil {
-				return errors.New("locked runtime v2 deadline-only Run is not due")
+				return errors.New("locked Runtime deadline-only Run is not due")
 			}
 			if err := finalizeRuntimeV2ReconciledTerminal(ctx, queries, locked, nil, *terminal); err != nil {
 				return err
@@ -144,9 +144,9 @@ func (r *RuntimeV2DeadlineReconciler) reconcileCandidate(
 		}
 
 		switch *candidate.ExecutorType {
-		case "agent_node":
+		case "runtime":
 			if candidate.RuntimeSessionID == nil || candidate.NodeID == nil {
-				return errors.New("agent_node reconcile candidate is missing capacity owner")
+				return errors.New("runtime reconcile candidate is missing capacity owner")
 			}
 			lockedSession, lockErr := queries.LockRuntimeSessionForV2Reconcile(ctx, *candidate.RuntimeSessionID)
 			if errors.Is(lockErr, pgx.ErrNoRows) {
@@ -170,7 +170,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileCandidate(
 			}
 		case "core_http", "core_mcp":
 			if candidate.RuntimeSessionID != nil || candidate.NodeID != nil {
-				return errors.New("Core reconcile candidate unexpectedly owns Agent Node capacity")
+				return errors.New("Core reconcile candidate unexpectedly owns Runtime Worker capacity")
 			}
 		default:
 			return fmt.Errorf("runtime reconcile candidate has unknown executor type %q", *candidate.ExecutorType)
@@ -207,7 +207,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileCandidate(
 			disposition, reconcileErr = r.reconcileExpiredExecution(ctx, queries, locked, attempt)
 			return reconcileErr
 		default:
-			return errors.New("runtime v2 Attempt candidate changed to an unsupported dispatch state")
+			return errors.New("Runtime Attempt candidate changed to an unsupported dispatch state")
 		}
 	})
 	if err != nil {
@@ -216,7 +216,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileCandidate(
 	return disposition, nil
 }
 
-func (r *RuntimeV2DeadlineReconciler) reconcileExpiredOffer(
+func (r *RuntimeDeadlineReconciler) reconcileExpiredOffer(
 	ctx context.Context,
 	queries *db.Queries,
 	locked db.RuntimeV2ReconcileLockedRunRow,
@@ -233,7 +233,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileExpiredOffer(
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return runtimeV2ReconcileSkipped, errors.New("runtime v2 expired offer changed after Run lock")
+		return runtimeV2ReconcileSkipped, errors.New("Runtime expired offer changed after Run lock")
 	}
 	if err != nil {
 		return runtimeV2ReconcileSkipped, err
@@ -267,7 +267,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileExpiredOffer(
 	return runtimeV2ReconcileRequeued, nil
 }
 
-func (r *RuntimeV2DeadlineReconciler) reconcileExpiredExecution(
+func (r *RuntimeDeadlineReconciler) reconcileExpiredExecution(
 	ctx context.Context,
 	queries *db.Queries,
 	locked db.RuntimeV2ReconcileLockedRunRow,
@@ -296,7 +296,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileExpiredExecution(
 	if terminal == nil {
 		retryDelay = r.retryPlanner.NextRetryDelay(locked.AttemptCount)
 		if retryDelay < time.Millisecond || retryDelay > 60*time.Second {
-			return runtimeV2ReconcileSkipped, fmt.Errorf("runtime v2 retry planner returned invalid delay %s", retryDelay)
+			return runtimeV2ReconcileSkipped, fmt.Errorf("Runtime retry planner returned invalid delay %s", retryDelay)
 		}
 	}
 	finished, err := queries.FinishRuntimeV2ReconciledAttempt(ctx, db.FinishRuntimeV2ReconciledAttemptParams{
@@ -305,7 +305,7 @@ func (r *RuntimeV2DeadlineReconciler) reconcileExpiredExecution(
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return runtimeV2ReconcileSkipped, errors.New("runtime v2 expired execution changed after Run lock")
+		return runtimeV2ReconcileSkipped, errors.New("Runtime expired execution changed after Run lock")
 	}
 	if err != nil {
 		return runtimeV2ReconcileSkipped, err
@@ -361,7 +361,7 @@ func reconcileRuntimeV2DeadlineCrossedAfterAttemptFinish(
 	locked.DatabaseNow = databaseNow
 	terminal := runtimeV2DeadlineTerminalForRun(locked)
 	if terminal == nil {
-		return runtimeV2ReconcileSkipped, errors.New("runtime v2 reconcile transition lost its fenced Run")
+		return runtimeV2ReconcileSkipped, errors.New("Runtime reconcile transition lost its fenced Run")
 	}
 	if err = finalizeRuntimeV2ReconciledTerminal(ctx, queries, locked, finished, *terminal); err != nil {
 		return runtimeV2ReconcileSkipped, err
@@ -478,7 +478,7 @@ func finalizeRuntimeV2ReconciledTerminal(
 	}
 	if terminal.dispatchState == string(RuntimeDispatchDeadLetter) {
 		if finishedAttempt == nil || finishedAttempt.AttemptNo == nil {
-			return errors.New("dead-lettered runtime v2 Run has no final Attempt number")
+			return errors.New("dead-lettered Runtime Run has no final Attempt number")
 		}
 		attemptErrorCode := finishedAttempt.ErrorCode
 		if err = ensureRuntimeResultDeadLetter(
@@ -499,14 +499,14 @@ func finalizeRuntimeV2ReconciledTerminal(
 		RunID: locked.ID, AttemptID: attemptID,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("runtime v2 terminal reconcile lost its fenced Run")
+		return errors.New("Runtime terminal reconcile lost its fenced Run")
 	}
 	if err != nil {
 		return err
 	}
 	if finalized.Status != terminal.status || finalized.DispatchState != terminal.dispatchState ||
 		finalized.TerminalEventID == nil || *finalized.TerminalEventID != event.ID {
-		return errors.New("runtime v2 terminal reconcile produced inconsistent Run facts")
+		return errors.New("Runtime terminal reconcile produced inconsistent Run facts")
 	}
 	if err = insertRuntimeResultLedgerAndStats(ctx, queries, run, event.ID, 0, 0); err != nil {
 		return err
@@ -549,30 +549,30 @@ func validateRuntimeV2ReconcileAttempt(
 		locked.ActiveAttemptID == nil || *locked.ActiveAttemptID != attempt.ID ||
 		locked.LeaseID == nil || *locked.LeaseID != attempt.LeaseID ||
 		locked.FencingToken != attempt.FencingToken || locked.CancelRequestID != nil {
-		return errors.New("runtime v2 reconcile Attempt no longer matches its Run")
+		return errors.New("Runtime reconcile Attempt no longer matches its Run")
 	}
-	if attempt.ExecutorType == "agent_node" {
+	if attempt.ExecutorType == "runtime" {
 		if attempt.SlotAcquiredAt == nil || attempt.SlotReleasedAt != nil ||
 			attempt.ActiveRuntimeSessionID == nil || attempt.NodeID == nil ||
 			candidate.RuntimeSessionID == nil || *candidate.RuntimeSessionID != *attempt.ActiveRuntimeSessionID ||
 			candidate.NodeID == nil || *candidate.NodeID != *attempt.NodeID {
-			return errors.New("runtime v2 reconcile Attempt capacity identity changed")
+			return errors.New("Runtime reconcile Attempt capacity identity changed")
 		}
 	} else if attempt.SlotAcquiredAt != nil || attempt.SlotReleasedAt != nil ||
 		attempt.ActiveRuntimeSessionID != nil || candidate.RuntimeSessionID != nil || candidate.NodeID != nil {
-		return errors.New("Core runtime v2 reconcile Attempt has capacity evidence")
+		return errors.New("Core Runtime reconcile Attempt has capacity evidence")
 	}
 	switch locked.DispatchState {
 	case string(RuntimeDispatchOffered):
 		if attempt.AcceptedAt != nil || attempt.AttemptNo != nil {
-			return errors.New("offered runtime v2 reconcile Attempt is already accepted")
+			return errors.New("offered Runtime reconcile Attempt is already accepted")
 		}
 	case string(RuntimeDispatchExecuting):
 		if attempt.AcceptedAt == nil || attempt.AttemptNo == nil || *attempt.AttemptNo != locked.AttemptCount {
-			return errors.New("executing runtime v2 reconcile Attempt lacks acceptance evidence")
+			return errors.New("executing Runtime reconcile Attempt lacks acceptance evidence")
 		}
 	default:
-		return errors.New("runtime v2 reconcile Attempt has invalid dispatch state")
+		return errors.New("Runtime reconcile Attempt has invalid dispatch state")
 	}
 	return nil
 }

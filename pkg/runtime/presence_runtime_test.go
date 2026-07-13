@@ -14,7 +14,7 @@ import (
 func TestRuntimeV2ControllerPresenceFollowsAttachHeartbeatAndClose(t *testing.T) {
 	coreID := uuid.New()
 	store := &runtimePresenceStoreFake{}
-	controller := NewRuntimeV2HTTPController(RuntimeV2HTTPDependencies{
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		Presence: store, CoreInstanceID: coreID,
 	})
 	state := RuntimeSessionState{Session: db.RuntimeSession{

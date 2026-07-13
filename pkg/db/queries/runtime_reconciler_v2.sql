@@ -1,6 +1,6 @@
--- Reliable runtime v2 lease/deadline reconciliation primitives.
+-- Reliable Runtime lease/deadline reconciliation primitives.
 --
--- Candidate discovery is deliberately lock-free. An Agent Node Attempt owns a
+-- Candidate discovery is deliberately lock-free. An Runtime Worker Attempt owns a
 -- Session/Node capacity slot, so the worker must lock Session -> Node before it
 -- may lock Run -> Attempt. The exact lock queries revalidate every candidate
 -- with PostgreSQL's clock and use SKIP LOCKED to keep concurrent workers from

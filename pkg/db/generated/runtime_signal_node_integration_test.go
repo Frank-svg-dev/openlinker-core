@@ -48,7 +48,7 @@ func TestHasActiveRuntimeV2SessionForAgentAgainstPostgres(t *testing.T) {
 			id, creator_id, slug, name, description, endpoint_url,
 			price_per_call_cents, connection_mode
 		) VALUES ($1, $2, $3, 'Signal Agent', 'Signal integration fixture',
-			'openlinker-agent-node://node', 0, 'agent_node')`,
+			'openlinker-runtime://node', 0, 'runtime')`,
 		agentID, userID, "signal-"+agentID.String()); err != nil {
 		t.Fatalf("insert agent: %v", err)
 	}

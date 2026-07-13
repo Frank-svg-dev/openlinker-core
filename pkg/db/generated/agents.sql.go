@@ -257,6 +257,7 @@ func (q *Queries) ListAgentsByCreator(ctx context.Context, creatorID uuid.UUID) 
 }
 
 const listAgentsByCreatorPage = `-- name: ListAgentsByCreatorPage :many
+-- 创作者中心 Agent 分页列表：搜索、状态筛选和排序都在数据库侧完成。
 SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
        a.endpoint_auth_header, a.price_per_call_cents, a.tags,
        a.lifecycle_status, a.visibility, a.certification_status,
@@ -274,12 +275,50 @@ SELECT a.id, a.creator_id, a.slug, a.name, a.description, a.endpoint_url,
 FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
-    SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_tokens
-    WHERE agent_id = a.id
-      AND revoked_at IS NULL
-      AND status = 'active_runtime'
-      AND 'agent:pull' = ANY(scopes)
+    SELECT MAX(session.heartbeat_at) AS last_runtime_token_used_at
+    FROM runtime_sessions session
+    JOIN runtime_nodes node ON node.node_id = session.node_id
+    JOIN agent_tokens credential
+      ON credential.id = session.credential_id
+     AND credential.agent_id = session.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = session.runtime_contract_id
+     AND contract.runtime_contract_digest = session.runtime_contract_digest
+     AND contract.is_current
+    WHERE session.agent_id = a.id
+      AND session.status IN ('active', 'draining')
+      AND session.attached_core_instance_id IS NOT NULL
+      AND session.disconnected_at IS NULL
+      AND session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND session.protocol_version = 2
+      AND session.runtime_contract_id = 'openlinker.runtime.v2'
+      AND session.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND session.features @> ARRAY[
+          'lease_fence', 'assignment_confirm', 'renew', 'resume',
+          'event_ack', 'result_ack', 'cancel', 'persistent_spool'
+      ]::text[]
+      AND node.status IN ('active', 'draining')
+      AND node.revoked_at IS NULL
+      AND node.protocol_version = session.protocol_version
+      AND node.runtime_contract_id = session.runtime_contract_id
+      AND node.runtime_contract_digest = session.runtime_contract_digest
+      AND node.device_certificate_serial = session.device_certificate_serial
+      AND node.node_version = session.node_version
+      AND node.features @> session.features
+      AND session.features @> node.features
+      AND node.last_seen_at IS NOT NULL
+      AND node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND credential.status = 'active_runtime'
+      AND credential.revoked_at IS NULL
+      AND credential.scopes @> ARRAY['agent:pull']::text[]
+      AND (credential.expires_at IS NULL OR credential.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = session.runtime_session_id
+            AND attachment.core_instance_id = session.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
 ) rt ON TRUE
 LEFT JOIN LATERAL (
     SELECT
@@ -303,29 +342,28 @@ WHERE a.creator_id = $1
     $3::text = ''
     OR ($3 = 'active' AND a.lifecycle_status = 'active')
     OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
-      COALESCE(av.availability_status, 'unknown') = 'healthy'
-      OR (
-        av.last_successful_run_at IS NOT NULL
-        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
-      )
-    ) AND NOT (
-      a.connection_mode = 'agent_node'
-      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
-    ))
-    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
-      (
+      (a.connection_mode = 'runtime' AND rt.last_runtime_token_used_at IS NOT NULL)
+      OR (a.connection_mode <> 'runtime' AND (
         COALESCE(av.availability_status, 'unknown') = 'healthy'
         OR (
           av.last_successful_run_at IS NOT NULL
           AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
         )
-      )
-      AND NOT (
-        a.connection_mode = 'agent_node'
-        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
-      )
+      ))
     ))
-    OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
+    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND (
+      (a.connection_mode = 'runtime' AND rt.last_runtime_token_used_at IS NULL)
+      OR (a.connection_mode <> 'runtime'
+          AND COALESCE(av.availability_status, 'unknown') <> 'degraded'
+          AND NOT (
+            COALESCE(av.availability_status, 'unknown') = 'healthy'
+            OR (
+              av.last_successful_run_at IS NOT NULL
+              AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+            )
+          ))
+    ))
+    OR ($3 = 'degraded' AND a.connection_mode <> 'runtime' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
     OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
     OR ($3 = 'review' AND a.certification_status = 'pending')
 	  )
@@ -346,7 +384,7 @@ WHERE a.creator_id = $1
   CASE WHEN $6 = 'lifetime_calls' THEN a.total_calls END DESC,
   CASE WHEN $6 = 'calls_this_month' THEN COALESCE(monthly.calls_this_month, 0) END DESC,
   a.created_at DESC
-LIMIT $7 OFFSET $8`
+LIMIT $7 OFFSET $8;`
 
 type ListAgentsByCreatorPageParams struct {
 	CreatorID           uuid.UUID `db:"creator_id" json:"creator_id"`
@@ -427,12 +465,50 @@ SELECT COUNT(*)::int AS total
 FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
-    SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_tokens
-    WHERE agent_id = a.id
-      AND revoked_at IS NULL
-      AND status = 'active_runtime'
-      AND 'agent:pull' = ANY(scopes)
+    SELECT MAX(session.heartbeat_at) AS last_runtime_token_used_at
+    FROM runtime_sessions session
+    JOIN runtime_nodes node ON node.node_id = session.node_id
+    JOIN agent_tokens credential
+      ON credential.id = session.credential_id
+     AND credential.agent_id = session.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = session.runtime_contract_id
+     AND contract.runtime_contract_digest = session.runtime_contract_digest
+     AND contract.is_current
+    WHERE session.agent_id = a.id
+      AND session.status IN ('active', 'draining')
+      AND session.attached_core_instance_id IS NOT NULL
+      AND session.disconnected_at IS NULL
+      AND session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND session.protocol_version = 2
+      AND session.runtime_contract_id = 'openlinker.runtime.v2'
+      AND session.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND session.features @> ARRAY[
+          'lease_fence', 'assignment_confirm', 'renew', 'resume',
+          'event_ack', 'result_ack', 'cancel', 'persistent_spool'
+      ]::text[]
+      AND node.status IN ('active', 'draining')
+      AND node.revoked_at IS NULL
+      AND node.protocol_version = session.protocol_version
+      AND node.runtime_contract_id = session.runtime_contract_id
+      AND node.runtime_contract_digest = session.runtime_contract_digest
+      AND node.device_certificate_serial = session.device_certificate_serial
+      AND node.node_version = session.node_version
+      AND node.features @> session.features
+      AND session.features @> node.features
+      AND node.last_seen_at IS NOT NULL
+      AND node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND credential.status = 'active_runtime'
+      AND credential.revoked_at IS NULL
+      AND credential.scopes @> ARRAY['agent:pull']::text[]
+      AND (credential.expires_at IS NULL OR credential.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = session.runtime_session_id
+            AND attachment.core_instance_id = session.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
 ) rt ON TRUE
 WHERE a.creator_id = $1
   AND (
@@ -447,29 +523,28 @@ WHERE a.creator_id = $1
     $3::text = ''
     OR ($3 = 'active' AND a.lifecycle_status = 'active')
     OR ($3 = 'online' AND a.lifecycle_status = 'active' AND (
-      COALESCE(av.availability_status, 'unknown') = 'healthy'
-      OR (
-        av.last_successful_run_at IS NOT NULL
-        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
-      )
-    ) AND NOT (
-      a.connection_mode = 'agent_node'
-      AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
-    ))
-    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND COALESCE(av.availability_status, 'unknown') <> 'degraded' AND NOT (
-      (
+      (a.connection_mode = 'runtime' AND rt.last_runtime_token_used_at IS NOT NULL)
+      OR (a.connection_mode <> 'runtime' AND (
         COALESCE(av.availability_status, 'unknown') = 'healthy'
         OR (
           av.last_successful_run_at IS NOT NULL
           AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
         )
-      )
-      AND NOT (
-        a.connection_mode = 'agent_node'
-        AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
-      )
+      ))
     ))
-    OR ($3 = 'degraded' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
+    OR ($3 = 'offline' AND a.lifecycle_status = 'active' AND (
+      (a.connection_mode = 'runtime' AND rt.last_runtime_token_used_at IS NULL)
+      OR (a.connection_mode <> 'runtime'
+          AND COALESCE(av.availability_status, 'unknown') <> 'degraded'
+          AND NOT (
+            COALESCE(av.availability_status, 'unknown') = 'healthy'
+            OR (
+              av.last_successful_run_at IS NOT NULL
+              AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+            )
+          ))
+    ))
+    OR ($3 = 'degraded' AND a.connection_mode <> 'runtime' AND COALESCE(av.availability_status, 'unknown') = 'degraded')
     OR ($3 = 'disabled' AND a.lifecycle_status = 'disabled')
     OR ($3 = 'review' AND a.certification_status = 'pending')
 	  )
@@ -483,7 +558,7 @@ WHERE a.creator_id = $1
 	      WHERE askill.agent_id = a.id
 	        AND askill.skill_id = ANY($6::text[])
 	    )
-	  )`
+	  );`
 
 type CountAgentsByCreatorFilteredParams struct {
 	CreatorID           uuid.UUID `db:"creator_id" json:"creator_id"`
@@ -505,14 +580,14 @@ const countAgentBucketsByCreator = `-- name: CountAgentBucketsByCreator :one
 SELECT
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active')::int AS total,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND (
-    COALESCE(av.availability_status, 'unknown') = 'healthy'
-    OR (
-      av.last_successful_run_at IS NOT NULL
-      AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
-    )
-  ) AND NOT (
-    a.connection_mode = 'agent_node'
-    AND COALESCE(rt.last_runtime_token_used_at < NOW() - INTERVAL '5 minutes', TRUE)
+    (a.connection_mode = 'runtime' AND rt.last_runtime_token_used_at IS NOT NULL)
+    OR (a.connection_mode <> 'runtime' AND (
+      COALESCE(av.availability_status, 'unknown') = 'healthy'
+      OR (
+        av.last_successful_run_at IS NOT NULL
+        AND COALESCE(av.availability_status, 'unknown') <> 'unreachable'
+      )
+    ))
   ))::int AS online,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'public')::int AS public,
   COUNT(*) FILTER (WHERE a.lifecycle_status = 'active' AND a.visibility = 'unlisted')::int AS unlisted,
@@ -521,14 +596,52 @@ SELECT
 FROM agents a
 LEFT JOIN agent_availability_snapshots av ON av.agent_id = a.id
 LEFT JOIN LATERAL (
-    SELECT MAX(last_used_at) AS last_runtime_token_used_at
-    FROM agent_tokens
-    WHERE agent_id = a.id
-      AND revoked_at IS NULL
-      AND status = 'active_runtime'
-      AND 'agent:pull' = ANY(scopes)
+    SELECT MAX(session.heartbeat_at) AS last_runtime_token_used_at
+    FROM runtime_sessions session
+    JOIN runtime_nodes node ON node.node_id = session.node_id
+    JOIN agent_tokens credential
+      ON credential.id = session.credential_id
+     AND credential.agent_id = session.agent_id
+    JOIN runtime_schema_contracts contract
+      ON contract.runtime_contract_id = session.runtime_contract_id
+     AND contract.runtime_contract_digest = session.runtime_contract_digest
+     AND contract.is_current
+    WHERE session.agent_id = a.id
+      AND session.status IN ('active', 'draining')
+      AND session.attached_core_instance_id IS NOT NULL
+      AND session.disconnected_at IS NULL
+      AND session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND session.protocol_version = 2
+      AND session.runtime_contract_id = 'openlinker.runtime.v2'
+      AND session.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'
+      AND session.features @> ARRAY[
+          'lease_fence', 'assignment_confirm', 'renew', 'resume',
+          'event_ack', 'result_ack', 'cancel', 'persistent_spool'
+      ]::text[]
+      AND node.status IN ('active', 'draining')
+      AND node.revoked_at IS NULL
+      AND node.protocol_version = session.protocol_version
+      AND node.runtime_contract_id = session.runtime_contract_id
+      AND node.runtime_contract_digest = session.runtime_contract_digest
+      AND node.device_certificate_serial = session.device_certificate_serial
+      AND node.node_version = session.node_version
+      AND node.features @> session.features
+      AND session.features @> node.features
+      AND node.last_seen_at IS NOT NULL
+      AND node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND credential.status = 'active_runtime'
+      AND credential.revoked_at IS NULL
+      AND credential.scopes @> ARRAY['agent:pull']::text[]
+      AND (credential.expires_at IS NULL OR credential.expires_at > clock_timestamp())
+      AND EXISTS (
+          SELECT 1
+          FROM runtime_session_attachments attachment
+          WHERE attachment.runtime_session_id = session.runtime_session_id
+            AND attachment.core_instance_id = session.attached_core_instance_id
+            AND attachment.detached_at IS NULL
+      )
 ) rt ON TRUE
-WHERE a.creator_id = $1`
+WHERE a.creator_id = $1;`
 
 type CountAgentBucketsByCreatorRow struct {
 	Total    int32 `db:"total" json:"total"`

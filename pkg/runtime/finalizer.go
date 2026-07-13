@@ -56,7 +56,7 @@ type RuntimeResultFailure struct {
 	RetryableHint bool   `json:"retryable_hint,omitempty"`
 }
 
-// RuntimeResultRequest is the transport-neutral runtime v2 Result payload.
+// RuntimeResultRequest is the transport-neutral Runtime Result payload.
 // The envelope message ID and transport correlation fields intentionally live
 // outside this type and therefore outside the semantic fingerprint.
 type RuntimeResultRequest struct {
@@ -263,7 +263,7 @@ func (defaultResultClassifier) ClassifyResult(input ResultClassificationInput) R
 		return RuntimeResultClassificationNonRetryable
 	}
 	switch input.ExecutorType {
-	case "agent_node":
+	case "runtime":
 		return RuntimeResultClassificationRetryable
 	case "core_http", "core_mcp":
 		if input.EndpointIdempotency {
@@ -304,7 +304,7 @@ func (fixedResultRetryPlanner) NextRetryDelay(attemptNo int32) time.Duration {
 	return delay
 }
 
-// ResultFinalizer is the sole atomic write path for an accepted runtime v2
+// ResultFinalizer is the sole atomic write path for an accepted Runtime
 // Result. Public transports are intentionally wired in Task 6.
 type ResultFinalizer struct {
 	pool         *pgxpool.Pool
@@ -792,11 +792,11 @@ func mapRuntimePrincipalErrorToResult(err error) error {
 }
 
 func releaseRuntimeAttemptCapacity(ctx context.Context, queries *db.Queries, attempt db.RunAttempt) error {
-	if attempt.ExecutorType != "agent_node" {
+	if attempt.ExecutorType != "runtime" {
 		return nil
 	}
 	if attempt.SlotAcquiredAt == nil || attempt.ActiveRuntimeSessionID == nil || attempt.NodeID == nil {
-		return errors.New("agent_node Attempt is missing capacity identity")
+		return errors.New("runtime Attempt is missing capacity identity")
 	}
 
 	// The Attempt row owns the capacity slot. Marking it released is the only
@@ -809,13 +809,13 @@ func releaseRuntimeAttemptCapacity(ctx context.Context, queries *db.Queries, att
 		FencingToken: attempt.FencingToken,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		return errors.New("agent_node Attempt capacity was already released or changed")
+		return errors.New("runtime Attempt capacity was already released or changed")
 	}
 	if err != nil {
 		return err
 	}
 	if capacity.RuntimeSessionID != *attempt.ActiveRuntimeSessionID || capacity.NodeID != *attempt.NodeID {
-		return errors.New("agent_node Attempt capacity owner changed")
+		return errors.New("runtime Attempt capacity owner changed")
 	}
 	if _, err := queries.ReleaseRuntimeSessionSlot(ctx, capacity.RuntimeSessionID); err != nil {
 		return err
@@ -846,8 +846,8 @@ func runtimeResultConnectionMatchesExecutor(connectionMode *string, executorType
 		return false
 	}
 	switch executorType {
-	case "agent_node":
-		return *connectionMode == connectionModeAgentNode
+	case "runtime":
+		return *connectionMode == connectionModeRuntime
 	case "core_http":
 		return *connectionMode == connectionModeDirectHTTP
 	case "core_mcp":
@@ -936,7 +936,7 @@ func terminalRuntimeResultPayload(
 
 func runtimeResultRunFromLocked(row db.LockRunForResultFinalizationRow) (runtimeResultRun, error) {
 	if row.RunDeadlineAt == nil {
-		return runtimeResultRun{}, errors.New("runtime v2 Run is missing run deadline")
+		return runtimeResultRun{}, errors.New("Runtime Run is missing run deadline")
 	}
 	return runtimeResultRun{
 		id:                  row.ID,

@@ -1690,7 +1690,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 	q := New(dbtx)
 
 	activeTokenValues := append([]any{}, tokenValues...)
-	activeTokenValues = append(activeTokenValues, "agent_node")
+	activeTokenValues = append(activeTokenValues, "runtime")
 	activeTokenRows := &fakeRows{rows: [][]any{activeTokenValues}}
 	dbtx.queryRows = activeTokenRows
 	activeTokens, err := q.ListActiveAgentRuntimeTokensByPrefix(context.Background(), "ol_agent_abcd")
@@ -1698,7 +1698,7 @@ func TestA2AQueriesScanRowsAndPolicies(t *testing.T) {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix error = %v", err)
 	}
 	requireSQLName(t, dbtx.querySQL, "ListActiveAgentRuntimeTokensByPrefix")
-	if !activeTokenRows.closed || len(activeTokens) != 1 || activeTokens[0].ID != tokenID || activeTokens[0].ConnectionMode != "agent_node" {
+	if !activeTokenRows.closed || len(activeTokens) != 1 || activeTokens[0].ID != tokenID || activeTokens[0].ConnectionMode != "runtime" {
 		t.Fatalf("ListActiveAgentRuntimeTokensByPrefix scan = %#v closed=%v", activeTokens, activeTokenRows.closed)
 	}
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{"ol_agent_abcd"}) {
@@ -4634,7 +4634,7 @@ func agentSkillScoreRow(agentID, batchID uuid.UUID, updatedAt time.Time, average
 	}
 }
 
-func TestPublicMarketCallableQueriesUseDurableRuntimeV2Truth(t *testing.T) {
+func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 	dbtx := &fakeDBTX{queryRows: &fakeRows{}}
 	queries := New(dbtx)
 	_, err := queries.ListPublicAgents(context.Background(), ListPublicAgentsParams{
@@ -4660,7 +4660,7 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeV2Truth(t *testing.T) {
 		"CountPublicAgents": countSQL,
 	} {
 		for _, guard := range []string{
-			"WITH active_runtime_v2_agents AS",
+			"WITH active_runtime_agents AS",
 			"t.agent_id = s.agent_id",
 			"contract.is_current",
 			"s.status IN ('active', 'draining')",
@@ -4686,16 +4686,51 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeV2Truth(t *testing.T) {
 			"t.expires_at > clock_timestamp()",
 			"attachment.core_instance_id = s.attached_core_instance_id",
 			"attachment.detached_at IS NULL",
-			"a.connection_mode = 'agent_node'",
+			"a.connection_mode = 'runtime'",
 			"runtime_truth.agent_id IS NOT NULL",
-			"a.connection_mode <> 'agent_node'",
+			"a.connection_mode <> 'runtime'",
 		} {
 			if !strings.Contains(query, guard) {
-				t.Fatalf("%s missing Runtime v2 callable guard %q:\n%s", name, guard, query)
+				t.Fatalf("%s missing Runtime callable guard %q:\n%s", name, guard, query)
 			}
 		}
 		if strings.Contains(query, "last_runtime_token_used_at < NOW() - INTERVAL '5 minutes'") {
 			t.Fatalf("%s still treats recent token use as Runtime presence:\n%s", name, query)
+		}
+	}
+}
+
+func TestCreatorAgentStatusQueriesUseDurableRuntimeSessionTruth(t *testing.T) {
+	for name, query := range map[string]string{
+		"ListAgentsByCreatorPage":      listAgentsByCreatorPage,
+		"CountAgentsByCreatorFiltered": countAgentsByCreatorFiltered,
+		"CountAgentBucketsByCreator":   countAgentBucketsByCreator,
+	} {
+		for _, guard := range []string{
+			"FROM runtime_sessions session",
+			"JOIN runtime_nodes node",
+			"JOIN agent_tokens credential",
+			"contract.is_current",
+			"session.status IN ('active', 'draining')",
+			"session.attached_core_instance_id IS NOT NULL",
+			"session.disconnected_at IS NULL",
+			"session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"session.runtime_contract_digest = 'fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53'",
+			"node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"credential.scopes @> ARRAY['agent:pull']::text[]",
+			"attachment.detached_at IS NULL",
+		} {
+			if !strings.Contains(query, guard) {
+				t.Fatalf("%s missing compatible Runtime Session guard %q:\n%s", name, guard, query)
+			}
+		}
+		for _, forbidden := range []string{
+			"SELECT MAX(last_used_at)",
+			"last_runtime_token_used_at < NOW() - INTERVAL '5 minutes'",
+		} {
+			if strings.Contains(query, forbidden) {
+				t.Fatalf("%s still treats Agent Token activity as Runtime presence: %q\n%s", name, forbidden, query)
+			}
 		}
 	}
 }

@@ -25,8 +25,8 @@ const (
 )
 
 var (
-	ErrRuntimeCancellationNotFound = errors.New("runtime v2 Run is not owned by the requester")
-	ErrRuntimeCancellationRunEnded = errors.New("runtime v2 Run is already terminal")
+	ErrRuntimeCancellationNotFound = errors.New("Runtime Run is not owned by the requester")
+	ErrRuntimeCancellationRunEnded = errors.New("Runtime Run is already terminal")
 	ErrRuntimeCancellationInvalid  = errors.New("invalid runtime cancellation request")
 	errRuntimeCancellationNotReady = errors.New("runtime cancellation coordinator is not configured")
 	runtimeCancellationIDNamespace = uuid.MustParse("f6fcac0b-d253-5ad0-9290-07bf4ec2ac12")
@@ -173,7 +173,7 @@ func (c *RuntimeCancellationCoordinator) CancelOwnedRun(
 			if createErr != nil {
 				return createErr
 			}
-		} else if target.ExecutorType != "agent_node" &&
+		} else if target.ExecutorType != "runtime" &&
 			target.ExecutorType != "core_http" && target.ExecutorType != "core_mcp" {
 			return errors.New("runtime cancellation target has unknown executor type")
 		}
@@ -949,7 +949,7 @@ func runtimeCancellationCommandTargetMatches(
 	return cancellation.ID == candidate.CancellationID && cancellation.RunID == candidate.RunID &&
 		cancellation.TargetAttemptID != nil && *cancellation.TargetAttemptID == attempt.ID &&
 		attempt.RunID == candidate.RunID && attempt.AgentID == principal.AgentID &&
-		attempt.ExecutorType == "agent_node" && attempt.FinishedAt == nil &&
+		attempt.ExecutorType == "runtime" && attempt.FinishedAt == nil &&
 		attempt.NodeID != nil && *attempt.NodeID == principal.NodeID &&
 		attempt.RuntimeTokenID != nil && *attempt.RuntimeTokenID == principal.CredentialID &&
 		attempt.RuntimeWorkerID != nil && *attempt.RuntimeWorkerID == principal.WorkerID &&
@@ -975,7 +975,7 @@ func runtimeCancellationReapTargetMatches(
 	return cancellation.ID == candidate.CancellationID && cancellation.RunID == candidate.RunID &&
 		cancellation.TargetAttemptID != nil && *cancellation.TargetAttemptID == candidate.TargetAttemptID &&
 		attempt.ID == candidate.TargetAttemptID && attempt.RunID == candidate.RunID &&
-		attempt.AgentID == candidate.AgentID && attempt.ExecutorType == "agent_node" &&
+		attempt.AgentID == candidate.AgentID && attempt.ExecutorType == "runtime" &&
 		attempt.FinishedAt == nil && attempt.Outcome == nil && attempt.ResultID == nil &&
 		attempt.SlotAcquiredAt != nil && attempt.SlotReleasedAt == nil &&
 		attempt.ActiveRuntimeSessionID != nil && attempt.NodeID != nil

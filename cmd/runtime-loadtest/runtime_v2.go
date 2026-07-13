@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	runtimeLoadtestNodeVersion = "openlinker-agent-node/reliable-run-v2"
+	runtimeLoadtestNodeVersion = "openlinker-go/runtime-worker"
 	transportAuto              = "auto"
 	transportWS                = "ws"
 	transportPull              = "pull"
@@ -32,17 +32,17 @@ const (
 var errACKResponseLost = errors.New("runtime-loadtest: injected ACK response loss after Core persisted the request")
 
 type runtimeV2Client interface {
-	CreateRuntimeV2Session(context.Context, openlinker.RuntimeV2HelloPayload) (*openlinker.RuntimeV2ReadyPayload, error)
-	HeartbeatRuntimeV2Session(context.Context, openlinker.RuntimeV2HelloPayload) (*openlinker.RuntimeV2ReadyPayload, error)
-	CloseRuntimeV2Session(context.Context, openlinker.RuntimeV2SessionCloseRequest) error
-	ClaimRuntimeV2Run(context.Context, int, openlinker.RuntimeV2ClaimRequest) (*openlinker.RuntimeV2RunAssignedPayload, error)
-	AckRuntimeV2Assignment(context.Context, openlinker.RuntimeV2AssignmentAckPayload) (*openlinker.RuntimeV2AssignmentConfirmedPayload, error)
-	RenewRuntimeV2Lease(context.Context, openlinker.RuntimeV2LeaseRenewPayload) (*openlinker.RuntimeV2LeaseRenewedPayload, error)
-	AppendRuntimeV2Event(context.Context, openlinker.RuntimeV2RunEventPayload) (*openlinker.RuntimeV2RunEventAckPayload, error)
-	FinalizeRuntimeV2Result(context.Context, openlinker.RuntimeV2RunResultPayload) (*openlinker.RuntimeV2RunResultAckPayload, error)
-	ResumeRuntimeV2Runs(context.Context, openlinker.RuntimeV2ResumePayload) (*openlinker.RuntimeV2ResumeResponse, error)
-	PollRuntimeV2Commands(context.Context, string, int) (*openlinker.RuntimeV2CommandsResponse, error)
-	AckRuntimeV2Cancel(context.Context, openlinker.RuntimeV2RunCancelAckPayload) (*openlinker.RuntimeV2RunCancellationState, error)
+	CreateRuntimeSession(context.Context, openlinker.RuntimeHelloPayload) (*openlinker.RuntimeReadyPayload, error)
+	HeartbeatRuntimeSession(context.Context, openlinker.RuntimeHelloPayload) (*openlinker.RuntimeReadyPayload, error)
+	CloseRuntimeSession(context.Context, openlinker.RuntimeSessionCloseRequest) error
+	ClaimRuntimeRun(context.Context, int, openlinker.RuntimeClaimRequest) (*openlinker.RuntimeRunAssignedPayload, error)
+	AckRuntimeAssignment(context.Context, openlinker.RuntimeAssignmentAckPayload) (*openlinker.RuntimeAssignmentConfirmedPayload, error)
+	RenewRuntimeLease(context.Context, openlinker.RuntimeLeaseRenewPayload) (*openlinker.RuntimeLeaseRenewedPayload, error)
+	AppendRuntimeEvent(context.Context, openlinker.RuntimeRunEventPayload) (*openlinker.RuntimeRunEventAckPayload, error)
+	FinalizeRuntimeResult(context.Context, openlinker.RuntimeRunResultPayload) (*openlinker.RuntimeRunResultAckPayload, error)
+	ResumeRuntimeRuns(context.Context, openlinker.RuntimeResumePayload) (*openlinker.RuntimeResumeResponse, error)
+	PollRuntimeCommands(context.Context, string, int) (*openlinker.RuntimeCommandsResponse, error)
+	AckRuntimeCancel(context.Context, openlinker.RuntimeRunCancelAckPayload) (*openlinker.RuntimeRunCancellationState, error)
 }
 
 type runtimeV2Endpoint struct {
@@ -55,14 +55,14 @@ type runtimeV2Connection struct {
 	kind          string
 	endpointIndex int
 	client        runtimeV2Client
-	ws            *openlinker.RuntimeV2WebSocket
-	ready         openlinker.RuntimeV2ReadyPayload
+	ws            *openlinker.RuntimeWebSocket
+	ready         openlinker.RuntimeReadyPayload
 	connectedAt   time.Time
 	generation    int64
 }
 
 type runtimeV2Attempt struct {
-	identity             openlinker.RuntimeV2AttemptIdentity
+	identity             openlinker.RuntimeAttemptIdentity
 	clientID             string
 	input                map[string]any
 	startedAt            time.Time
@@ -70,8 +70,8 @@ type runtimeV2Attempt struct {
 	lastAckedEvent       int64
 	pendingEvent         int64
 	pendingResult        string
-	pendingEventPayload  *openlinker.RuntimeV2RunEventPayload
-	pendingResultPayload *openlinker.RuntimeV2RunResultPayload
+	pendingEventPayload  *openlinker.RuntimeRunEventPayload
+	pendingResultPayload *openlinker.RuntimeRunResultPayload
 	confirmed            bool
 	finished             bool
 	canceled             bool
@@ -139,7 +139,7 @@ type runtimeV2Metrics struct {
 	journalErrors        int
 }
 
-func newRuntimeV2Metrics() *runtimeV2Metrics {
+func newRuntimeMetrics() *runtimeV2Metrics {
 	return &runtimeV2Metrics{
 		byTransport:     map[string]*runtimeV2TransportStats{transportWS: {}, transportPull: {}},
 		errorsByCode:    map[string]int{},
@@ -212,7 +212,7 @@ func (m *runtimeV2Metrics) report(cfg config) map[string]any {
 	for _, kind := range []string{transportWS, transportPull} {
 		stats := m.transport(kind)
 		transports[kind] = runtimeV2TransportReport(stats)
-		mergeRuntimeV2TransportStats(aggregate, stats)
+		mergeRuntimeTransportStats(aggregate, stats)
 	}
 	transports["aggregate"] = runtimeV2TransportReport(aggregate)
 	switches := make([]map[string]any, 0, len(m.switches))
@@ -347,7 +347,7 @@ func runtimeV2TransportReport(stats *runtimeV2TransportStats) map[string]any {
 	}
 }
 
-func mergeRuntimeV2TransportStats(dst, src *runtimeV2TransportStats) {
+func mergeRuntimeTransportStats(dst, src *runtimeV2TransportStats) {
 	dst.Connections += src.Connections
 	dst.Ready += src.Ready
 	dst.Offers += src.Offers
@@ -456,7 +456,7 @@ func runtimeACKOperation(path string) string {
 	}
 }
 
-func newRuntimeV2Endpoint(cfg config, origin, token string, metrics *runtimeV2Metrics) (*runtimeV2Endpoint, error) {
+func newRuntimeEndpoint(cfg config, origin, token string, metrics *runtimeV2Metrics) (*runtimeV2Endpoint, error) {
 	parsed, err := url.Parse(strings.TrimSpace(origin))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
 		return nil, errors.New("Runtime URL must be an absolute https URL")
@@ -478,7 +478,7 @@ func newRuntimeV2Endpoint(cfg config, origin, token string, metrics *runtimeV2Me
 		MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{certificate},
 		RootCAs: roots, ServerName: strings.TrimSpace(cfg.MTLSServerName),
 	}
-	transport.ResponseHeaderTimeout = time.Duration(openlinker.RuntimeV2MaxPullWaitSeconds+5) * time.Second
+	transport.ResponseHeaderTimeout = time.Duration(openlinker.RuntimeMaxPullWaitSeconds+5) * time.Second
 	transport.TLSHandshakeTimeout = 10 * time.Second
 	transport.IdleConnTimeout = 90 * time.Second
 	var roundTripper http.RoundTripper = transport
@@ -506,7 +506,7 @@ func newRuntimeV2Endpoint(cfg config, origin, token string, metrics *runtimeV2Me
 	return &runtimeV2Endpoint{origin: origin, runtime: runtimeClient, httpClient: httpClient}, nil
 }
 
-func closeRuntimeV2Endpoint(endpoint *runtimeV2Endpoint) {
+func closeRuntimeEndpoint(endpoint *runtimeV2Endpoint) {
 	if endpoint == nil || endpoint.httpClient == nil {
 		return
 	}
@@ -550,12 +550,12 @@ func (c config) hasScenario(name string) bool {
 func validateRuntimeOrigin(raw, flagName string) error {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return fmt.Errorf("%s must be an absolute https Runtime v2 origin", flagName)
+		return fmt.Errorf("%s must be an absolute https Runtime origin", flagName)
 	}
 	return nil
 }
 
-func preflightRuntimeV2Credentials(cfg config) error {
+func preflightRuntimeCredentials(cfg config) error {
 	if info, err := os.Stat(cfg.MTLSKeyFile); err != nil {
 		return fmt.Errorf("stat Runtime Node private key: %w", err)
 	} else if info.Mode().Perm()&0o077 != 0 {
@@ -604,10 +604,10 @@ func preflightRuntimeV2Credentials(cfg config) error {
 		return errors.New("Runtime server CA file contains no certificates")
 	}
 	if err := os.MkdirAll(cfg.StateDir, 0o700); err != nil {
-		return fmt.Errorf("create Runtime v2 state directory: %w", err)
+		return fmt.Errorf("create Runtime state directory: %w", err)
 	}
 	if err := os.Chmod(cfg.StateDir, 0o700); err != nil {
-		return fmt.Errorf("secure Runtime v2 state directory: %w", err)
+		return fmt.Errorf("secure Runtime state directory: %w", err)
 	}
 	return nil
 }
@@ -632,7 +632,7 @@ func (c *config) applyScenarioDefaults() error {
 	}
 	for _, scenario := range c.Scenarios {
 		if _, ok := recognized[scenario]; !ok {
-			return fmt.Errorf("unsupported Runtime v2 scenario %q", scenario)
+			return fmt.Errorf("unsupported Runtime scenario %q", scenario)
 		}
 	}
 	if c.hasScenario("ws-only") && c.hasScenario("pull-only") {
@@ -709,7 +709,7 @@ type runtimeV2Worker struct {
 	workerIndex int
 	tracker     *runTracker
 	metrics     *metrics
-	hello       openlinker.RuntimeV2HelloPayload
+	hello       openlinker.RuntimeHelloPayload
 	endpoints   []*runtimeV2Endpoint
 
 	startedAt time.Time
@@ -744,19 +744,19 @@ type runtimeV2JournalDocument struct {
 }
 
 type runtimeV2JournalAttempt struct {
-	Identity             openlinker.RuntimeV2AttemptIdentity   `json:"attempt_identity"`
-	ClientID             string                                `json:"client_id"`
-	Confirmed            bool                                  `json:"confirmed"`
-	Finished             bool                                  `json:"finished"`
-	Canceled             bool                                  `json:"canceled"`
-	LastAckedEvent       int64                                 `json:"last_acked_client_event_seq"`
-	PendingEvent         int64                                 `json:"pending_client_event_seq,omitempty"`
-	PendingResult        string                                `json:"pending_result_id,omitempty"`
-	PendingEventPayload  *openlinker.RuntimeV2RunEventPayload  `json:"pending_event,omitempty"`
-	PendingResultPayload *openlinker.RuntimeV2RunResultPayload `json:"pending_result,omitempty"`
+	Identity             openlinker.RuntimeAttemptIdentity   `json:"attempt_identity"`
+	ClientID             string                              `json:"client_id"`
+	Confirmed            bool                                `json:"confirmed"`
+	Finished             bool                                `json:"finished"`
+	Canceled             bool                                `json:"canceled"`
+	LastAckedEvent       int64                               `json:"last_acked_client_event_seq"`
+	PendingEvent         int64                               `json:"pending_client_event_seq,omitempty"`
+	PendingResult        string                              `json:"pending_result_id,omitempty"`
+	PendingEventPayload  *openlinker.RuntimeRunEventPayload  `json:"pending_event,omitempty"`
+	PendingResultPayload *openlinker.RuntimeRunResultPayload `json:"pending_result,omitempty"`
 }
 
-func newRuntimeV2Worker(
+func newRuntimeWorker(
 	cfg config,
 	agent agentRef,
 	token string,
@@ -765,10 +765,10 @@ func newRuntimeV2Worker(
 	metrics *metrics,
 ) (*runtimeV2Worker, error) {
 	if metrics == nil || metrics.runtime == nil {
-		return nil, errors.New("Runtime v2 metrics are required")
+		return nil, errors.New("Runtime metrics are required")
 	}
 	workerID := fmt.Sprintf("loadtest-%s-%02d", agent.ID, workerIndex)
-	hello := openlinker.RuntimeV2HelloPayload{
+	hello := openlinker.RuntimeHelloPayload{
 		NodeID:           cfg.NodeID,
 		AgentID:          agent.ID,
 		WorkerID:         workerID,
@@ -785,10 +785,10 @@ func newRuntimeV2Worker(
 	}
 	endpoints := make([]*runtimeV2Endpoint, 0, len(origins))
 	for _, origin := range origins {
-		endpoint, err := newRuntimeV2Endpoint(cfg, origin, token, metrics.runtime)
+		endpoint, err := newRuntimeEndpoint(cfg, origin, token, metrics.runtime)
 		if err != nil {
 			for _, created := range endpoints {
-				closeRuntimeV2Endpoint(created)
+				closeRuntimeEndpoint(created)
 			}
 			return nil, err
 		}
@@ -809,13 +809,13 @@ func newRuntimeV2Worker(
 
 func (w *runtimeV2Worker) close() {
 	for _, endpoint := range w.endpoints {
-		closeRuntimeV2Endpoint(endpoint)
+		closeRuntimeEndpoint(endpoint)
 	}
 }
 
 func (w *runtimeV2Worker) persistState() error {
 	if w == nil || w.journal == nil {
-		return errors.New("Runtime v2 durable journal is unavailable")
+		return errors.New("Runtime durable journal is unavailable")
 	}
 	w.attemptsMu.Lock()
 	keys := make([]string, 0, len(w.attempts))
@@ -855,18 +855,18 @@ func (w *runtimeV2Worker) persistState() error {
 
 func (j *runtimeV2Journal) write(document runtimeV2JournalDocument) error {
 	if j == nil || strings.TrimSpace(j.path) == "" {
-		return errors.New("Runtime v2 journal path is empty")
+		return errors.New("Runtime journal path is empty")
 	}
 	raw, err := json.Marshal(document)
 	if err != nil {
-		return fmt.Errorf("encode Runtime v2 journal: %w", err)
+		return fmt.Errorf("encode Runtime journal: %w", err)
 	}
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	temporary := j.path + ".tmp-" + uuid.NewString()
 	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return fmt.Errorf("create Runtime v2 journal: %w", err)
+		return fmt.Errorf("create Runtime journal: %w", err)
 	}
 	published := false
 	defer func() {
@@ -876,28 +876,28 @@ func (j *runtimeV2Journal) write(document runtimeV2JournalDocument) error {
 		}
 	}()
 	if _, err = file.Write(append(raw, '\n')); err != nil {
-		return fmt.Errorf("write Runtime v2 journal: %w", err)
+		return fmt.Errorf("write Runtime journal: %w", err)
 	}
 	if err = file.Sync(); err != nil {
-		return fmt.Errorf("sync Runtime v2 journal: %w", err)
+		return fmt.Errorf("sync Runtime journal: %w", err)
 	}
 	if err = file.Close(); err != nil {
-		return fmt.Errorf("close Runtime v2 journal: %w", err)
+		return fmt.Errorf("close Runtime journal: %w", err)
 	}
 	if err = os.Rename(temporary, j.path); err != nil {
-		return fmt.Errorf("publish Runtime v2 journal: %w", err)
+		return fmt.Errorf("publish Runtime journal: %w", err)
 	}
 	published = true
 	directory, err := os.Open(filepath.Dir(j.path))
 	if err != nil {
-		return fmt.Errorf("open Runtime v2 journal directory: %w", err)
+		return fmt.Errorf("open Runtime journal directory: %w", err)
 	}
 	if err = directory.Sync(); err != nil {
 		_ = directory.Close()
-		return fmt.Errorf("sync Runtime v2 journal directory: %w", err)
+		return fmt.Errorf("sync Runtime journal directory: %w", err)
 	}
 	if err = directory.Close(); err != nil {
-		return fmt.Errorf("close Runtime v2 journal directory: %w", err)
+		return fmt.Errorf("close Runtime journal directory: %w", err)
 	}
 	return nil
 }
@@ -976,7 +976,7 @@ func (w *runtimeV2Worker) run(ctx context.Context) {
 	}
 }
 
-var errRuntimePlannedSwitch = errors.New("runtime-loadtest: planned Runtime v2 transport switch")
+var errRuntimePlannedSwitch = errors.New("runtime-loadtest: planned Runtime transport switch")
 
 func waitForWorkersReady(ctx context.Context, cfg config, metrics *metrics, want int) error {
 	timeout := cfg.ReadyTimeout
@@ -995,7 +995,7 @@ func waitForWorkersReady(ctx context.Context, cfg config, metrics *metrics, want
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			return fmt.Errorf("timeout waiting for Runtime v2 workers: got=%d want=%d", metrics.c.workersReady.Load(), want)
+			return fmt.Errorf("timeout waiting for Runtime workers: got=%d want=%d", metrics.c.workersReady.Load(), want)
 		case <-ticker.C:
 		}
 	}
@@ -1048,7 +1048,7 @@ func (w *runtimeV2Worker) connect(ctx context.Context, kind string, endpointInde
 	}
 	switch kind {
 	case transportWS:
-		ws, err := endpoint.runtime.DialRuntimeV2WebSocket(connectCtx, w.hello)
+		ws, err := endpoint.runtime.DialRuntimeWebSocket(connectCtx, w.hello)
 		if err != nil {
 			return nil, err
 		}
@@ -1056,14 +1056,14 @@ func (w *runtimeV2Worker) connect(ctx context.Context, kind string, endpointInde
 		connection.ws = ws
 		connection.ready = ws.Ready()
 	case transportPull:
-		ready, err := endpoint.runtime.CreateRuntimeV2Session(connectCtx, w.hello)
+		ready, err := endpoint.runtime.CreateRuntimeSession(connectCtx, w.hello)
 		if err != nil {
 			return nil, err
 		}
 		connection.client = endpoint.runtime
 		connection.ready = *ready
 	default:
-		return nil, fmt.Errorf("unsupported Runtime v2 transport %q", kind)
+		return nil, fmt.Errorf("unsupported Runtime transport %q", kind)
 	}
 	w.metrics.runtime.recordReady(kind, connection.ready.CoreInstanceID, time.Since(started))
 	return connection, nil
@@ -1095,7 +1095,7 @@ func (w *runtimeV2Worker) closeConnection(connection *runtimeV2Connection, reaso
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = connection.client.CloseRuntimeV2Session(ctx, openlinker.RuntimeV2SessionCloseRequest{
+	_ = connection.client.CloseRuntimeSession(ctx, openlinker.RuntimeSessionCloseRequest{
 		NodeID: w.hello.NodeID, AgentID: w.hello.AgentID, WorkerID: w.hello.WorkerID,
 		RuntimeSessionID: w.hello.RuntimeSessionID, SessionEpoch: w.hello.SessionEpoch,
 		Status: "offline", Reason: reason,
@@ -1124,13 +1124,13 @@ func (w *runtimeV2Worker) serveWS(ctx context.Context, connection *runtimeV2Conn
 			if err := connection.ws.Err(); err != nil {
 				return err
 			}
-			return errors.New("Runtime v2 WebSocket closed")
+			return errors.New("Runtime WebSocket closed")
 		case assignment := <-connection.ws.Assignments():
 			w.handleAssignment(ctx, connection, assignment.Payload, false)
 		case command := <-connection.ws.Commands():
 			w.handleCommand(ctx, connection, command.Command)
 		case <-heartbeat.C:
-			if _, err := connection.client.HeartbeatRuntimeV2Session(ctx, w.hello); err != nil {
+			if _, err := connection.client.HeartbeatRuntimeSession(ctx, w.hello); err != nil {
 				return err
 			}
 		case <-check.C:
@@ -1149,7 +1149,7 @@ func (w *runtimeV2Worker) servePull(ctx context.Context, connection *runtimeV2Co
 		if kind != connection.kind || endpoint != connection.endpointIndex {
 			if kind == transportWS && w.cfg.Transport == transportAuto && !w.cfg.hasScenario("ws-pull-ws") {
 				probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-				err := w.endpoints[connection.endpointIndex].runtime.ProbeRuntimeV2WebSocket(probeCtx)
+				err := w.endpoints[connection.endpointIndex].runtime.ProbeRuntimeWebSocket(probeCtx)
 				cancel()
 				if err != nil {
 					fallbackUntil = time.Now().Add(w.cfg.WSProbeInterval)
@@ -1165,13 +1165,13 @@ func (w *runtimeV2Worker) servePull(ctx context.Context, connection *runtimeV2Co
 		default:
 		}
 		if time.Since(lastHeartbeat) >= w.cfg.HeartbeatInterval {
-			if _, err := connection.client.HeartbeatRuntimeV2Session(ctx, w.hello); err != nil {
+			if _, err := connection.client.HeartbeatRuntimeSession(ctx, w.hello); err != nil {
 				return err
 			}
 			lastHeartbeat = time.Now()
 		}
 		if w.activeAttemptCount() == 0 {
-			assigned, err := connection.client.ClaimRuntimeV2Run(ctx, durationSeconds(w.cfg.PullWait), openlinker.RuntimeV2ClaimRequest{
+			assigned, err := connection.client.ClaimRuntimeRun(ctx, durationSeconds(w.cfg.PullWait), openlinker.RuntimeClaimRequest{
 				RuntimeSessionID: w.hello.RuntimeSessionID, Capacity: int64(w.cfg.NodeCapacity), Inflight: 0,
 			})
 			if err != nil {
@@ -1185,7 +1185,7 @@ func (w *runtimeV2Worker) servePull(ctx context.Context, connection *runtimeV2Co
 				w.handleAssignment(ctx, connection, *assigned, false)
 			}
 		}
-		commands, err := connection.client.PollRuntimeV2Commands(ctx, w.hello.RuntimeSessionID, durationSeconds(w.cfg.CommandWait))
+		commands, err := connection.client.PollRuntimeCommands(ctx, w.hello.RuntimeSessionID, durationSeconds(w.cfg.CommandWait))
 		if err != nil {
 			return err
 		}
@@ -1205,8 +1205,8 @@ func durationSeconds(value time.Duration) int {
 	if seconds < 0 {
 		return 0
 	}
-	if seconds > openlinker.RuntimeV2MaxPullWaitSeconds {
-		return openlinker.RuntimeV2MaxPullWaitSeconds
+	if seconds > openlinker.RuntimeMaxPullWaitSeconds {
+		return openlinker.RuntimeMaxPullWaitSeconds
 	}
 	return seconds
 }
@@ -1222,12 +1222,12 @@ func sleepRuntimeContext(ctx context.Context, duration time.Duration) bool {
 	}
 }
 
-var _ runtimeV2Client = (*openlinker.RuntimeV2WebSocket)(nil)
+var _ runtimeV2Client = (*openlinker.RuntimeWebSocket)(nil)
 
 func (w *runtimeV2Worker) handleAssignment(
 	ctx context.Context,
 	connection *runtimeV2Connection,
-	assigned openlinker.RuntimeV2RunAssignedPayload,
+	assigned openlinker.RuntimeRunAssignedPayload,
 	injectedDuplicate bool,
 ) {
 	receivedAt := time.Now()
@@ -1290,10 +1290,10 @@ func (w *runtimeV2Worker) ackDuplicateAssignment(
 	connection *runtimeV2Connection,
 	attempt *runtimeV2Attempt,
 ) {
-	request := openlinker.RuntimeV2AssignmentAckPayload{AttemptIdentity: attempt.identity}
+	request := openlinker.RuntimeAssignmentAckPayload{AttemptIdentity: attempt.identity}
 	for ctx.Err() == nil {
 		started := time.Now()
-		confirmed, err := connection.client.AckRuntimeV2Assignment(ctx, request)
+		confirmed, err := connection.client.AckRuntimeAssignment(ctx, request)
 		if err != nil {
 			w.metrics.runtime.recordError(err, connection.kind)
 			if errors.Is(err, errACKResponseLost) {
@@ -1321,8 +1321,8 @@ func (w *runtimeV2Worker) ackAndStartAssignment(
 	attempt *runtimeV2Attempt,
 	receivedAt time.Time,
 ) {
-	request := openlinker.RuntimeV2AssignmentAckPayload{AttemptIdentity: attempt.identity}
-	var confirmed *openlinker.RuntimeV2AssignmentConfirmedPayload
+	request := openlinker.RuntimeAssignmentAckPayload{AttemptIdentity: attempt.identity}
+	var confirmed *openlinker.RuntimeAssignmentConfirmedPayload
 	recovered := false
 	for ctx.Err() == nil {
 		active := w.currentConnection()
@@ -1339,7 +1339,7 @@ func (w *runtimeV2Worker) ackAndStartAssignment(
 			return
 		}
 		started := time.Now()
-		response, err := active.client.AckRuntimeV2Assignment(ctx, request)
+		response, err := active.client.AckRuntimeAssignment(ctx, request)
 		if err == nil {
 			confirmed = response
 			w.metrics.runtime.mu.Lock()
@@ -1470,7 +1470,7 @@ func (w *runtimeV2Worker) renewAttempt(ctx context.Context, attempt *runtimeV2At
 		lastAckedEvent := attempt.lastAckedEvent
 		w.attemptsMu.Unlock()
 		started := time.Now()
-		response, err := connection.client.RenewRuntimeV2Lease(ctx, openlinker.RuntimeV2LeaseRenewPayload{
+		response, err := connection.client.RenewRuntimeLease(ctx, openlinker.RuntimeLeaseRenewPayload{
 			AttemptIdentity: attempt.identity, LastClientEventSeq: lastAckedEvent,
 			Capacity: int64(w.cfg.NodeCapacity), Inflight: w.activeAttemptCount(),
 		})
@@ -1507,9 +1507,9 @@ func (w *runtimeV2Worker) probeStaleFence(ctx context.Context, attempt *runtimeV
 	w.attemptsMu.Unlock()
 	connection := w.currentConnection()
 	if connection == nil {
-		return errors.New("no active Runtime v2 connection for stale-fence probe")
+		return errors.New("no active Runtime connection for stale-fence probe")
 	}
-	_, err := connection.client.RenewRuntimeV2Lease(ctx, openlinker.RuntimeV2LeaseRenewPayload{
+	_, err := connection.client.RenewRuntimeLease(ctx, openlinker.RuntimeLeaseRenewPayload{
 		AttemptIdentity: identity, LastClientEventSeq: lastAckedEvent,
 		Capacity: int64(w.cfg.NodeCapacity), Inflight: w.activeAttemptCount(),
 	})
@@ -1531,7 +1531,7 @@ func (w *runtimeV2Worker) probeStaleFence(ctx context.Context, attempt *runtimeV
 
 func (w *runtimeV2Worker) sendEvent(ctx context.Context, attempt *runtimeV2Attempt, sequence int64) error {
 	clientEventID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(attempt.identity.AttemptID+fmt.Sprintf(":event:%d", sequence))).String()
-	request := openlinker.RuntimeV2RunEventPayload{
+	request := openlinker.RuntimeRunEventPayload{
 		AttemptIdentity: attempt.identity,
 		ClientEventID:   clientEventID, ClientEventSeq: sequence,
 		EventType: "run.message.delta",
@@ -1549,7 +1549,7 @@ func (w *runtimeV2Worker) sendEvent(ctx context.Context, attempt *runtimeV2Attem
 	}
 	return w.withActiveClient(ctx, func(connection *runtimeV2Connection) error {
 		started := time.Now()
-		ack, err := connection.client.AppendRuntimeV2Event(ctx, request)
+		ack, err := connection.client.AppendRuntimeEvent(ctx, request)
 		if err != nil {
 			return err
 		}
@@ -1581,7 +1581,7 @@ func (w *runtimeV2Worker) sendResult(ctx context.Context, attempt *runtimeV2Atte
 	w.attemptsMu.Lock()
 	finalClientEventSeq := attempt.lastAckedEvent
 	w.attemptsMu.Unlock()
-	request := openlinker.RuntimeV2RunResultPayload{
+	request := openlinker.RuntimeRunResultPayload{
 		AttemptIdentity: attempt.identity, ResultID: resultID, Status: "success",
 		Output: map[string]any{
 			"ok": true, "agent_id": w.agent.ID, "client_task_id": attempt.clientID,
@@ -1598,7 +1598,7 @@ func (w *runtimeV2Worker) sendResult(ctx context.Context, attempt *runtimeV2Atte
 	}
 	return w.withActiveClient(ctx, func(connection *runtimeV2Connection) error {
 		started := time.Now()
-		ack, err := connection.client.FinalizeRuntimeV2Result(ctx, request)
+		ack, err := connection.client.FinalizeRuntimeResult(ctx, request)
 		if err != nil {
 			return err
 		}
@@ -1705,16 +1705,16 @@ func (w *runtimeV2Worker) activeAttemptCount() int64 {
 func (w *runtimeV2Worker) handleCommand(
 	ctx context.Context,
 	connection *runtimeV2Connection,
-	command openlinker.RuntimeV2DecodedPendingCommand,
+	command openlinker.RuntimeDecodedPendingCommand,
 ) {
 	switch command.Type {
-	case openlinker.RuntimeV2RunCancel:
+	case openlinker.RuntimeRunCancel:
 		if command.Cancel != nil {
 			w.handleCancel(ctx, connection, *command.Cancel)
 		}
-	case openlinker.RuntimeV2Drain:
+	case openlinker.RuntimeDrain:
 		w.signalFailure(errors.New("Runtime Node drain requested"))
-	case openlinker.RuntimeV2LeaseRevoked:
+	case openlinker.RuntimeLeaseRevoked:
 		if command.Revoke != nil {
 			w.attemptsMu.Lock()
 			attempt := w.attempts[command.Revoke.AttemptIdentity.AttemptID]
@@ -1731,7 +1731,7 @@ func (w *runtimeV2Worker) handleCommand(
 func (w *runtimeV2Worker) handleCancel(
 	ctx context.Context,
 	connection *runtimeV2Connection,
-	command openlinker.RuntimeV2RunCancelPayload,
+	command openlinker.RuntimeRunCancelPayload,
 ) {
 	commandAt := time.Now()
 	w.metrics.runtime.mu.Lock()
@@ -1744,7 +1744,7 @@ func (w *runtimeV2Worker) handleCancel(
 	attempt := w.attempts[command.AttemptIdentity.AttemptID]
 	if attempt == nil || attempt.identity != command.AttemptIdentity {
 		w.attemptsMu.Unlock()
-		_ = w.ackCancel(ctx, connection, command, openlinker.RuntimeV2CancelFailed, "ATTEMPT_IDENTITY_MISMATCH")
+		_ = w.ackCancel(ctx, connection, command, openlinker.RuntimeCancelFailed, "ATTEMPT_IDENTITY_MISMATCH")
 		return
 	}
 	if attempt.finished && !attempt.canceled {
@@ -1754,10 +1754,10 @@ func (w *runtimeV2Worker) handleCancel(
 	if attempt.canceled {
 		done := attempt.done
 		w.attemptsMu.Unlock()
-		state := openlinker.RuntimeV2CancelStopping
+		state := openlinker.RuntimeCancelStopping
 		select {
 		case <-done:
-			state = openlinker.RuntimeV2CancelStopped
+			state = openlinker.RuntimeCancelStopped
 		default:
 		}
 		_ = w.ackCancel(ctx, connection, command, state, "")
@@ -1770,7 +1770,7 @@ func (w *runtimeV2Worker) handleCancel(
 		return
 	}
 
-	if err := w.ackCancel(ctx, connection, command, openlinker.RuntimeV2CancelStopping, ""); err != nil {
+	if err := w.ackCancel(ctx, connection, command, openlinker.RuntimeCancelStopping, ""); err != nil {
 		w.metrics.recordWorkerError(err)
 		return
 	}
@@ -1784,13 +1784,13 @@ func (w *runtimeV2Worker) handleCancel(
 	case <-attempt.done:
 		timer.Stop()
 	case <-timer.C:
-		_ = w.ackCancel(ctx, connection, command, openlinker.RuntimeV2CancelFailed, "CANCEL_DEADLINE_EXCEEDED")
+		_ = w.ackCancel(ctx, connection, command, openlinker.RuntimeCancelFailed, "CANCEL_DEADLINE_EXCEEDED")
 		return
 	case <-ctx.Done():
 		timer.Stop()
 		return
 	}
-	if err := w.ackCancel(ctx, connection, command, openlinker.RuntimeV2CancelStopped, ""); err != nil {
+	if err := w.ackCancel(ctx, connection, command, openlinker.RuntimeCancelStopped, ""); err != nil {
 		w.metrics.recordWorkerError(err)
 		return
 	}
@@ -1821,17 +1821,17 @@ func (w *runtimeV2Worker) handleCancel(
 func (w *runtimeV2Worker) ackCancel(
 	ctx context.Context,
 	connection *runtimeV2Connection,
-	command openlinker.RuntimeV2RunCancelPayload,
-	state openlinker.RuntimeV2CancelState,
+	command openlinker.RuntimeRunCancelPayload,
+	state openlinker.RuntimeCancelState,
 	errorCode string,
 ) error {
-	request := openlinker.RuntimeV2RunCancelAckPayload{
+	request := openlinker.RuntimeRunCancelAckPayload{
 		CancellationID: command.CancellationID, AttemptIdentity: command.AttemptIdentity,
 		CancelState: state, ErrorCode: errorCode,
 	}
 	for ctx.Err() == nil {
 		started := time.Now()
-		response, err := connection.client.AckRuntimeV2Cancel(ctx, request)
+		response, err := connection.client.AckRuntimeCancel(ctx, request)
 		if err != nil {
 			w.metrics.runtime.recordError(err, connection.kind)
 			if errors.Is(err, errACKResponseLost) {
@@ -1858,7 +1858,7 @@ func (w *runtimeV2Worker) resume(ctx context.Context, connection *runtimeV2Conne
 		return nil
 	}
 	started := time.Now()
-	response, err := connection.client.ResumeRuntimeV2Runs(ctx, openlinker.RuntimeV2ResumePayload{
+	response, err := connection.client.ResumeRuntimeRuns(ctx, openlinker.RuntimeResumePayload{
 		NodeID: w.hello.NodeID, AgentID: w.hello.AgentID, WorkerID: w.hello.WorkerID,
 		RuntimeSessionID: w.hello.RuntimeSessionID, Attempts: attempts,
 	})
@@ -1873,7 +1873,7 @@ func (w *runtimeV2Worker) resume(ctx context.Context, connection *runtimeV2Conne
 			return errors.New("Runtime resume decision identity mismatch")
 		}
 		switch decision.Decision {
-		case openlinker.RuntimeV2ResumeContinue, openlinker.RuntimeV2ResumeUploadSpool:
+		case openlinker.RuntimeResumeContinue, openlinker.RuntimeResumeUploadSpool:
 			if decision.LeaseExpiresAt != nil {
 				w.attemptsMu.Lock()
 				if attempt := w.attempts[decision.AttemptIdentity.AttemptID]; attempt != nil {
@@ -1881,7 +1881,7 @@ func (w *runtimeV2Worker) resume(ctx context.Context, connection *runtimeV2Conne
 				}
 				w.attemptsMu.Unlock()
 			}
-		case openlinker.RuntimeV2ResumeResultAcked:
+		case openlinker.RuntimeResumeResultAcked:
 			w.attemptsMu.Lock()
 			if attempt := w.attempts[decision.AttemptIdentity.AttemptID]; attempt != nil {
 				attempt.pendingResult = ""
@@ -1892,7 +1892,7 @@ func (w *runtimeV2Worker) resume(ctx context.Context, connection *runtimeV2Conne
 				w.tracker.markOutcome(attempt.identity.RunID, "success")
 			}
 			w.attemptsMu.Unlock()
-		case openlinker.RuntimeV2ResumeRevoked:
+		case openlinker.RuntimeResumeRevoked:
 			w.attemptsMu.Lock()
 			if attempt := w.attempts[decision.AttemptIdentity.AttemptID]; attempt != nil {
 				attempt.canceled = true
@@ -1915,7 +1915,7 @@ func (w *runtimeV2Worker) resume(ctx context.Context, connection *runtimeV2Conne
 	return nil
 }
 
-func (w *runtimeV2Worker) resumeAttempts() []openlinker.RuntimeV2ResumeAttempt {
+func (w *runtimeV2Worker) resumeAttempts() []openlinker.RuntimeResumeAttempt {
 	w.attemptsMu.Lock()
 	defer w.attemptsMu.Unlock()
 	keys := make([]string, 0, len(w.attempts))
@@ -1925,17 +1925,17 @@ func (w *runtimeV2Worker) resumeAttempts() []openlinker.RuntimeV2ResumeAttempt {
 		}
 	}
 	sort.Strings(keys)
-	out := make([]openlinker.RuntimeV2ResumeAttempt, 0, len(keys))
+	out := make([]openlinker.RuntimeResumeAttempt, 0, len(keys))
 	for _, key := range keys {
 		attempt := w.attempts[key]
-		item := openlinker.RuntimeV2ResumeAttempt{
+		item := openlinker.RuntimeResumeAttempt{
 			AttemptIdentity: attempt.identity, LastAckedClientEventSeq: attempt.lastAckedEvent,
 			PendingResultID: attempt.pendingResult,
 		}
 		if attempt.pendingEvent > 0 {
-			item.PendingClientEventRanges = []openlinker.RuntimeV2EventRange{{Start: attempt.pendingEvent, End: attempt.pendingEvent}}
+			item.PendingClientEventRanges = []openlinker.RuntimeEventRange{{Start: attempt.pendingEvent, End: attempt.pendingEvent}}
 		} else {
-			item.PendingClientEventRanges = []openlinker.RuntimeV2EventRange{}
+			item.PendingClientEventRanges = []openlinker.RuntimeEventRange{}
 		}
 		if attempt.pendingResult != "" {
 			final := attempt.lastAckedEvent
@@ -1946,7 +1946,7 @@ func (w *runtimeV2Worker) resumeAttempts() []openlinker.RuntimeV2ResumeAttempt {
 	return out
 }
 
-func driveRuntimeV2Cancellations(
+func driveRuntimeCancellations(
 	ctx context.Context,
 	api *apiClient,
 	cfg config,
@@ -1994,7 +1994,7 @@ func driveRuntimeV2Cancellations(
 		go func() {
 			defer workers.Done()
 			for target := range jobs {
-				current, err := waitForRuntimeV2Assignment(ctx, tracker, target.RunID)
+				current, err := waitForRuntimeAssignment(ctx, tracker, target.RunID)
 				if err != nil {
 					setErr(err)
 					continue
@@ -2048,7 +2048,7 @@ func driveRuntimeV2Cancellations(
 	return firstErr
 }
 
-func waitForRuntimeV2Assignment(ctx context.Context, tracker *runTracker, runID string) (runRecord, error) {
+func waitForRuntimeAssignment(ctx context.Context, tracker *runTracker, runID string) (runRecord, error) {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {

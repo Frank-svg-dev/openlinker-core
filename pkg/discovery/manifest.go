@@ -175,7 +175,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"agent-tokens:read":   "read non-secret metadata for owned Agent Tokens",
 			"agent-tokens:issue":  "issue or rotate credentials for owned Agents",
 			"agent-tokens:revoke": "revoke credentials for owned Agents",
-			"agent:pull":          "Agent Nodes use WebSocket first and automatically fall back to long polling under the same mTLS, ACK, lease, resume, fence, and persistent-spool contract",
+			"agent:pull":          "Runtime Workers use WebSocket first and automatically fall back to long polling under the same mTLS, ACK, lease, resume, fence, and persistent-spool contract",
 			"agent:call":          "an agent currently handling a run can delegate to another agent",
 			"register:agent":      "one-time or short-lived creator invitation for agent self-registration",
 		},

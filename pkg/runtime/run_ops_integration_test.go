@@ -26,7 +26,7 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	seedFinalizerEffectTargets(t, pool, fixture.identity.RunID, fixture.identity.AgentID, "run.failed")
 	waitForRuntimeV2LeaseDue(t, pool, fixture.identity.AttemptID)
 
-	result, err := runtime.NewRuntimeV2DeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
+	result, err := runtime.NewRuntimeDeadlineReconciler(pool, nil).ReconcileBatch(context.Background(), 1)
 	require.NoError(t, err)
 	require.Equal(t, 1, result.DeadLettered)
 
@@ -38,8 +38,8 @@ func TestRuntimeDeadLetterReplayIsAppendOnlyAndIdempotent(t *testing.T) {
 	// queued v2 path so the test does not depend on an external endpoint.
 	_, err = pool.Exec(context.Background(), `
 		UPDATE agents
-		SET connection_mode = 'agent_node',
-		    endpoint_url = 'openlinker-agent-node://run-ops-test'
+		SET connection_mode = 'runtime',
+		    endpoint_url = 'openlinker-runtime://run-ops-test'
 		WHERE id = $1`,
 		fixture.identity.AgentID)
 	require.NoError(t, err)

@@ -10,7 +10,7 @@ import (
 
 const runtimePresenceTTL = 60 * time.Second
 
-func (h *RuntimeV2HTTPController) refreshPresence(
+func (h *RuntimeHTTPController) refreshPresence(
 	ctx context.Context,
 	state RuntimeSessionState,
 	connectionID string,
@@ -38,7 +38,7 @@ func (h *RuntimeV2HTTPController) refreshPresence(
 	}
 }
 
-func (h *RuntimeV2HTTPController) removePresence(
+func (h *RuntimeHTTPController) removePresence(
 	ctx context.Context,
 	state RuntimeSessionState,
 	connectionID string,

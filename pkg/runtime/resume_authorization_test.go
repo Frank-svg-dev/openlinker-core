@@ -66,7 +66,7 @@ func runtimeResumeAuthorizationFixture() (RuntimeEventPrincipal, RuntimeAttemptI
 		id:               attemptID,
 		runID:            runID,
 		agentID:          principal.AgentID,
-		executorType:     "agent_node",
+		executorType:     "runtime",
 		leaseID:          leaseID,
 		fencingToken:     4,
 		workerID:         principal.WorkerID,

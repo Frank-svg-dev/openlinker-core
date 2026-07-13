@@ -433,12 +433,12 @@ SELECT to_regclass('public.runtime_cluster_control') IS NOT NULL
 		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
 	}
 	if !installed {
-		if req.AllowPreV2Noop && target != "normal" {
+		if req.AllowRuntimeUninstalledNoop && target != "normal" {
 			if err = tx.Commit(ctx); err != nil {
 				return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
 			}
 			report, statusErr := s.Preflight(ctx, PreflightOptions{})
-			report.PreV2Noop = true
+			report.RuntimeUninstalledNoop = true
 			return report, statusErr
 		}
 		return Report{}, &OperationError{Code: BlockerClusterSchemaUnavailable}

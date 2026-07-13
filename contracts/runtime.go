@@ -2,8 +2,8 @@ package contracts
 
 import _ "embed"
 
-// RuntimeV2 contains the canonical runtime v2 contract shared by Core,
-// Agent Node, and the public SDKs.
+// RuntimeContract contains the canonical Runtime contract shared by Core,
+// Runtime Workers, and the public SDKs.
 //
-//go:embed core-runtime.v2.json
-var RuntimeV2 []byte
+//go:embed core-runtime.json
+var RuntimeContract []byte

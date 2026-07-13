@@ -149,7 +149,7 @@ func insertTerminalRunWithEvents(t *testing.T, pool *pgxpool.Pool, userID, agent
 			'openlinker.runtime.v2',
 			digest($1::uuid::text || ':key', 'sha256'),
 			digest($1::uuid::text || ':fingerprint', 'sha256'),
-			'agent_node', 'pending',
+			'runtime', 'pending',
 			clock_timestamp() + interval '10 minutes',
 			clock_timestamp() + interval '1 hour'
 		)`, runID, userID, agentID)
