@@ -16,10 +16,11 @@ const (
 )
 
 var allowedRuntimeSignalTypes = map[string]struct{}{
-	"run.available": {},
-	"run.cancel":    {},
-	"node.drain":    {},
-	"node.revoke":   {},
+	"run.available":     {},
+	"run.cancel":        {},
+	"node.drain":        {},
+	"node.revoke":       {},
+	"credential.revoke": {},
 }
 
 // RuntimeWakeHub broadcasts edge-triggered hints to all local HTTP Pull and

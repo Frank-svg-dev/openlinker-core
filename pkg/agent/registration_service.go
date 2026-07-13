@@ -18,6 +18,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 const (
@@ -202,15 +203,15 @@ func (s *RegistrationService) ListAgentTokens(ctx context.Context, creatorID uui
 }
 
 func (s *RegistrationService) RevokeAgentToken(ctx context.Context, creatorID, tokenID uuid.UUID) error {
-	affected, err := s.queries.RevokeAgentTokenForCreator(ctx, db.RevokeAgentTokenForCreatorParams{
-		ID:            tokenID,
-		CreatorUserID: creatorID,
-	})
+	revoked, err := coreruntime.RevokeAgentCredential(ctx, s.pool, creatorID, tokenID)
 	if err != nil {
+		if errors.Is(err, coreruntime.ErrRuntimeCredentialSessionScopeChanged) {
+			return httpx.Conflict("Agent Token 的 Runtime Session 正在变化，请重试")
+		}
 		log.Error().Err(err).Str("token_id", tokenID.String()).Msg("registration.RevokeAgentToken")
 		return httpx.Internal("撤销 Agent Token 失败")
 	}
-	if affected == 0 {
+	if !revoked {
 		return httpx.NotFound("Agent Token 不存在或已撤销")
 	}
 	return nil

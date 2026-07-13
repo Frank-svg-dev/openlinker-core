@@ -104,6 +104,42 @@ func TestRuntimeSignalTypeMustBeExplicitlyAllowlisted(t *testing.T) {
 	require.ErrorIs(t, err, ErrRuntimeSignalInvalid)
 }
 
+func TestRuntimeCredentialRevocationSignalIsAllowlistedAndScoped(t *testing.T) {
+	instanceID := uuid.New()
+	require.NoError(t, ValidateRuntimeSignal(RuntimeSignal{
+		SignalID:         uuid.New(),
+		Type:             "credential.revoke",
+		AgentID:          uuid.New(),
+		TargetInstanceID: &instanceID,
+	}))
+}
+
+func TestRuntimeCredentialRevocationSignalWakesTargetCore(t *testing.T) {
+	instanceID, agentID := uuid.New(), uuid.New()
+	bus := &runtimeSignalSubscriberFake{signal: RuntimeSignal{
+		SignalID:         uuid.New(),
+		Type:             "credential.revoke",
+		AgentID:          agentID,
+		TargetInstanceID: &instanceID,
+	}}
+	hub := NewRuntimeWakeHub()
+	wake := hub.Wait(agentID)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		StartRuntimeSignalSubscriber(ctx, bus, instanceID, hub, nil)
+	}()
+
+	select {
+	case <-wake:
+	case <-time.After(time.Second):
+		t.Fatal("credential revocation did not wake the target Core")
+	}
+	cancel()
+	<-done
+}
+
 type runtimeSignalSubscriberFake struct {
 	mu        sync.Mutex
 	calls     int

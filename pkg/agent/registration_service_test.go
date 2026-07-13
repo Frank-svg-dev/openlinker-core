@@ -7,10 +7,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/credential"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 func TestRegistrationService_CreateAgentToken_PendingDefaults(t *testing.T) {
@@ -109,6 +111,191 @@ func TestRegistrationService_RegisterAgentViaToken_RevokedRejected(t *testing.T)
 		Tags:              []string{"data"},
 	})
 	assertHTTPStatus(t, err, 401)
+}
+
+func TestRegistrationService_RevokeAgentToken_ClosesOnlyCredentialSessions(t *testing.T) {
+	pool := setupTestDB(t)
+	creatorID := insertCreatorUser(t, pool, "Runtime Credential Revoke Creator")
+	agentID := createApprovedAgent(t, pool, creatorID, "runtime-credential-revoke")
+	ctx := context.Background()
+
+	targetTokenID, otherTokenID := uuid.New(), uuid.New()
+	nodeID := uuid.New()
+	targetActiveSessionID, targetDrainingSessionID := uuid.New(), uuid.New()
+	targetOfflineSessionID, otherSessionID := uuid.New(), uuid.New()
+	targetInflight := map[uuid.UUID]int32{
+		targetActiveSessionID:   1,
+		targetDrainingSessionID: 1,
+		targetOfflineSessionID:  0,
+	}
+	targetCoreA, targetCoreB, otherCore := uuid.New(), uuid.New(), uuid.New()
+	serial := strings.ReplaceAll(nodeID.String(), "-", "")
+
+	_, err := pool.Exec(ctx, `
+UPDATE agents
+SET connection_mode = 'runtime', endpoint_url = 'openlinker-runtime://credential-revoke-test'
+WHERE id = $1`, agentID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+INSERT INTO agent_tokens (
+    id, agent_id, creator_user_id, name, prefix, token_hash, scopes,
+    status, redeemed_at
+) VALUES
+    ($1, $3, $4, 'target-token', 'ol_agent_a01', 'target-hash',
+     ARRAY['agent:pull']::text[], 'active_runtime', clock_timestamp()),
+    ($2, $3, $4, 'other-token', 'ol_agent_b02', 'other-hash',
+     ARRAY['agent:pull']::text[], 'active_runtime', clock_timestamp())`,
+		targetTokenID, otherTokenID, agentID, creatorID)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `
+INSERT INTO runtime_nodes (
+    node_id, display_name, device_certificate_serial,
+    device_public_key_thumbprint, node_version, protocol_version,
+    runtime_contract_id, runtime_contract_digest, features,
+    capacity, inflight, status, last_seen_at
+) VALUES ($1, 'Shared credential node', $2, $3, 'credential-revoke-test', 2,
+          $4, $5, $6, 8, 3, 'active', clock_timestamp())`,
+		nodeID, serial, strings.Repeat("c", 64),
+		coreruntime.RuntimeContractID, coreruntime.RuntimeContractDigest,
+		coreruntime.RuntimeRequiredFeatures())
+	require.NoError(t, err)
+	err = pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if _, txErr := tx.Exec(ctx, `
+INSERT INTO runtime_sessions (
+    runtime_session_id, node_id, agent_id, credential_id, worker_id,
+    session_epoch, device_certificate_serial, node_version,
+    protocol_version, runtime_contract_id, runtime_contract_digest,
+    features, capacity, inflight, status, attached_core_instance_id,
+    disconnected_at
+) VALUES
+    ($1, $5, $6, $7, 'target-active', 1, $8, 'credential-revoke-test',
+     2, $9, $10, $11, 4, 1, 'active', $12, NULL),
+    ($2, $5, $6, $7, 'target-draining', 1, $8, 'credential-revoke-test',
+     2, $9, $10, $11, 4, 1, 'draining', $13, NULL),
+    ($3, $5, $6, $7, 'target-offline', 1, $8, 'credential-revoke-test',
+     2, $9, $10, $11, 4, 0, 'offline', NULL, clock_timestamp()),
+    ($4, $5, $6, $14, 'other-active', 1, $8, 'credential-revoke-test',
+     2, $9, $10, $11, 4, 1, 'active', $15, NULL)`,
+			targetActiveSessionID, targetDrainingSessionID, targetOfflineSessionID,
+			otherSessionID, nodeID, agentID, targetTokenID, serial,
+			coreruntime.RuntimeContractID, coreruntime.RuntimeContractDigest,
+			coreruntime.RuntimeRequiredFeatures(), targetCoreA, targetCoreB,
+			otherTokenID, otherCore); txErr != nil {
+			return txErr
+		}
+		_, txErr := tx.Exec(ctx, `
+INSERT INTO runtime_session_attachments (runtime_session_id, core_instance_id, attachment_kind)
+VALUES ($1, $4, 'connected'), ($2, $5, 'connected'), ($3, $6, 'connected')`,
+			targetActiveSessionID, targetDrainingSessionID, otherSessionID,
+			targetCoreA, targetCoreB, otherCore)
+		return txErr
+	})
+	require.NoError(t, err)
+
+	svc := agent.NewRegistrationService(pool)
+	require.NoError(t, svc.RevokeAgentToken(ctx, creatorID, targetTokenID))
+
+	var targetStatus, targetRevocationKind, otherStatus string
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT status, revocation_kind FROM agent_tokens WHERE id = $1`, targetTokenID).Scan(
+		&targetStatus, &targetRevocationKind,
+	))
+	require.Equal(t, "revoked", targetStatus)
+	require.Equal(t, "manual", targetRevocationKind)
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT status FROM agent_tokens WHERE id = $1`, otherTokenID).Scan(&otherStatus))
+	require.Equal(t, "active_runtime", otherStatus)
+
+	for _, sessionID := range []uuid.UUID{
+		targetActiveSessionID,
+		targetDrainingSessionID,
+		targetOfflineSessionID,
+	} {
+		var status string
+		var attachedCore *uuid.UUID
+		var disconnected bool
+		var inflight int32
+		require.NoError(t, pool.QueryRow(ctx, `
+SELECT status, attached_core_instance_id, disconnected_at IS NOT NULL, inflight
+FROM runtime_sessions WHERE runtime_session_id = $1`, sessionID).Scan(
+			&status, &attachedCore, &disconnected, &inflight,
+		))
+		require.Equal(t, "revoked", status)
+		require.Nil(t, attachedCore)
+		require.True(t, disconnected)
+		require.Equal(t, targetInflight[sessionID], inflight)
+	}
+	for _, sessionID := range []uuid.UUID{targetActiveSessionID, targetDrainingSessionID} {
+		var reason *string
+		require.NoError(t, pool.QueryRow(ctx, `
+SELECT disconnect_reason
+FROM runtime_session_attachments
+WHERE runtime_session_id = $1`, sessionID).Scan(&reason))
+		require.NotNil(t, reason)
+		require.Equal(t, "credential_revoked", *reason)
+	}
+	var offlineAttachmentCount int
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM runtime_session_attachments WHERE runtime_session_id = $1`,
+		targetOfflineSessionID,
+	).Scan(&offlineAttachmentCount))
+	require.Zero(t, offlineAttachmentCount)
+
+	var otherSessionStatus string
+	var otherAttachedCore uuid.UUID
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT status, attached_core_instance_id
+FROM runtime_sessions WHERE runtime_session_id = $1`, otherSessionID).Scan(
+		&otherSessionStatus, &otherAttachedCore,
+	))
+	require.Equal(t, "active", otherSessionStatus)
+	require.Equal(t, otherCore, otherAttachedCore)
+	var otherDetached bool
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT detached_at IS NOT NULL
+FROM runtime_session_attachments
+WHERE runtime_session_id = $1`, otherSessionID).Scan(&otherDetached))
+	require.False(t, otherDetached)
+
+	var nodeStatus string
+	var nodeCapacity, nodeInflight int32
+	var nodeDraining, nodeRevoked bool
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT status, capacity, inflight, draining_at IS NOT NULL, revoked_at IS NOT NULL
+FROM runtime_nodes WHERE node_id = $1`, nodeID).Scan(
+		&nodeStatus, &nodeCapacity, &nodeInflight, &nodeDraining, &nodeRevoked,
+	))
+	require.Equal(t, "active", nodeStatus)
+	require.Equal(t, int32(8), nodeCapacity)
+	require.Equal(t, int32(3), nodeInflight)
+	require.False(t, nodeDraining)
+	require.False(t, nodeRevoked)
+
+	rows, err := pool.Query(ctx, `
+SELECT payload->>'target_instance_id'
+FROM runtime_signal_outbox
+WHERE event_type = 'credential.revoke' AND agent_id = $1
+ORDER BY payload->>'target_instance_id'`, agentID)
+	require.NoError(t, err)
+	defer rows.Close()
+	signalTargets := make(map[string]struct{})
+	for rows.Next() {
+		var target string
+		require.NoError(t, rows.Scan(&target))
+		signalTargets[target] = struct{}{}
+	}
+	require.NoError(t, rows.Err())
+	require.Equal(t, map[string]struct{}{
+		targetCoreA.String(): {},
+		targetCoreB.String(): {},
+	}, signalTargets)
+
+	err = svc.RevokeAgentToken(ctx, creatorID, targetTokenID)
+	assertHTTPStatus(t, err, 404)
+	var signalCount int
+	require.NoError(t, pool.QueryRow(ctx, `
+SELECT COUNT(*) FROM runtime_signal_outbox WHERE event_type = 'credential.revoke'`).Scan(&signalCount))
+	require.Equal(t, 2, signalCount)
 }
 
 func TestRegistrationService_CreateAgentToken_ForExistingAgent(t *testing.T) {
