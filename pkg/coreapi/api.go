@@ -252,7 +252,7 @@ func configureRuntimeV2(
 		return
 	}
 	if coreInstanceID == uuid.Nil {
-		log.Error().Msg("runtime v2 disabled: Core instance identity is missing")
+		log.Error().Msg("agent runtime disabled: Core instance identity is missing")
 		return
 	}
 	runtimeService.ConfigureCoreRuntime(coreInstanceID)
@@ -269,7 +269,7 @@ func configureRuntimeV2(
 		cfg.RuntimeInvocationPreviousSigningSecret,
 	)
 	if err != nil {
-		log.Warn().Err(err).Msg("runtime v2 assignment capabilities are disabled")
+		log.Warn().Err(err).Msg("agent runtime assignment capabilities are disabled")
 	} else {
 		leases = runtime.NewRuntimeLeaseService(pool, coreInstanceID, signer, runtime.DefaultRuntimeLeaseConfig())
 		delegation = runtime.NewRuntimeV2DelegationService(pool, runtimeService, signer)
@@ -280,7 +280,7 @@ func configureRuntimeV2(
 	if provider, ok := signalBus.(runtime.RuntimePresenceStoreProvider); ok {
 		presence, err = provider.RuntimePresenceStore()
 		if err != nil {
-			log.Warn().Err(err).Msg("runtime v2 Redis presence is unavailable")
+			log.Warn().Err(err).Msg("agent runtime Redis presence is unavailable")
 		}
 	}
 	handler.SetRuntimeV2Dependencies(runtime.RuntimeV2HTTPDependencies{

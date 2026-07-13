@@ -165,7 +165,7 @@ func main() {
 				log.Fatal().Err(serveErr).Msg("runtime mTLS server failed")
 			}
 		}()
-		log.Info().Int("port", cfg.RuntimeMTLSPort).Msg("runtime v2 mTLS listener active")
+		log.Info().Int("port", cfg.RuntimeMTLSPort).Msg("agent runtime mTLS listener active")
 	}
 
 	srv := newHTTPServer(cfg.Port)
@@ -241,6 +241,7 @@ func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	e.Use(runtimeListenerIsolation)
 	e.Use(emw.Recover())
 	e.Use(emw.RequestID())
 	e.Use(emw.BodyLimit(maxRequestBodySize))

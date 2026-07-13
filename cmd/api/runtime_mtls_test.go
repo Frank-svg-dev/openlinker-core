@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/labstack/echo/v4"
 )
 
 func TestBuildRuntimeMTLSConfigRequiresVerifiedClientCertificates(t *testing.T) {
@@ -63,21 +64,99 @@ func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
 		t.Fatal("weak runtime invocation key must fail")
 	}
 
-	called := false
-	handler := runtimeV2OnlyHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		called = true
+	called := 0
+	application := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called++
 		w.WriteHeader(http.StatusNoContent)
-	}))
+	})
+	handler := runtimeOnlyHandler(application)
 
 	public := httptest.NewRecorder()
 	handler.ServeHTTP(public, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-	if public.Code != http.StatusNotFound || called {
+	if public.Code != http.StatusNotFound || called != 0 {
 		t.Fatalf("non-runtime path code=%d called=%v", public.Code, called)
 	}
 	runtimeRequest := httptest.NewRecorder()
-	handler.ServeHTTP(runtimeRequest, httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/v2/sessions", nil))
-	if runtimeRequest.Code != http.StatusNoContent || !called {
+	handler.ServeHTTP(runtimeRequest, httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", nil))
+	if runtimeRequest.Code != http.StatusNoContent || called != 1 {
 		t.Fatalf("runtime path code=%d called=%v", runtimeRequest.Code, called)
+	}
+	legacyRequest := httptest.NewRecorder()
+	handler.ServeHTTP(legacyRequest, httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/v2/sessions", nil))
+	if legacyRequest.Code != http.StatusNotFound || called != 1 {
+		t.Fatalf("legacy runtime path code=%d called=%v", legacyRequest.Code, called)
+	}
+
+	e := echo.New()
+	e.Use(runtimeListenerIsolation)
+	e.POST("/api/v1/agent-runtime/sessions", func(c echo.Context) error {
+		called++
+		return c.NoContent(http.StatusNoContent)
+	})
+	e.GET("/healthz", func(c echo.Context) error {
+		called++
+		return c.NoContent(http.StatusNoContent)
+	})
+	for _, path := range []string{
+		"/api/v1/agent-runtime/sessions",
+		"/api/v1/agent-runtime/v2/sessions",
+	} {
+		recorder := httptest.NewRecorder()
+		e.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, path, nil))
+		if recorder.Code != http.StatusNotFound || called != 1 {
+			t.Fatalf("public runtime path %s code=%d called=%v", path, recorder.Code, called)
+		}
+	}
+	health := httptest.NewRecorder()
+	e.ServeHTTP(health, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	if health.Code != http.StatusNoContent || called != 2 {
+		t.Fatalf("public health path code=%d called=%v", health.Code, called)
+	}
+
+	dedicated := runtimeOnlyHandler(e)
+	runtimeRequest = httptest.NewRecorder()
+	dedicated.ServeHTTP(runtimeRequest, httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", nil))
+	if runtimeRequest.Code != http.StatusNoContent || called != 3 {
+		t.Fatalf("dedicated runtime path code=%d called=%v", runtimeRequest.Code, called)
+	}
+}
+
+func TestValidateRuntimeMTLSConfigRejectsNonOriginPublicURL(t *testing.T) {
+	cfg := &config.Config{
+		Port:                           8080,
+		RuntimeMTLSEnabled:             true,
+		RuntimeMTLSPort:                8443,
+		RuntimeMTLSCertFile:            "server.pem",
+		RuntimeMTLSKeyFile:             "server-key.pem",
+		RuntimeMTLSClientCAFile:        "client-ca.pem",
+		RuntimeInvocationSigningKeyID:  "current",
+		RuntimeInvocationSigningSecret: "runtime-test-signing-secret-00000000",
+	}
+	for _, rawURL := range []string{
+		"http://runtime.example.test:8443",
+		"https://:8443",
+		"https://user:secret@runtime.example.test:8443",
+		"https://runtime.example.test:8443/",
+		"https://runtime.example.test:8443/api/v1/agent-runtime",
+		"https://runtime.example.test:8443/%2F",
+		"https://runtime.example.test:8443?token=secret",
+		"https://runtime.example.test:8443?",
+		"https://runtime.example.test:8443#runtime",
+		"https://runtime.example.test:8443#",
+		"https://runtime.example.test:",
+		"https://runtime.example.test:0",
+		"https://runtime.example.test:65536",
+	} {
+		t.Run(rawURL, func(t *testing.T) {
+			cfg.RuntimeMTLSAPIURL = rawURL
+			if err := validateRuntimeMTLSConfig(cfg); err == nil {
+				t.Fatalf("validateRuntimeMTLSConfig(%q) succeeded", rawURL)
+			}
+		})
+	}
+	cfg.RuntimeMTLSAPIURL = "https://runtime.example.test:8443"
+	if err := validateRuntimeMTLSConfig(cfg); err != nil {
+		t.Fatalf("valid Runtime origin rejected: %v", err)
 	}
 }
 

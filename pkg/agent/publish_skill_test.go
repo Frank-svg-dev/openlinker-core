@@ -47,7 +47,7 @@ func TestServePublishAgentSkillUsesConfiguredBaseURLs(t *testing.T) {
 	assertNotContains(t, body, skillDocWebBase)
 }
 
-func TestServePublishAgentSkillIncludesCanonicalRuntimeV2Onboarding(t *testing.T) {
+func TestServePublishAgentSkillIncludesDiscoveredCanonicalRuntimeOnboarding(t *testing.T) {
 	t.Setenv("API_URL", "https://api.stage.example/")
 	t.Setenv("FRONTEND_URL", "https://stage.example/")
 
@@ -67,20 +67,24 @@ func TestServePublishAgentSkillIncludesCanonicalRuntimeV2Onboarding(t *testing.T
 	assertContains(t, body, "30-minute expiry is only the first-registration window")
 	assertContains(t, body, "clears expires_at")
 	assertContains(t, body, "the creator revokes it.")
-	assertContains(t, body, "https://api.stage.example/api/v1/agent-runtime/v2/ws")
-	assertContains(t, body, "POST /api/v1/agent-runtime/v2/runs/claim")
-	assertContains(t, body, "Runtime v2 Session")
+	assertContains(t, body, "GET https://api.stage.example/.well-known/openlinker.json")
+	assertContains(t, body, "OPENLINKER_URL=https://api.stage.example")
+	assertContains(t, body, "RUNTIME_ORIGIN = manifest.base_urls.runtime")
+	assertContains(t, body, "CONNECT ${RUNTIME_ORIGIN}/api/v1/agent-runtime/ws")
+	assertContains(t, body, "POST /api/v1/agent-runtime/runs/claim")
+	assertContains(t, body, "Runtime Session")
 	assertContains(t, body, "run.assignment_confirmed")
 	assertContains(t, body, "matching ACK")
-	assertContains(t, body, "WebSocket and Pull v2")
+	assertContains(t, body, "WebSocket and long polling")
 	assertContains(t, body, `"connection_mode": "agent_node"`)
 	assertContains(t, body, "mTLS")
 	assertContains(t, body, "Keep the worker process alive under a supervisor")
-	assertContains(t, body, "OPENLINKER_API_BASE")
+	assertContains(t, body, "OPENLINKER_URL")
 	assertNotContains(t, body, "/api/v1/agent-runtime/heartbeat")
-	assertNotContains(t, body, "/api/v1/agent-runtime/runs/claim")
-	assertNotContains(t, body, "/api/v1/agent-runtime/runs/RUN_ID/result")
-	assertNotContains(t, body, "POST /agent-runtime/v2/runs/claim")
+	assertNotContains(t, body, "https://api.stage.example/api/v1/agent-runtime")
+	assertNotContains(t, strings.ToLower(body), "runtime v2")
+	assertNotContains(t, strings.ToLower(body), "pull v2")
+	assertNotContains(t, body, "/api/v1/agent-runtime/v2")
 }
 
 func TestConsumeAgentSkillKeepsTasksPrivate(t *testing.T) {

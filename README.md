@@ -64,7 +64,7 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["Public HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["Remote MCP / JSON-RPC server"]
-  Core -->|"agent_node<br/>WebSocket first, Pull v2 fallback"| AgentNode["openlinker-agent-node"]
+  Core -->|"agent_node<br/>WebSocket first, long polling fallback"| AgentNode["openlinker-agent-node"]
   AgentNode -->|"http / command / a2a / codex adapter"| Backend["Agent backend"]
   Backend -->|"events / result"| AgentNode
 ```
@@ -216,14 +216,14 @@ make test              # go test ./... -race -cover
 make fmt               # gofmt and go vet
 make migrate-up        # apply migrations
 make migrate-down      # roll back one migration
-make runtime-loadtest  # exercise Agent Node over WebSocket and Pull v2
+make runtime-loadtest  # exercise Agent Node over WebSocket and long polling
 ```
 
 ## Runtime Modes
 
 Runtime cluster membership is refreshed with PostgreSQL time every five
 seconds. Multi-replica deployments require `RUNTIME_HA_MODE=true`; all live
-replicas must advertise the same release, schema checksum, and Runtime v2
+replicas must advertise the same release, schema checksum, and OpenLinker Runtime
 contract before `/readyz` succeeds. The migration deliberately starts in
 `hard_maintenance`, so it is never silently treated as a serving state.
 
@@ -246,15 +246,21 @@ Use the simplest reachable mode for each Agent:
 1. `direct_http`: Core calls a stable HTTPS Agent endpoint.
 2. `mcp_server`: Core calls an existing remote HTTP JSON-RPC or MCP endpoint.
 3. `agent_node`: Agent Node receives assigned runs. Its transport policy is
-   `auto` by default: outbound WebSocket first, Pull v2 when the network cannot
+   `auto` by default: outbound WebSocket first, long polling when the network cannot
    keep the socket alive. Both transports reuse one Session, lease, ACK, resume,
    fence, and local spool contract.
+
+Normal Agent Node setup only needs `OPENLINKER_URL`, the public OpenLinker
+origin. The Node reads `/.well-known/openlinker.json` without Runtime
+credentials and obtains the dedicated mTLS origin from `base_urls.runtime`.
+`RUNTIME_MTLS_API_URL` is deployment-side publication metadata, not a second
+address that Agent creators need to enter.
 
 Every assigned or claimed run must finish with exactly one terminal result.
 
 ### Runtime Node certificate provisioning
 
-Reliable Runtime v2 authenticates every Agent Node with a dedicated client
+Reliable OpenLinker Runtime authenticates every Agent Node with a dedicated client
 certificate and a matching `runtime_nodes` record. Keep the client CA private
 key on an operator-controlled provisioning host; never copy it into the Core
 container, put it in `.env`, or mount it beside the serving keys. Core only
@@ -277,11 +283,11 @@ DATABASE_URL='postgres://...' ./bin/api runtime-node issue \
 The CA private-key file must be owner-only (`0600` or `0400`) on Unix. The
 output directories must already exist. The command generates an ECDSA
 P-256 key and a client-auth-only certificate, registers its random serial and
-SPKI SHA-256 thumbprint against the current Runtime v2 contract, and then emits
+SPKI SHA-256 thumbprint against the current OpenLinker Runtime contract, and then emits
 an audit record as JSON. It refuses to overwrite any file. The private key is
 written with mode `0600`; the certificate uses `0644`. `--node-id` is optional
 and otherwise generated. `--node-version` defaults to the exact version used by
-the current reliable-run-v2 Agent Node; override it only when the Node binary
+the current Agent Node release; override it only when the Node binary
 advertises a different value.
 
 Inspect a delivered pair before installing it on an Agent Node:
@@ -325,7 +331,7 @@ flowchart TB
   subgraph CalleeModes["Callee connection modes"]
     Direct["direct_http<br/>Core calls HTTPS endpoint"]
     MCPServer["mcp_server<br/>Core calls remote JSON-RPC / MCP tool"]
-    AgentNode["agent_node<br/>WebSocket first, Pull v2 fallback"]
+    AgentNode["agent_node<br/>WebSocket first, long polling fallback"]
   end
 
   Core --> Direct
@@ -339,9 +345,9 @@ Important rules:
   Agent Node runtime channel.
 - `message/send` creates a real Core run. Synchronous endpoints may complete
   immediately; runtime connectors normally return a working task first.
-- `agent_node` is the marketplace connection mode. WebSocket and Pull v2 are
+- `agent_node` is the marketplace connection mode. WebSocket and long polling are
   transport choices inside the Node, never separate seller-facing modes.
-- WebSocket is outbound from Agent Node to Core. Pull v2 is its fallback; both
+- WebSocket is outbound from Agent Node to Core. Long polling is its fallback; both
   keep PostgreSQL as truth and share the same Session, lease, ACK and resume state.
 
 ## API Areas
@@ -350,7 +356,7 @@ Important rules:
 - `/api/v1/me`
 - `/api/v1/agents`
 - `/api/v1/agent-registration/*`
-- `/api/v1/agent-runtime/v2/*`
+- `/api/v1/agent-runtime/*` (dedicated mTLS listener only; the ordinary API listener returns 404)
 - `/api/v1/runs`
 - `/api/v1/runs/:id/stream`
 - `/api/v1/a2a/*`

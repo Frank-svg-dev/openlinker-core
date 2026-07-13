@@ -120,7 +120,7 @@ func TestRuntimeInvocationProofBindsContextMethodPathKeyAndBody(t *testing.T) {
 
 	request := RuntimeInvocationProofRequest{
 		Method:         "POST",
-		Path:           "/api/v1/agent-runtime/v2/call-agent",
+		Path:           "/api/v1/agent-runtime/call-agent",
 		IdempotencyKey: "delegation-42",
 		Context:        contextValue,
 		Body:           []byte(`{"target_agent_id":"` + uuid.NewString() + `"}`),

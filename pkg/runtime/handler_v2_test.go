@@ -28,20 +28,20 @@ func TestRuntimeV2ControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 		routes[route.Method+" "+route.Path] = true
 	}
 	for _, route := range []string{
-		"POST /api/v1/agent-runtime/v2/sessions",
-		"POST /api/v1/agent-runtime/v2/sessions/:id/heartbeat",
-		"POST /api/v1/agent-runtime/v2/sessions/:id/close",
-		"POST /api/v1/agent-runtime/v2/runs/claim",
-		"POST /api/v1/agent-runtime/v2/runs/:id/assignment-ack",
-		"POST /api/v1/agent-runtime/v2/runs/:id/assignment-reject",
-		"POST /api/v1/agent-runtime/v2/runs/:id/lease-renew",
-		"POST /api/v1/agent-runtime/v2/runs/:id/events",
-		"POST /api/v1/agent-runtime/v2/runs/:id/result",
-		"POST /api/v1/agent-runtime/v2/runs/resume",
-		"POST /api/v1/agent-runtime/v2/runs/:id/cancel-ack",
-		"GET /api/v1/agent-runtime/v2/commands",
-		"POST /api/v1/agent-runtime/v2/call-agent",
-		"GET /api/v1/agent-runtime/v2/ws",
+		"POST /api/v1/agent-runtime/sessions",
+		"POST /api/v1/agent-runtime/sessions/:id/heartbeat",
+		"POST /api/v1/agent-runtime/sessions/:id/close",
+		"POST /api/v1/agent-runtime/runs/claim",
+		"POST /api/v1/agent-runtime/runs/:id/assignment-ack",
+		"POST /api/v1/agent-runtime/runs/:id/assignment-reject",
+		"POST /api/v1/agent-runtime/runs/:id/lease-renew",
+		"POST /api/v1/agent-runtime/runs/:id/events",
+		"POST /api/v1/agent-runtime/runs/:id/result",
+		"POST /api/v1/agent-runtime/runs/resume",
+		"POST /api/v1/agent-runtime/runs/:id/cancel-ack",
+		"GET /api/v1/agent-runtime/commands",
+		"POST /api/v1/agent-runtime/call-agent",
+		"GET /api/v1/agent-runtime/ws",
 	} {
 		require.True(t, routes[route], route)
 	}
@@ -96,7 +96,7 @@ func TestRuntimeV2CreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	controller := fixture.controller()
 	hello := fixture.hello()
 
-	recorder := serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/v2/sessions", hello)
+	recorder := serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", hello)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.Equal(t, "runtime-secret", fixture.tokens.plaintext)
 	require.Equal(t, []string{runtimeV2TokenScope}, fixture.tokens.scopes)
@@ -128,7 +128,7 @@ func TestRuntimeV2AuthenticationRunsBeforeBodyDecode(t *testing.T) {
 	tracked := &runtimeV2TrackedReader{reader: strings.NewReader(`{"unknown":true}`)}
 	e := echo.New()
 	fixture.controller().Register(e.Group("/api/v1"))
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/v2/sessions", tracked)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", tracked)
 	req.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, req)
@@ -157,7 +157,7 @@ func TestRuntimeV2SessionHeartbeatAndClose(t *testing.T) {
 
 	heartbeatRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/sessions/"+hello.RuntimeSessionID.String()+"/heartbeat", hello,
+		"/api/v1/agent-runtime/sessions/"+hello.RuntimeSessionID.String()+"/heartbeat", hello,
 	)
 	require.Equal(t, http.StatusOK, heartbeatRecorder.Code, heartbeatRecorder.Body.String())
 	require.Equal(t, hello.RuntimeSessionID, heartbeat.RuntimeSessionID)
@@ -174,7 +174,7 @@ func TestRuntimeV2SessionHeartbeatAndClose(t *testing.T) {
 	}
 	closeRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/sessions/"+hello.RuntimeSessionID.String()+"/close", closePayload,
+		"/api/v1/agent-runtime/sessions/"+hello.RuntimeSessionID.String()+"/close", closePayload,
 	)
 	require.Equal(t, http.StatusNoContent, closeRecorder.Code, closeRecorder.Body.String())
 	require.Empty(t, closeRecorder.Body.String())
@@ -203,7 +203,7 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 	controller := fixture.controller()
 
 	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 2, Inflight: 1}
-	claimRecorder := serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/v2/runs/claim?wait=0", claim)
+	claimRecorder := serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim?wait=0", claim)
 	require.Equal(t, http.StatusNoContent, claimRecorder.Code, claimRecorder.Body.String())
 	require.Empty(t, claimRecorder.Body.String())
 	require.Equal(t, 1, fixture.leases.claimCalls)
@@ -217,13 +217,13 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 		NodeEnvelope:         "node-envelope",
 		AgentInvocationToken: "invocation-token",
 	}
-	claimRecorder = serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/v2/runs/claim", claim)
+	claimRecorder = serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim", claim)
 	require.Equal(t, http.StatusOK, claimRecorder.Code, claimRecorder.Body.String())
 	require.Equal(t, 2, fixture.leases.claimCalls)
 
 	ackRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/assignment-ack",
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-ack",
 		RunAssignmentAckPayload{AttemptIdentity: identity},
 	)
 	require.Equal(t, http.StatusOK, ackRecorder.Code, ackRecorder.Body.String())
@@ -231,7 +231,7 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 
 	rejectRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/assignment-reject",
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-reject",
 		RunAssignmentRejectPayload{
 			AttemptIdentity: identity,
 			ReasonCode:      RuntimeRejectNodeAtCapacity,
@@ -244,7 +244,7 @@ func TestRuntimeV2LeaseRoutesUseResolvedSessionAndStableResponses(t *testing.T) 
 
 	renewRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/lease-renew",
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/lease-renew",
 		RunLeaseRenewPayload{
 			AttemptIdentity:    identity,
 			LastClientEventSeq: 0,
@@ -275,7 +275,7 @@ func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
 	}
 	eventRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/events",
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/events",
 		RunEventPayload{
 			AttemptIdentity: identity,
 			ClientEventID:   eventID,
@@ -305,7 +305,7 @@ func TestRuntimeV2EventAndResultResolveActingSessionByWorker(t *testing.T) {
 	}
 	resultRecorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/result",
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/result",
 		RunResultPayload{
 			AttemptIdentity:     identity,
 			ResultID:            resultID,
@@ -351,7 +351,7 @@ func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
 
 	recorder := serveRuntimeV2(
 		t, fixture.controller(), http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/resume", request,
+		"/api/v1/agent-runtime/runs/resume", request,
 	)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.sessions.resolvedSessionID)
@@ -365,7 +365,7 @@ func TestRuntimeV2ResumeUsesAuthenticatedTargetSession(t *testing.T) {
 	request.Attempts[0].AttemptIdentity.NodeID = request.NodeID
 	recorder = serveRuntimeV2(
 		t, fixture.controller(), http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/resume", request,
+		"/api/v1/agent-runtime/runs/resume", request,
 	)
 	require.Equal(t, http.StatusForbidden, recorder.Code, recorder.Body.String())
 	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorPermissionDenied)
@@ -433,7 +433,7 @@ func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 		DatabaseTime: fixture.now,
 	}
 
-	target := "/api/v1/agent-runtime/v2/commands?runtime_session_id=" +
+	target := "/api/v1/agent-runtime/commands?runtime_session_id=" +
 		fixture.acting.RuntimeSessionID.String() + "&wait=0"
 	recorder := serveRuntimeV2Raw(t, fixture.controller(), http.MethodGet, target, "")
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
@@ -456,17 +456,17 @@ func TestRuntimeV2CommandsBindExplicitSessionAndCancelAck(t *testing.T) {
 	}
 	recorder = serveRuntimeV2(
 		t, fixture.controller(), http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/cancel-ack", ack,
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/cancel-ack", ack,
 	)
 	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 	require.Equal(t, ack, fixture.cancellations.ackPayload)
 	require.Equal(t, fixture.acting.RuntimeSessionID, fixture.cancellations.principal.RuntimeSessionID)
 
 	for _, invalidTarget := range []string{
-		"/api/v1/agent-runtime/v2/commands",
-		"/api/v1/agent-runtime/v2/commands?runtime_session_id=" + strings.ToUpper(fixture.acting.RuntimeSessionID.String()),
-		"/api/v1/agent-runtime/v2/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&unknown=1",
-		"/api/v1/agent-runtime/v2/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&wait=0&wait=1",
+		"/api/v1/agent-runtime/commands",
+		"/api/v1/agent-runtime/commands?runtime_session_id=" + strings.ToUpper(fixture.acting.RuntimeSessionID.String()),
+		"/api/v1/agent-runtime/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&unknown=1",
+		"/api/v1/agent-runtime/commands?runtime_session_id=" + fixture.acting.RuntimeSessionID.String() + "&wait=0&wait=1",
 	} {
 		recorder = serveRuntimeV2Raw(t, fixture.controller(), http.MethodGet, invalidTarget, "")
 		require.Equal(t, http.StatusUnprocessableEntity, recorder.Code, invalidTarget)
@@ -483,7 +483,7 @@ func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.
 	nonCanonical := strings.ToUpper(identity.RunID.String())
 	recorder := serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+nonCanonical+"/assignment-ack",
+		"/api/v1/agent-runtime/runs/"+nonCanonical+"/assignment-ack",
 		RunAssignmentAckPayload{AttemptIdentity: identity},
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
@@ -494,7 +494,7 @@ func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.
 	conflicting.RunID = uuid.New()
 	recorder = serveRuntimeV2(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/assignment-ack",
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-ack",
 		RunAssignmentAckPayload{AttemptIdentity: conflicting},
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
@@ -506,7 +506,7 @@ func TestRuntimeV2RejectsNonCanonicalAndConflictingIDsBeforeMutation(t *testing.
 	unknown := strings.TrimSuffix(string(body), "}") + `,"extra":true}`
 	recorder = serveRuntimeV2Raw(
 		t, controller, http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/"+identity.RunID.String()+"/assignment-ack", unknown,
+		"/api/v1/agent-runtime/runs/"+identity.RunID.String()+"/assignment-ack", unknown,
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
 	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorValidationFailed)
@@ -518,7 +518,7 @@ func TestRuntimeV2WaitAndMissingDependenciesFailClosed(t *testing.T) {
 	claim := RuntimeClaimRequest{RuntimeSessionID: fixture.acting.RuntimeSessionID, Capacity: 1, Inflight: 0}
 	recorder := serveRuntimeV2(
 		t, fixture.controller(), http.MethodPost,
-		"/api/v1/agent-runtime/v2/runs/claim?wait=31", claim,
+		"/api/v1/agent-runtime/runs/claim?wait=31", claim,
 	)
 	require.Equal(t, http.StatusUnprocessableEntity, recorder.Code)
 	require.Equal(t, 0, fixture.leases.claimCalls)
@@ -527,7 +527,7 @@ func TestRuntimeV2WaitAndMissingDependenciesFailClosed(t *testing.T) {
 		TokenValidator:      fixture.tokens,
 		DeviceAuthenticator: fixture.devices,
 	})
-	recorder = serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/v2/runs/claim", claim)
+	recorder = serveRuntimeV2(t, controller, http.MethodPost, "/api/v1/agent-runtime/runs/claim", claim)
 	require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
 	requireRuntimeV2ResponseCode(t, recorder, RuntimeErrorServiceUnavailable)
 }

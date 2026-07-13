@@ -58,7 +58,7 @@ flowchart LR
 
   Core -->|"direct_http"| HTTPAgent["公网 HTTPS Agent"]
   Core -->|"mcp_server"| MCPAgent["远程 MCP / JSON-RPC server"]
-  Core -->|"agent_node<br/>WebSocket 优先，Pull v2 兜底"| AgentNode["openlinker-agent-node"]
+  Core -->|"agent_node<br/>WebSocket 优先，长轮询兜底"| AgentNode["openlinker-agent-node"]
   AgentNode -->|"http / command / a2a / codex adapter"| Backend["Agent backend"]
   Backend -->|"events / result"| AgentNode
 ```
@@ -199,13 +199,13 @@ make test              # go test ./... -race -cover
 make fmt               # gofmt 和 go vet
 make migrate-up        # 应用迁移
 make migrate-down      # 回退一个迁移
-make runtime-loadtest  # 分别通过 WebSocket 与 Pull v2 压测 Agent Node
+make runtime-loadtest  # 分别通过 WebSocket 与长轮询压测 Agent Node
 ```
 
 ## Runtime 模式
 
 Core 每五秒使用 PostgreSQL 时间刷新集群成员记录。多副本部署必须设置
-`RUNTIME_HA_MODE=true`；所有 live Core 的 release、schema checksum 和 Runtime v2
+`RUNTIME_HA_MODE=true`；所有 live Core 的 release、schema checksum 和 OpenLinker Runtime
 契约完全一致后，`/readyz` 才会成功。migration 默认进入 `hard_maintenance`，Core
 不会把尚未完成切换的数据库误判为可服务状态。
 
@@ -226,14 +226,19 @@ Core 每五秒使用 PostgreSQL 时间刷新集群成员记录。多副本部署
 1. `direct_http`：Core 调用稳定的 HTTPS Agent endpoint。
 2. `mcp_server`：Core 调用已有远程 HTTP JSON-RPC 或 MCP endpoint。
 3. `agent_node`：Agent Node 接收分配的运行。默认使用 `auto` 传输策略：优先建立
-   出站 WebSocket，网络无法稳定维持连接时切到 Pull v2。两种传输共用同一套
+   出站 WebSocket，网络无法稳定维持连接时切到长轮询。两种传输共用同一套
    Session、lease、ACK、resume、fence 与本地 spool，不是两个市场接入模式。
+
+正常接入只需给 Agent Node 配置公开的 OpenLinker 地址 `OPENLINKER_URL`。Node 会在
+不携带 Agent Token 和客户端证书的情况下读取 `/.well-known/openlinker.json`，再从
+`base_urls.runtime` 取得专用 mTLS 连接 origin。`RUNTIME_MTLS_API_URL` 只由部署者配置，
+不是创作者需要再填写的第二个地址。
 
 每个已分配或已 claim 的 run 必须最终提交一次终态结果。
 
 ### Runtime Node 证书签发
 
-Reliable Runtime v2 会同时校验 Agent Node 的客户端证书和数据库里的
+Reliable OpenLinker Runtime 会同时校验 Agent Node 的客户端证书和数据库里的
 `runtime_nodes` 记录。客户端 CA 私钥只保存在运维侧的签发主机上，不得复制进 Core
 容器、写入 `.env`，也不得和服务端 TLS 私钥放在同一个挂载目录。Core 运行时只需要
 通过 `RUNTIME_MTLS_CLIENT_CA_FILE` 读取 CA 证书。
@@ -253,10 +258,10 @@ DATABASE_URL='postgres://...' ./bin/api runtime-node issue \
 
 Unix 上的 CA 私钥文件权限必须仅限 owner（`0600` 或 `0400`）。输出目录必须事先存在。
 该命令会生成 ECDSA P-256 私钥和仅限 `clientAuth` 的证书，
-再把随机 serial、SPKI SHA-256 指纹和当前 Runtime v2 契约一次性登记到数据库，成功后
+再把随机 serial、SPKI SHA-256 指纹和当前 OpenLinker Runtime 契约一次性登记到数据库，成功后
 输出 JSON 审计记录。命令不会覆盖任何已有文件；私钥权限固定为 `0600`，证书为
 `0644`。`--node-id` 可省略并自动生成。`--node-version` 默认值与当前
-reliable-run-v2 Agent Node 完全一致；只有 Node 二进制声明了不同版本时才应覆盖。
+Agent Node 版本完全一致；只有 Node 二进制声明了不同版本时才应覆盖。
 
 交付前可离线检查证书、私钥和 CA 是否匹配：
 

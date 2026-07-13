@@ -199,7 +199,7 @@ LEFT JOIN LATERAL (
       AND session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
-      AND session.runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f'
+      AND session.runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'
       AND session.features @> ARRAY[
           'lease_fence', 'assignment_confirm', 'renew', 'resume',
           'event_ack', 'result_ack', 'cancel', 'persistent_spool'

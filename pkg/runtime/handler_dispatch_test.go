@@ -18,21 +18,20 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-func TestLegacyRuntimeRoutesAreAbsentWithoutCallingService(t *testing.T) {
+func TestRetiredVersionedRuntimeRoutesAreAbsentWithoutCallingService(t *testing.T) {
 	svc := &mockRuntimeService{}
 	e := echo.New()
 	NewHandler(svc).RegisterAgentRuntime(e.Group("/api/v1"))
 
-	runID := uuid.NewString()
 	tests := []struct {
 		method string
 		path   string
 	}{
 		{method: http.MethodPost, path: "/api/v1/agent-runtime/heartbeat"},
-		{method: http.MethodGet, path: "/api/v1/agent-runtime/runs/claim"},
-		{method: http.MethodPost, path: "/api/v1/agent-runtime/runs/" + runID + "/result"},
-		{method: http.MethodGet, path: "/api/v1/agent-runtime/ws"},
-		{method: http.MethodPost, path: "/api/v1/agent-runtime/call-agent"},
+		{method: http.MethodPost, path: "/api/v1/agent-runtime/v2/sessions"},
+		{method: http.MethodPost, path: "/api/v1/agent-runtime/v2/runs/claim"},
+		{method: http.MethodGet, path: "/api/v1/agent-runtime/v2/ws"},
+		{method: http.MethodPost, path: "/api/v1/agent-runtime/v2/call-agent"},
 	}
 	for _, test := range tests {
 		req := httptest.NewRequest(test.method, test.path, strings.NewReader(`{"legacy":true}`))

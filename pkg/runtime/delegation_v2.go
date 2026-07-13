@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	runtimeV2CallAgentPath            = "/api/v1/agent-runtime/v2/call-agent"
+	runtimeV2CallAgentPath            = "/api/v1/agent-runtime/call-agent"
 	defaultRuntimeV2DelegationDepth   = 8
 	defaultRuntimeV2DelegationRunning = 500
 )

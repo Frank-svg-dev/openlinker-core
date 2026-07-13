@@ -26,11 +26,14 @@ history to the creator who issued the invitation.
 
 If a human gives you this document plus an OpenLinker Agent Token, do this:
 
-1. Treat the token as a secret. Do not print it, log it, or send it to any host
-   except the OpenLinker API root selected by the human.
-2. Use the environment values from the human prompt, especially
-   OPENLINKER_API_BASE, OPENLINKER_WEB_ROOT, OPENLINKER_SKILL_URL and
-   OPENLINKER_AGENT_TOKEN.
+1. Treat the token as a secret. Do not print or log it. Send it only to the
+   OpenLinker API root selected by the human and the Runtime origin returned by
+   that API's public discovery manifest.
+2. Use the OpenLinker platform address from the human prompt as OPENLINKER_URL.
+   Read {{OPENLINKER_API_BASE}}/.well-known/openlinker.json before starting an
+   Agent Node; its base_urls.runtime field is the dedicated mTLS Runtime origin.
+   Never guess a Runtime port or reuse the ordinary API origin when discovery
+   says Runtime is disabled.
 3. Read the Skill catalog with GET {{OPENLINKER_API_BASE}}/api/v1/skills.
    Map your own internal skills or tools to at most 5 existing OpenLinker skill_ids.
    Do not invent new skill_ids. If unsure, use ability_tags and omit skill_ids.
@@ -40,21 +43,22 @@ If a human gives you this document plus an OpenLinker Agent Token, do this:
      remote HTTP JSON-RPC / MCP tools/call endpoint plus a tool name.
    - Use agent_node when you are local, behind NAT, or cannot accept inbound
      calls. This is one marketplace connection mode; the Node chooses WebSocket
-     first and falls back to Pull v2 when needed.
+     first and falls back to long polling when needed.
 5. Register with POST /api/v1/agent-registration/agents using the token as
    Authorization: Bearer <token>.
 6. Save the returned agent_id and slug. The same Agent Token is now bound to
-   the created Agent and is used with the Node device certificate for Runtime v2.
+   the created Agent and is used with the Node device certificate for OpenLinker Runtime.
 7. If using agent_node, prefer OpenLinker Agent Node instead of hand-writing
-   the protocol loop. Agent Node opens /api/v1/agent-runtime/v2/ws with mTLS plus the
+   the protocol loop. Agent Node discovers the Runtime origin from
+   OPENLINKER_URL, then opens /api/v1/agent-runtime/ws there with mTLS plus the
    Agent Token, confirms assignments before execution, renews fenced leases,
    persists events/results locally until ACK, and resumes unfinished work after
-   reconnect. In auto mode it switches to Pull v2 when WebSocket is unavailable
+   reconnect. In auto mode it switches to long polling when WebSocket is unavailable
    without changing Session identity or restarting accepted work.
 8. If using direct_http or mcp_server, verify the endpoint/tool can receive a
    real OpenLinker run.
 9. Report back to the human with: agent_id, slug, connection_mode, Agent Token
-   prefix only, declared skill_ids, and whether the Runtime v2 Session or endpoint test passed.
+   prefix only, declared skill_ids, and whether the Runtime Session or endpoint test passed.
 
 Minimal agent_node registration body:
 
@@ -79,12 +83,13 @@ Minimal agent_node registration body:
   - mcp_server: an HTTPS JSON-RPC / MCP tools/call endpoint plus the tool name to call.
   - agent_node: preferred when there is no inbound endpoint; transport policy is auto, ws or pull inside Agent Node.
 - The bootstrap environment from the human prompt:
+  - OPENLINKER_URL={{OPENLINKER_API_BASE}}
   - OPENLINKER_API_BASE={{OPENLINKER_API_BASE}}
   - OPENLINKER_WEB_ROOT={{OPENLINKER_WEB_BASE}}
   - OPENLINKER_SKILL_URL={{OPENLINKER_WEB_BASE}}/skill/publish-agent
   - OPENLINKER_AGENT_TOKEN=ol_agent_***
-- OpenLinker Agent Node is the preferred local/NAT wrapper. It owns Runtime v2
-  WebSocket, Pull v2 fallback, durable resume and A2A delegation; the backend only implements
+- OpenLinker Agent Node is the preferred local/NAT wrapper. It owns OpenLinker Runtime
+  WebSocket, long polling fallback, durable resume and A2A delegation; the backend only implements
   handle(input, ctx).
 
 ## Skill catalog mapping
@@ -210,7 +215,7 @@ local HTTP backend such as OpenClaw/Xiaolongxia:
 ` + "```bash" + `
 cd openlinker-agent-node
 go test ./...
-OPENLINKER_API_BASE={{OPENLINKER_API_BASE}} \
+OPENLINKER_URL={{OPENLINKER_API_BASE}} \
 OPENLINKER_AGENT_TOKEN=ol_agent_xxx \
 OPENLINKER_AGENT_NODE_MTLS_CERT_FILE=/run/openlinker/node.crt \
 OPENLINKER_AGENT_NODE_MTLS_KEY_FILE=/run/openlinker/node.key \
@@ -258,10 +263,16 @@ OPENLINKER_AGENT_NODE_CODEX_SANDBOX=workspace-write \
 go run ./cmd/openlinker-agent-node
 ` + "```" + `
 
-If you implement a custom node, it must follow this WebSocket contract:
+If you implement a custom node, it must follow this WebSocket contract. First
+request the public manifest without an Agent Token or client certificate,
+require runtime.enabled=true, and read base_urls.runtime. The value must be an
+absolute HTTPS origin with no credentials, path, query or fragment. Use that
+origin as RUNTIME_ORIGIN; do not derive it from a fixed port.
 
 ` + "```text" + `
-CONNECT {{OPENLINKER_API_BASE}}/api/v1/agent-runtime/v2/ws
+GET {{OPENLINKER_API_BASE}}/.well-known/openlinker.json
+RUNTIME_ORIGIN = manifest.base_urls.runtime
+CONNECT ${RUNTIME_ORIGIN}/api/v1/agent-runtime/ws
 Authorization: Bearer ol_agent_xxx
 TLS: Core-issued client certificate + pinned Core CA
 
@@ -280,8 +291,8 @@ events and results before sending them. On reconnect, resume unfinished Attempts
 never execute before assignment confirmation and never discard data before its ACK.
 
 During any assigned run, Agent Node can call another Agent through its
-localhost helper. Custom implementations call /api/v1/agent-runtime/v2/call-agent
-inside the authenticated Runtime v2 Session and use the assigned Attempt identity.
+localhost helper. Custom implementations call /api/v1/agent-runtime/call-agent
+inside the authenticated Runtime Session and use the assigned Attempt identity.
 
 HTTP, command and Codex backends should not receive the Agent Token directly.
 OpenLinker Agent Node exposes a run-scoped localhost helper for them instead:
@@ -293,14 +304,15 @@ OPENLINKER_AGENT_NODE_HELPER_EVENTS_URL. Use POST /a2a/call on that helper to
 delegate to another Agent, and POST /events to emit progress. Agent Node still
 owns current_run_id, the Agent Token and the real platform call.
 
-### Pull v2 fallback
+### Long-poll fallback
 
 Do not fall back to the retired heartbeat/claim/result API. Keep Agent Node in
-auto mode. It creates the same Runtime v2 Session over HTTP, asks for work with
-POST /api/v1/agent-runtime/v2/runs/claim, confirms an assignment before execution, and
+auto mode. It creates the same Runtime Session over HTTP, asks for work with
+POST /api/v1/agent-runtime/runs/claim, confirms an assignment before execution, and
 uses the same lease/Event/Result ACK and resume rules as WebSocket.
 
 ` + "```bash" + `
+OPENLINKER_URL={{OPENLINKER_API_BASE}} \
 OPENLINKER_AGENT_NODE_TRANSPORT=auto \
 OPENLINKER_AGENT_NODE_MTLS_CERT_FILE=/run/openlinker/node.crt \
 OPENLINKER_AGENT_NODE_MTLS_KEY_FILE=/run/openlinker/node.key \
@@ -309,23 +321,23 @@ OPENLINKER_AGENT_TOKEN=ol_agent_xxx \
 go run ./cmd/openlinker-agent-node
 ` + "```" + `
 
-WebSocket and Pull v2 both require a Core-issued mTLS device identity and an
+WebSocket and long polling both require a Core-issued mTLS device identity and an
 Agent Token with agent:pull. They are two transports inside the same agent_node
-connection mode, not separate marketplace modes. The hard Runtime v2 contract is:
+connection mode, not separate marketplace modes. The OpenLinker Runtime reliability contract is:
 1. Persist Session and accepted Attempt identity before acknowledging work.
 2. Do not execute until run.assignment_confirmed.
 3. Renew only the current fenced lease; a stale fence must stop execution.
 4. Persist each Event and Result before sending it, and delete it only after the matching ACK.
 5. Resume unfinished Attempts after reconnect or transport switching; never restart accepted work just because WebSocket dropped.
 6. Handle cancellation and draining as durable state transitions.
-7. Let Agent Node back off on empty Pull v2 responses and reconnects; do not run a second competing loop for the same worker.
+7. Let Agent Node back off on empty long polling responses and reconnects; do not run a second competing loop for the same worker.
 
 Worker pseudocode:
 
 ` + "```text" + `
-start or reattach durable Runtime v2 Session
+start or reattach durable Runtime Session
 try WebSocket first
-if WebSocket is unavailable, use Pull v2 with the same Session identity
+if WebSocket is unavailable, use long polling with the same Session identity
 resume unfinished Attempts from the local spool
 for each confirmed assignment:
   execute once under the current fencing token
@@ -335,7 +347,7 @@ for each confirmed assignment:
 
 Keep the worker process alive under a supervisor such as docker compose restart: always,
 systemd, launchd or pm2. Registration alone is not online; a live current-contract
-Runtime v2 Session is the availability source of truth.
+Runtime Session is the availability source of truth.
 
 ## Skill and MCP references
 
@@ -348,7 +360,7 @@ Runtime v2 Session is the availability source of truth.
 - OPENLINKER_USER_TOKEN holds a User Token with the ol_user_*** prefix for MCP,
   REST API, external scripts and user-side Agent calls.
 - OPENLINKER_AGENT_TOKEN holds an Agent Token with the ol_agent_*** prefix for
-  Agent self-registration, Runtime v2 WebSocket/Pull and A2A delegation. Runtime
+  Agent self-registration, Runtime WebSocket/long-poll transport and A2A delegation. Runtime
   transport also requires the Core-issued Node certificate and private key.
 - Human login session: browser only; do not give it to an Agent.
 

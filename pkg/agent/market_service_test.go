@@ -78,7 +78,7 @@ func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *test
 		Runtime: agent.AgentCardRuntimeExt{
 			Adapter:        "openlinker_a2a_proxy",
 			ConnectionMode: "agent_node",
-			OnlineSignal:   "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool",
+			OnlineSignal:   "runtime_ws_primary_long_poll_fallback_mtls_ack_lease_resume_fence_spool",
 			TaskLifecycle:  "openlinker_run_task_lifecycle",
 		},
 	}
@@ -95,7 +95,7 @@ func TestAgentCardOpenLinkerExtSerializesReadinessAvailabilityAndRuntime(t *test
 	runtimeContract := decoded["runtime"].(map[string]any)
 	assert.Equal(t, "openlinker_a2a_proxy", runtimeContract["adapter"])
 	assert.Equal(t, "agent_node", runtimeContract["connection_mode"])
-	assert.Equal(t, "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool", runtimeContract["online_signal"])
+	assert.Equal(t, "runtime_ws_primary_long_poll_fallback_mtls_ack_lease_resume_fence_spool", runtimeContract["online_signal"])
 	assert.Equal(t, "openlinker_run_task_lifecycle", runtimeContract["task_lifecycle"])
 }
 
@@ -260,7 +260,7 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 	require.NoError(t, err)
 	require.Len(t, resp.Items, 1)
 	assert.Equal(t, "unreachable", resp.Items[0].Availability.Status)
-	assert.Contains(t, resp.Items[0].Availability.Hint, "Runtime v2 Session")
+	assert.Contains(t, resp.Items[0].Availability.Hint, "当前没有可用连接")
 	assert.False(t, resp.Items[0].Readiness.Callable)
 
 	createApprovedAgent(t, pool, creatorID, "runtime-direct-fallback")
@@ -281,7 +281,7 @@ func TestListMarket_RuntimePullWithoutRecentWorkerShownUnreachable(t *testing.T)
 
 	detail, err := svc.GetBySlug(ctx, "runtime-offline")
 	require.NoError(t, err)
-	assert.Equal(t, "unreachable", detail.Availability.Status, "token use is not Runtime v2 presence")
+	assert.Equal(t, "unreachable", detail.Availability.Status, "token use is not Runtime Session presence")
 	assert.False(t, detail.Readiness.Callable)
 
 	_, err = pool.Exec(ctx, `
@@ -292,7 +292,7 @@ WHERE agent_id = $1`, agentID)
 	insertMarketRuntimeV2Session(t, pool, agentID)
 	detail, err = svc.GetBySlug(ctx, "runtime-offline")
 	require.NoError(t, err)
-	assert.Equal(t, "healthy", detail.Availability.Status, "active Runtime v2 Session is the Agent Node availability truth")
+	assert.Equal(t, "healthy", detail.Availability.Status, "active Runtime Session is the Agent Node availability truth")
 	assert.True(t, detail.Readiness.Callable)
 
 	callable, err := svc.ListMarket(ctx, nil, "runtime-offline", 1, 12, true)

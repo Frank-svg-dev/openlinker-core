@@ -824,7 +824,7 @@ func (s *Service) createRunningRun(
 		available, checkErr := s.queries.HasActiveRuntimeV2SessionForAgent(ctx, agent.ID)
 		if checkErr != nil {
 			log.Error().Err(checkErr).Str("agent_id", agent.ID.String()).Msg("runtime.Run: HasActiveRuntimeV2SessionForAgent")
-			return nil, nil, httpx.Internal("检查 Agent Runtime v2 Session 状态失败")
+			return nil, nil, httpx.Internal("检查 Agent Node 连接状态失败")
 		}
 		if !available && !opts.allowOfflineQueuedRuntime {
 			return nil, nil, httpx.Conflict("Agent runtime 当前离线，请稍后再试")
@@ -1384,7 +1384,7 @@ func (s *Service) callAgent(
 	case connectionModeMCPServer:
 		return s.callMCPServer(ctx, agent, runID, userID, req, delegation)
 	case connectionModeAgentNode:
-		return nil, nil, nil, errors.New("agent_node run must be assigned through Runtime v2")
+		return nil, nil, nil, errors.New("agent_node run must be assigned through OpenLinker Runtime")
 	default:
 		return nil, nil, &AgentError{Code: "UNSUPPORTED_CONNECTION_MODE", Message: "Agent connection_mode 不支持"}, nil
 	}
@@ -2768,7 +2768,7 @@ func queuedRuntimeWaitingNextAction(runID string, agentID uuid.UUID) *RunNextAct
 	return &RunNextAction{
 		Type:          "start_runtime_worker",
 		Label:         "启动 Agent runtime",
-		Hint:          "运行已进入 Agent Runtime 队列，但当前没有在线 Node。请启动 Agent Node；它会优先连接 Runtime v2 WebSocket，网络受限时自动切换到 Pull v2，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
+		Hint:          "运行已进入 Runtime 队列，但当前没有在线 Node。请启动 Agent Node；它会从 OpenLinker 地址自动发现连接入口，优先使用 WebSocket，网络受限时切换到长轮询，并沿用同一 Session、lease、ACK、resume 与本地 spool。",
 		Href:          "/hub/agents/" + agentID.String() + "/onboarding",
 		ResourceType:  "run",
 		ResourceID:    runID,
@@ -2812,7 +2812,7 @@ func nextActionForFailure(status, code, message string) *RunNextAction {
 	hint := "运行失败。请检查输入、Agent endpoint 或认证配置，然后重新运行。"
 	if status == "timeout" {
 		label = "检查超时并重试"
-		hint = "Agent 没有在超时时间内返回。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的 runtime v2 队列执行。"
+		hint = "Agent 没有在超时时间内返回。请检查 endpoint 响应时间和网络连通性；长任务请使用 Agent Node 的可靠运行队列。"
 	}
 	props := map[string]interface{}{}
 	if code != "" {

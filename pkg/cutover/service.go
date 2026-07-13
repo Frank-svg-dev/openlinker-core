@@ -287,7 +287,7 @@ func legacyBlockers(evidence LegacyEvidence) []Blocker {
 func (s *Service) evaluateRuntimeReadiness(report Report, reopening bool) Readiness {
 	var blockers []Blocker
 	if !report.SchemaInstalled || report.Control == nil {
-		return readiness([]Blocker{blocker(BlockerClusterSchemaUnavailable, "cluster", "runtime v2 schema is not installed")})
+		return readiness([]Blocker{blocker(BlockerClusterSchemaUnavailable, "cluster", "Runtime schema is not installed")})
 	}
 	if !validIdentity(s.identity) {
 		blockers = append(blockers, blocker(BlockerReleaseIdentityMissing, "release", "release identity is incomplete"))

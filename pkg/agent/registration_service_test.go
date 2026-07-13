@@ -86,7 +86,7 @@ func TestRegistrationService_RegisterAgentViaToken_HappyPath(t *testing.T) {
 	require.Equal(t, "active_runtime", status)
 	require.Equal(t, uuid.MustParse(resp.Agent.ID), agentID)
 	require.True(t, redeemed)
-	require.Nil(t, lastUsedAt, "registration redeems Agent Token but must not mark runtime activity before a Runtime v2 Session")
+	require.Nil(t, lastUsedAt, "registration redeems Agent Token but must not mark runtime activity before a Runtime Session")
 	require.True(t, strings.HasPrefix(tokenHash, credential.FastTokenHashPrefix))
 	require.True(t, credential.VerifyFastTokenHash(tokenHash, minted.PlaintextToken))
 }

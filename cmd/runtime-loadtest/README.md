@@ -42,7 +42,7 @@ the Node certificate.
 ```bash
 export OPENLINKER_NODE_ID='00000000-0000-4000-8000-000000000001'
 export OPENLINKER_API_ROOT='http://127.0.0.1:8080/api/v1'
-export OPENLINKER_CORE_V2_URL='https://127.0.0.1:8443'
+export OPENLINKER_RUNTIME_URL='https://127.0.0.1:8443'
 export OPENLINKER_AGENT_NODE_MTLS_CERT_FILE="$PWD/node-pki/loadtest.crt"
 export OPENLINKER_AGENT_NODE_MTLS_KEY_FILE="$PWD/node-pki/loadtest.key"
 export OPENLINKER_AGENT_NODE_MTLS_CA_FILE="$PWD/node-pki/runtime-server-ca.crt"

@@ -476,7 +476,7 @@ func agentCardRuntimeExt(connectionMode string) AgentCardRuntimeExt {
 	onlineSignal := "direct_endpoint_probe_and_run_result"
 	switch connectionMode {
 	case ConnectionModeAgentNode:
-		onlineSignal = "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"
+		onlineSignal = "runtime_ws_primary_long_poll_fallback_mtls_ack_lease_resume_fence_spool"
 	case "mcp_server":
 		onlineSignal = "mcp_tool_call_and_run_result"
 	}
@@ -581,13 +581,13 @@ func availabilityForRuntimeSession(availability Availability, active bool) Avail
 	if active {
 		availability.Status = "healthy"
 		availability.Label = "可用"
-		availability.Hint = "Agent Node 的 Runtime v2 Session 当前在线，可以接收运行。Node 默认使用 WebSocket，必要时会自动切到 Pull v2。"
+		availability.Hint = "Agent Node 当前在线，可以接收运行。Node 默认使用 WebSocket，网络受限时会自动切换到长轮询。"
 		availability.ConsecutiveFailures = 0
 		return availability
 	}
 	availability.Status = "unreachable"
 	availability.Label = "不可达"
-	availability.Hint = "Agent Node 当前没有可用的 Runtime v2 Session，暂时无法接收运行。Node 默认使用 WebSocket，必要时会自动切到 Pull v2。"
+	availability.Hint = "Agent Node 当前没有可用连接，暂时无法接收运行。启动 Node 后会优先使用 WebSocket，网络受限时自动切换到长轮询。"
 	return availability
 }
 

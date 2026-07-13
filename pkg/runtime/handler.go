@@ -253,8 +253,10 @@ func (h *Handler) RevokeRuntimeNode(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
-// RegisterAgentRuntime mounts only the runtime v2 transport. Pre-v2 paths are
-// deliberately absent so they resolve as ordinary 404 responses.
+// RegisterAgentRuntime mounts the canonical Agent Runtime transport. The
+// public API listener blocks this entire route family; only the dedicated mTLS
+// listener dispatches it. Version compatibility is negotiated in the runtime
+// handshake instead of being exposed in the URL.
 func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 	h.runtimeV2.Register(api)
 }

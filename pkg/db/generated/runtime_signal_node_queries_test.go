@@ -34,7 +34,7 @@ func TestHasActiveRuntimeV2SessionForAgentUsesDurableCurrentTruth(t *testing.T) 
 		"t.scopes @> ARRAY['agent:pull']::text[]",
 		"t.expires_at > clock_timestamp()",
 		"contract.is_current",
-		"runtime_contract_digest = '857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f'",
+		"runtime_contract_digest = '052ed16553eeb896bc7a88dabd1ada77466a4db0c87b55c997c6b91ab72a72de'",
 		"'persistent_spool'",
 		"attachment.detached_at IS NULL",
 	} {

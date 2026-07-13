@@ -1,20 +1,26 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
+	"github.com/labstack/echo/v4"
 )
 
-const runtimeV2PathPrefix = "/api/v1/agent-runtime/v2/"
+const (
+	runtimePathPrefix       = "/api/v1/agent-runtime/"
+	runtimeLegacyPathPrefix = "/api/v1/agent-runtime/v2/"
+)
+
+type runtimeListenerContextKey struct{}
 
 func startRuntimeMTLSListener(cfg *config.Config, application http.Handler) (*http.Server, net.Listener, error) {
 	if cfg == nil || !cfg.RuntimeMTLSEnabled {
@@ -29,7 +35,7 @@ func startRuntimeMTLSListener(cfg *config.Config, application http.Handler) (*ht
 		return nil, nil, fmt.Errorf("listen runtime mTLS: %w", err)
 	}
 	server := newHTTPServer(cfg.RuntimeMTLSPort)
-	server.Handler = runtimeV2OnlyHandler(application)
+	server.Handler = runtimeOnlyHandler(application)
 	return server, tls.NewListener(listener, tlsConfig), nil
 }
 
@@ -81,9 +87,7 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 			return fmt.Errorf("%s is required when RUNTIME_MTLS_ENABLED=true", name)
 		}
 	}
-	publicURL, err := url.Parse(strings.TrimSpace(cfg.RuntimeMTLSAPIURL))
-	if err != nil || publicURL.Scheme != "https" || publicURL.Host == "" || publicURL.User != nil ||
-		(publicURL.Path != "" && publicURL.Path != "/") || publicURL.RawQuery != "" || publicURL.Fragment != "" {
+	if _, err := config.NormalizeRuntimePublicOrigin(cfg.RuntimeMTLSAPIURL); err != nil {
 		return fmt.Errorf("RUNTIME_MTLS_API_URL must be an HTTPS origin without credentials, path, query, or fragment")
 	}
 	if _, err := runtime.NewRuntimeInvocationSignerWithPrevious(
@@ -97,12 +101,32 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 	return nil
 }
 
-func runtimeV2OnlyHandler(application http.Handler) http.Handler {
+func runtimeOnlyHandler(application http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if application == nil || !strings.HasPrefix(r.URL.Path, runtimeV2PathPrefix) {
+		if application == nil ||
+			!strings.HasPrefix(r.URL.Path, runtimePathPrefix) ||
+			strings.HasPrefix(r.URL.Path, runtimeLegacyPathPrefix) {
 			http.NotFound(w, r)
 			return
 		}
-		application.ServeHTTP(w, r)
+		ctx := context.WithValue(r.Context(), runtimeListenerContextKey{}, true)
+		application.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// runtimeListenerIsolation rejects Runtime traffic on the ordinary API
+// listener. The marker is written directly into request context by the
+// dedicated mTLS listener after TLS client-certificate verification, so it
+// cannot be supplied by an external header.
+func runtimeListenerIsolation(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		path := c.Request().URL.Path
+		isRuntimePath := strings.HasPrefix(path, runtimePathPrefix) ||
+			strings.HasPrefix(path, runtimeLegacyPathPrefix)
+		fromRuntimeListener, _ := c.Request().Context().Value(runtimeListenerContextKey{}).(bool)
+		if isRuntimePath && !fromRuntimeListener {
+			return echo.ErrNotFound
+		}
+		return next(c)
+	}
 }

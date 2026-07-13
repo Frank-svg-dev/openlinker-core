@@ -58,9 +58,9 @@ func (s *Service) GetRuntimeWorkbench(
 	runtimeState := RuntimeWorkbenchRuntime{
 		RuntimeContractID:     snapshot.runtimeContractID,
 		RuntimeContractDigest: snapshot.runtimeContractDigest,
-		TransportPolicy:       "ws_primary_pull_v2_fallback",
+		TransportPolicy:       "ws_primary_long_poll_fallback",
 		PrimaryTransport:      "websocket",
-		FallbackTransport:     "pull_v2",
+		FallbackTransport:     "long_poll",
 		ConnectionStatus:      connectionStatus,
 		ActiveNodeCount:       snapshot.activeNodeCount,
 		ActiveSessionCount:    snapshot.activeSessionCount,
@@ -303,7 +303,7 @@ func runtimeWorkbenchDiagnosticsV2(
 			Code:            "runtime_not_applicable",
 			Severity:        "info",
 			Summary:         "这个 Agent 不通过 Agent Node 运行，请在接入设置里检查它自己的 Endpoint 或 MCP 服务。",
-			TechnicalDetail: "connection_mode=" + agent.ConnectionMode + "; Runtime v2 Node/Session inventory is not applicable.",
+			TechnicalDetail: "connection_mode=" + agent.ConnectionMode + "; Agent Node Session inventory is not applicable.",
 			NextAction:      "check_endpoint",
 		}}
 	}
@@ -314,7 +314,7 @@ func runtimeWorkbenchDiagnosticsV2(
 			Code:            "agent_disabled",
 			Severity:        "warning",
 			Summary:         "这个 Agent 已停用，不会接收新的运行。",
-			TechnicalDetail: "Agent lifecycle_status is not active; Runtime v2 dispatch is blocked.",
+			TechnicalDetail: "Agent lifecycle_status is not active; Runtime dispatch is blocked.",
 			NextAction:      "enable_agent",
 		})
 	}
@@ -322,8 +322,8 @@ func runtimeWorkbenchDiagnosticsV2(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:            "runtime_session_offline",
 			Severity:        "warning",
-			Summary:         "Agent Node 还没连上。启动 Node 后会优先使用 WebSocket；网络不合适时会自动切到 Pull v2。",
-			TechnicalDetail: "No live current-contract Runtime v2 Session in the 15-second database-clock window; transport_policy=ws_primary_pull_v2_fallback.",
+			Summary:         "Agent Node 还没连上。启动 Node 后会优先使用 WebSocket；网络不合适时会自动切到长轮询。",
+			TechnicalDetail: "No live current-contract Runtime Session in the 15-second database-clock window; transport_policy=ws_primary_long_poll_fallback.",
 			NextAction:      "start_agent_node",
 		})
 	} else if snapshot.readySessionCount == 0 {
@@ -331,7 +331,7 @@ func runtimeWorkbenchDiagnosticsV2(
 			Code:            "runtime_sessions_draining",
 			Severity:        "warning",
 			Summary:         "现有 Node 正在排空，会完成手上的运行，但不会再接新运行。",
-			TechnicalDetail: "All live Runtime v2 Sessions or their Nodes are draining; new assignment offers are disabled.",
+			TechnicalDetail: "All live Runtime Sessions or their Nodes are draining; new assignment offers are disabled.",
 			NextAction:      "restore_runtime_capacity",
 		})
 	}
@@ -341,7 +341,7 @@ func runtimeWorkbenchDiagnosticsV2(
 			Code:            "runtime_backlog_without_capacity",
 			Severity:        "error",
 			Summary:         "有运行在等可用的 Agent Node。先恢复 Node，再处理积压。",
-			TechnicalDetail: "pending+retry_wait backlog exists while ready_session_count=0; no claim semantics are involved in Runtime v2.",
+			TechnicalDetail: "pending+retry_wait backlog exists while ready_session_count=0; transport switching does not change assignment semantics.",
 			NextAction:      "restore_runtime_capacity",
 		})
 	}
@@ -355,7 +355,7 @@ func runtimeWorkbenchDiagnosticsV2(
 				Code:            "recent_dispatch_timeout",
 				Severity:        "error",
 				Summary:         "最近有运行没能及时交给 Agent Node。请检查连接和可用容量。",
-				TechnicalDetail: "Latest Run reached RUNTIME_DISPATCH_TIMEOUT before a confirmed Runtime v2 assignment.",
+				TechnicalDetail: "Latest Run reached RUNTIME_DISPATCH_TIMEOUT before a confirmed Runtime assignment.",
 				NextAction:      "inspect_runtime_capacity",
 			})
 		case "RUNTIME_RETRY_EXHAUSTED":
@@ -363,7 +363,7 @@ func runtimeWorkbenchDiagnosticsV2(
 				Code:            "recent_retry_exhausted",
 				Severity:        "error",
 				Summary:         "最近有运行重试后仍未完成，已经进入死信。",
-				TechnicalDetail: "Latest Run exhausted its fenced Runtime v2 attempt budget and entered dispatch_state=dead_letter.",
+				TechnicalDetail: "Latest Run exhausted its fenced Runtime attempt budget and entered dispatch_state=dead_letter.",
 				NextAction:      "inspect_dead_letter",
 			})
 		}
@@ -373,8 +373,8 @@ func runtimeWorkbenchDiagnosticsV2(
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
 			Code:            "runtime_ready",
 			Severity:        "success",
-			Summary:         "Agent Node 已连接，可以接收运行。默认走 WebSocket，必要时由 Pull v2 接续。",
-			TechnicalDetail: "A current-contract Runtime v2 Session is ready; both transports share mTLS, assignment ACK, lease fencing, resume, Event/Result ACK, and persistent spool semantics.",
+			Summary:         "Agent Node 已连接，可以接收运行。默认使用 WebSocket，网络受限时由长轮询接续。",
+			TechnicalDetail: "A current-contract Runtime Session is ready; both transports share mTLS, assignment ACK, lease fencing, resume, Event/Result ACK, and persistent spool semantics.",
 			NextAction:      "none",
 		})
 	}

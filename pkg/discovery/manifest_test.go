@@ -14,13 +14,20 @@ import (
 
 func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
 	manifest := NewManifest(&config.Config{
-		Env:         "test",
-		APIURL:      "https://api.openlinker.test/",
-		FrontendURL: "https://openlinker.test/",
+		Env:                "test",
+		APIURL:             "https://api.openlinker.test/",
+		FrontendURL:        "https://openlinker.test/",
+		RuntimeMTLSEnabled: true,
+		RuntimeMTLSAPIURL:  "https://runtime.openlinker.test:8443",
 	})
 
 	require.Equal(t, "OpenLinker", manifest.Name)
 	require.Equal(t, "v1", manifest.Version)
+	require.Equal(t, "https://runtime.openlinker.test:8443", manifest.BaseURLs.Runtime)
+	require.True(t, manifest.Runtime.Enabled)
+	require.True(t, manifest.Runtime.MTLSRequired)
+	require.Equal(t, []string{"websocket", "long_poll"}, manifest.Runtime.Transports)
+	require.Equal(t, "auto", manifest.Runtime.DefaultTransport)
 	require.Equal(t, "https://api.openlinker.test/skill/publish-agent", manifest.Docs.PublishAgent)
 	require.Equal(t, "https://api.openlinker.test/skill/consume-agent", manifest.Docs.ConsumeAgent)
 	require.Equal(t, "https://api.openlinker.test/api/v1/agents/{slug}/agent-card.json", manifest.Docs.AgentCard)
@@ -56,8 +63,68 @@ func TestNewManifestFallsBackToLocalPublicEntrypoints(t *testing.T) {
 
 	require.Equal(t, "http://localhost:8080", manifest.BaseURLs.API)
 	require.Equal(t, "http://localhost:3000", manifest.BaseURLs.Web)
+	require.Empty(t, manifest.BaseURLs.Runtime)
+	require.False(t, manifest.Runtime.Enabled)
+	require.True(t, manifest.Runtime.MTLSRequired)
+	require.Equal(t, []string{"websocket", "long_poll"}, manifest.Runtime.Transports)
+	require.Equal(t, "auto", manifest.Runtime.DefaultTransport)
 	require.Equal(t, "http://localhost:8080/api/v1/a2a/agents/{slug}", manifest.Protocols.A2A)
 	require.Equal(t, "http://localhost:3000/connect", manifest.Docs.Connect)
+}
+
+func TestNewManifestRuntimeDiscoveryFailsClosed(t *testing.T) {
+	tests := []string{
+		"",
+		"http://runtime.openlinker.test:8443",
+		"https://user:secret@runtime.openlinker.test:8443",
+		"https://runtime.openlinker.test:8443/",
+		"https://runtime.openlinker.test:8443/api/v1/agent-runtime",
+		"https://runtime.openlinker.test:8443?token=secret",
+		"https://runtime.openlinker.test:8443?",
+		"https://runtime.openlinker.test:8443#runtime",
+		"https://runtime.openlinker.test:8443#",
+		"https://runtime.openlinker.test:",
+		"https://runtime.openlinker.test:0",
+		"https://runtime.openlinker.test:65536",
+	}
+	for _, runtimeURL := range tests {
+		t.Run(runtimeURL, func(t *testing.T) {
+			manifest := NewManifest(&config.Config{
+				APIURL:             "https://api.openlinker.test",
+				RuntimeMTLSEnabled: true,
+				RuntimeMTLSAPIURL:  runtimeURL,
+			})
+			require.False(t, manifest.Runtime.Enabled)
+			require.Empty(t, manifest.BaseURLs.Runtime)
+			require.NotEqual(t, manifest.BaseURLs.API, manifest.BaseURLs.Runtime)
+		})
+	}
+}
+
+func TestNewManifestPublishesNoRuntimeCredentialsOrEndpointPath(t *testing.T) {
+	manifest := NewManifest(&config.Config{
+		APIURL:                                 "https://api.openlinker.test",
+		FrontendURL:                            "https://openlinker.test",
+		RuntimeMTLSEnabled:                     true,
+		RuntimeMTLSAPIURL:                      "https://runtime.openlinker.test:8443",
+		RuntimeMTLSCertFile:                    "/internal/pki/server-secret.pem",
+		RuntimeMTLSKeyFile:                     "/internal/pki/server-key-secret.pem",
+		RuntimeMTLSClientCAFile:                "/internal/pki/client-ca-secret.pem",
+		RuntimeInvocationSigningSecret:         "never-publish-runtime-signing-secret",
+		RuntimeInvocationSigningKeyID:          "private-key-id",
+		RuntimeInvocationPreviousSigningSecret: "never-publish-previous-secret",
+	})
+
+	body, err := json.Marshal(manifest)
+	require.NoError(t, err)
+	serialized := string(body)
+	require.Contains(t, serialized, `"runtime":"https://runtime.openlinker.test:8443"`)
+	require.NotContains(t, serialized, "server-secret")
+	require.NotContains(t, serialized, "server-key-secret")
+	require.NotContains(t, serialized, "client-ca-secret")
+	require.NotContains(t, serialized, "never-publish")
+	require.NotContains(t, serialized, "private-key-id")
+	require.NotContains(t, serialized, "/api/v1/agent-runtime")
 }
 
 func TestServeOpenLinkerManifest(t *testing.T) {
@@ -66,9 +133,11 @@ func TestServeOpenLinkerManifest(t *testing.T) {
 	rec := httptest.NewRecorder()
 
 	handler := ServeOpenLinkerManifest(&config.Config{
-		Env:         "production",
-		APIURL:      " https://api.openlinker.test/// ",
-		FrontendURL: " https://openlinker.test/// ",
+		Env:                "production",
+		APIURL:             " https://api.openlinker.test/// ",
+		FrontendURL:        " https://openlinker.test/// ",
+		RuntimeMTLSEnabled: true,
+		RuntimeMTLSAPIURL:  "https://runtime.openlinker.test:8443",
 	})
 
 	require.NoError(t, handler(e.NewContext(req, rec)))
@@ -80,5 +149,7 @@ func TestServeOpenLinkerManifest(t *testing.T) {
 	require.Equal(t, "production", manifest.Environment)
 	require.Equal(t, "https://api.openlinker.test", manifest.BaseURLs.API)
 	require.Equal(t, "https://openlinker.test", manifest.BaseURLs.Web)
+	require.Equal(t, "https://runtime.openlinker.test:8443", manifest.BaseURLs.Runtime)
+	require.True(t, manifest.Runtime.Enabled)
 	require.Equal(t, "https://api.openlinker.test/api/v1/mcp", manifest.Protocols.MCP)
 }

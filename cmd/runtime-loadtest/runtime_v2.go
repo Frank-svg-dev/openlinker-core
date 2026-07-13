@@ -459,7 +459,7 @@ func runtimeACKOperation(path string) string {
 func newRuntimeV2Endpoint(cfg config, origin, token string, metrics *runtimeV2Metrics) (*runtimeV2Endpoint, error) {
 	parsed, err := url.Parse(strings.TrimSpace(origin))
 	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
-		return nil, errors.New("Runtime v2 URL must be an absolute https URL")
+		return nil, errors.New("Runtime URL must be an absolute https URL")
 	}
 	certificate, err := tls.LoadX509KeyPair(cfg.MTLSCertFile, cfg.MTLSKeyFile)
 	if err != nil {

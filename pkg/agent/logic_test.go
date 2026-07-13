@@ -431,11 +431,11 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 	}
 	activeRuntime := availabilityForRuntimeSession(unreachableAvailability, true)
 	if activeRuntime.Status != "healthy" || activeRuntime.Label != "可用" || activeRuntime.ConsecutiveFailures != 0 {
-		t.Fatalf("active Runtime v2 Session did not override stale availability: %#v", activeRuntime)
+		t.Fatalf("active Runtime Session did not override stale availability: %#v", activeRuntime)
 	}
 	inactiveRuntime := availabilityForRuntimeSession(availabilityResponse("healthy", &runAt, nil, &runAt, 0), false)
 	if inactiveRuntime.Status != "unreachable" || inactiveRuntime.Label != "不可达" {
-		t.Fatalf("inactive Runtime v2 Session remained callable: %#v", inactiveRuntime)
+		t.Fatalf("inactive Runtime Session remained callable: %#v", inactiveRuntime)
 	}
 	if !isQueuedRuntimeConnectionMode(ConnectionModeAgentNode) || isQueuedRuntimeConnectionMode(ConnectionModeDirectHTTP) {
 		t.Fatalf("queued runtime connection mode detection failed")
@@ -446,7 +446,7 @@ func TestReadinessRuntimeRepairHintsAndAgentCardSigning(t *testing.T) {
 		wantSignal string
 	}{
 		{mode: ConnectionModeDirectHTTP, wantSignal: "direct_endpoint_probe_and_run_result"},
-		{mode: ConnectionModeAgentNode, wantSignal: "runtime_v2_ws_primary_pull_fallback_mtls_ack_lease_resume_fence_spool"},
+		{mode: ConnectionModeAgentNode, wantSignal: "runtime_ws_primary_long_poll_fallback_mtls_ack_lease_resume_fence_spool"},
 		{mode: ConnectionModeMCPServer, wantSignal: "mcp_tool_call_and_run_result"},
 	} {
 		if got := agentCardRuntimeExt(tc.mode); got.Adapter != "openlinker_a2a_proxy" || got.ConnectionMode != tc.mode || got.OnlineSignal != tc.wantSignal {

@@ -848,8 +848,8 @@ func parseFlags() config {
 	var scenarios string
 	var dropACKResponses string
 	flag.StringVar(&cfg.APIRoot, "api", envDefault("OPENLINKER_API_ROOT", "http://127.0.0.1:8080/api/v1"), "OpenLinker Core user/API root")
-	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_CORE_V2_URL"), "required dedicated Runtime v2 mTLS origin (https)")
-	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_CORE_V2_URL_SECONDARY"), "second Runtime v2 mTLS origin for Core A→B resume")
+	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_RUNTIME_URL"), "required dedicated Runtime mTLS origin (https)")
+	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_RUNTIME_URL_SECONDARY"), "second Runtime mTLS origin for Core A→B resume")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
 	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime v2 transport: ws, pull, or auto")
 	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime v2 scenarios; see cmd/runtime-loadtest/README.md")

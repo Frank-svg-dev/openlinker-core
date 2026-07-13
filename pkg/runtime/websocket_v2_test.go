@@ -647,7 +647,7 @@ func (f *runtimeV2WSTestFixture) server(t *testing.T) (*httptest.Server, string)
 	e := echo.New()
 	f.controller().Register(e.Group("/api/v1"))
 	server := httptest.NewServer(e)
-	target := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/agent-runtime/v2/ws"
+	target := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/agent-runtime/ws"
 	return server, target
 }
 

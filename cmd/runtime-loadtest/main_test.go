@@ -24,7 +24,7 @@ func TestAPIClientDoWithHeadersSkipsContextCancellationMetric(t *testing.T) {
 	ctx, cancel := context.WithCancel(withMetrics(context.Background(), m))
 	cancel()
 
-	if _, _, err := api.doWithHeaders(ctx, "runtime-v2-claim", http.MethodPost, "/agent-runtime/v2/runs/claim", nil, "", nil); err == nil {
+	if _, _, err := api.doWithHeaders(ctx, "runtime-v2-claim", http.MethodPost, "/agent-runtime/runs/claim", nil, "", nil); err == nil {
 		t.Fatal("expected context cancellation error")
 	}
 	if got := len(m.httpOps); got != 0 {

@@ -2422,9 +2422,9 @@ func (f *controlA2AService) GetRuntimeWorkbench(_ context.Context, userID, agent
 			ConnectionMode: "agent_node",
 		},
 		Runtime: RuntimeWorkbenchRuntime{
-			TransportPolicy:   "ws_primary_pull_v2_fallback",
+			TransportPolicy:   "ws_primary_long_poll_fallback",
 			PrimaryTransport:  "websocket",
-			FallbackTransport: "pull_v2",
+			FallbackTransport: "long_poll",
 			ConnectionStatus:  "online",
 			PendingRunCount:   2,
 		},

@@ -73,7 +73,7 @@ type Config struct {
 	// Runtime parameters.
 	RunTimeoutSeconds       int  `envconfig:"RUN_TIMEOUT_SECONDS" default:"60"`
 	AllowLocalHTTPEndpoints bool `envconfig:"ALLOW_LOCAL_HTTP_ENDPOINTS" default:"false"`
-	// Runtime v2 device traffic terminates mTLS directly in Core. It is a
+	// Agent Runtime device traffic terminates mTLS directly in Core. It is a
 	// separate listener so a reverse proxy cannot replace verified peer
 	// certificates with spoofable headers.
 	RuntimeMTLSEnabled      bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`

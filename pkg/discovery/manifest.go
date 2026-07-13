@@ -18,6 +18,7 @@ type OpenLinkerManifest struct {
 	Version     string                 `json:"version"`
 	Environment string                 `json:"environment,omitempty"`
 	BaseURLs    ManifestBaseURLs       `json:"base_urls"`
+	Runtime     ManifestRuntime        `json:"runtime"`
 	Docs        ManifestDocs           `json:"docs"`
 	Tools       ManifestTools          `json:"tools"`
 	Protocols   ManifestProtocols      `json:"protocols"`
@@ -29,8 +30,16 @@ type OpenLinkerManifest struct {
 }
 
 type ManifestBaseURLs struct {
-	API string `json:"api"`
-	Web string `json:"web"`
+	API     string `json:"api"`
+	Web     string `json:"web"`
+	Runtime string `json:"runtime,omitempty"`
+}
+
+type ManifestRuntime struct {
+	Enabled          bool     `json:"enabled"`
+	MTLSRequired     bool     `json:"mtls_required"`
+	Transports       []string `json:"transports"`
+	DefaultTransport string   `json:"default_transport"`
 }
 
 type ManifestDocs struct {
@@ -82,8 +91,12 @@ type ManifestStates struct {
 }
 
 // NewManifest builds the public discovery manifest. It intentionally contains
-// no per-user secrets, no private endpoint URLs, and no deployment internals.
+// only explicitly configured, validated public origins; it contains no
+// per-user secrets, credentials, certificate paths, or internal topology.
 func NewManifest(cfg *config.Config) OpenLinkerManifest {
+	if cfg == nil {
+		cfg = &config.Config{}
+	}
 	apiBase := trimTrailingSlash(cfg.APIURL)
 	webBase := trimTrailingSlash(cfg.FrontendURL)
 	if apiBase == "" {
@@ -92,14 +105,16 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 	if webBase == "" {
 		webBase = "http://localhost:3000"
 	}
+	runtimeOrigin, runtimeEnabled := manifestRuntimeOrigin(cfg)
 
 	return OpenLinkerManifest{
 		Name:        "OpenLinker",
 		Version:     manifestVersion,
 		Environment: cfg.Env,
 		BaseURLs: ManifestBaseURLs{
-			API: apiBase,
-			Web: webBase,
+			API:     apiBase,
+			Web:     webBase,
+			Runtime: runtimeOrigin,
 		},
 		Docs: ManifestDocs{
 			PublishAgent: apiBase + "/skill/publish-agent",
@@ -160,7 +175,7 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			"agent-tokens:read":   "read non-secret metadata for owned Agent Tokens",
 			"agent-tokens:issue":  "issue or rotate credentials for owned Agents",
 			"agent-tokens:revoke": "revoke credentials for owned Agents",
-			"agent:pull":          "Agent Nodes can run Runtime v2 with WebSocket primary and Pull v2 fallback under the same mTLS, ACK, lease, resume, fence, and persistent-spool contract",
+			"agent:pull":          "Agent Nodes use WebSocket first and automatically fall back to long polling under the same mTLS, ACK, lease, resume, fence, and persistent-spool contract",
 			"agent:call":          "an agent currently handling a run can delegate to another agent",
 			"register:agent":      "one-time or short-lived creator invitation for agent self-registration",
 		},
@@ -184,6 +199,12 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			ProductionA2A: "platform_parent_child_runs",
 			Builder:       "dag_async_agent_workflow_api",
 		},
+		Runtime: ManifestRuntime{
+			Enabled:          runtimeEnabled,
+			MTLSRequired:     true,
+			Transports:       []string{"websocket", "long_poll"},
+			DefaultTransport: "auto",
+		},
 	}
 }
 
@@ -197,4 +218,18 @@ func ServeOpenLinkerManifest(cfg *config.Config) echo.HandlerFunc {
 
 func trimTrailingSlash(value string) string {
 	return strings.TrimRight(strings.TrimSpace(value), "/")
+}
+
+// manifestRuntimeOrigin publishes only a validated public origin. Runtime is
+// deliberately fail-closed: a disabled or malformed configuration never
+// falls back to the ordinary API origin.
+func manifestRuntimeOrigin(cfg *config.Config) (string, bool) {
+	if cfg == nil || !cfg.RuntimeMTLSEnabled {
+		return "", false
+	}
+	origin, err := config.NormalizeRuntimePublicOrigin(cfg.RuntimeMTLSAPIURL)
+	if err != nil {
+		return "", false
+	}
+	return origin, true
 }

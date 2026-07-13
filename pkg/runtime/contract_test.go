@@ -87,7 +87,8 @@ func TestRuntimeV2ContractMatchesExportedConstants(t *testing.T) {
 func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	contract := decodeRuntimeContract(t)
 
-	require.Equal(t, "/api/v1/agent-runtime/v2/ws", contract.WebSocket.Path)
+	require.Equal(t, "/api/v1/agent-runtime/ws", contract.WebSocket.Path)
+	require.NotContains(t, contract.WebSocket.Path, "/agent-runtime/v2/")
 	require.Equal(t, "agent_principal_and_node_device", contract.WebSocket.Auth)
 	require.Equal(t, "#/$defs/RuntimeMessage", contract.WebSocket.EnvelopeSchema.Ref)
 	require.Equal(t, map[string]string{
@@ -130,7 +131,8 @@ func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	endpointKeys := make([]string, 0, len(contract.Endpoints))
 	for _, endpoint := range contract.Endpoints {
 		require.NotEmpty(t, endpoint.ClientMethod)
-		require.True(t, strings.HasPrefix(endpoint.Path, "/api/v1/agent-runtime/v2/"), endpoint.Path)
+		require.True(t, strings.HasPrefix(endpoint.Path, "/api/v1/agent-runtime/"), endpoint.Path)
+		require.NotContains(t, endpoint.Path, "/agent-runtime/v2/")
 		requireDefinitionRef(t, contract.Definitions, endpoint.SuccessResponseSchema.Ref)
 		requireDefinitionRef(t, contract.Definitions, endpoint.ErrorResponseSchema.Ref)
 		if endpoint.RequestBodySchema != nil {
@@ -140,17 +142,17 @@ func TestRuntimeV2ContractCoversWireProtocol(t *testing.T) {
 	}
 	requireUniqueStrings(t, "endpoint", endpointKeys)
 	require.ElementsMatch(t, []string{
-		"POST /api/v1/agent-runtime/v2/sessions",
-		"POST /api/v1/agent-runtime/v2/runs/claim",
-		"POST /api/v1/agent-runtime/v2/runs/{id}/assignment-ack",
-		"POST /api/v1/agent-runtime/v2/runs/{id}/assignment-reject",
-		"POST /api/v1/agent-runtime/v2/runs/{id}/lease-renew",
-		"POST /api/v1/agent-runtime/v2/runs/{id}/events",
-		"POST /api/v1/agent-runtime/v2/runs/{id}/result",
-		"POST /api/v1/agent-runtime/v2/runs/resume",
-		"POST /api/v1/agent-runtime/v2/runs/{id}/cancel-ack",
-		"GET /api/v1/agent-runtime/v2/commands",
-		"POST /api/v1/agent-runtime/v2/call-agent",
+		"POST /api/v1/agent-runtime/sessions",
+		"POST /api/v1/agent-runtime/runs/claim",
+		"POST /api/v1/agent-runtime/runs/{id}/assignment-ack",
+		"POST /api/v1/agent-runtime/runs/{id}/assignment-reject",
+		"POST /api/v1/agent-runtime/runs/{id}/lease-renew",
+		"POST /api/v1/agent-runtime/runs/{id}/events",
+		"POST /api/v1/agent-runtime/runs/{id}/result",
+		"POST /api/v1/agent-runtime/runs/resume",
+		"POST /api/v1/agent-runtime/runs/{id}/cancel-ack",
+		"GET /api/v1/agent-runtime/commands",
+		"POST /api/v1/agent-runtime/call-agent",
 	}, endpointKeys)
 }
 
@@ -216,7 +218,7 @@ func TestRuntimeV2ContractDefinesRecoveryAndCancellation(t *testing.T) {
 		Required bool   `json:"required"`
 	}
 	for _, endpoint := range contract.Endpoints {
-		if endpoint.Path != "/api/v1/agent-runtime/v2/commands" {
+		if endpoint.Path != "/api/v1/agent-runtime/commands" {
 			continue
 		}
 		raw, ok := endpoint.Query["runtime_session_id"]

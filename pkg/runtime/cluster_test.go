@@ -18,7 +18,7 @@ import (
 
 func TestRuntimeSchemaChecksumMatchesCurrentContractTuple(t *testing.T) {
 	sum := sha256.Sum256([]byte(
-		"67:" + RuntimeSchemaMigrationName + ":" + RuntimeContractID + ":" + RuntimeContractDigest,
+		"69:" + RuntimeSchemaMigrationName + ":" + RuntimeContractID + ":" + RuntimeContractDigest,
 	))
 	if got := hex.EncodeToString(sum[:]); got != RuntimeSchemaChecksum {
 		t.Fatalf("schema checksum = %s, want %s", RuntimeSchemaChecksum, got)
