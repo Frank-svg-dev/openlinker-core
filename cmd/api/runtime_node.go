@@ -45,7 +45,7 @@ const (
 	runtimeNodeClockSkew       = 5 * time.Minute
 	runtimeNodeCommandTimeout  = 30 * time.Second
 	runtimeNodeURIPrefix       = "urn:openlinker:runtime-node:"
-	runtimeNodeIssueUsage      = "usage: api runtime-node issue --ca-cert FILE --ca-key FILE --display-name NAME --cert-out FILE --key-out FILE [--node-id UUID] [--capacity N] [--valid-for DURATION]"
+	runtimeNodeIssueUsage      = "usage: api runtime-node issue --ca-cert FILE --ca-key FILE --display-name NAME --cert-out FILE --key-out FILE [--node-id UUID] [--node-version VERSION] [--capacity N] [--valid-for DURATION]"
 	runtimeNodeInspectUsage    = "usage: api runtime-node inspect --cert FILE [--key FILE] [--ca-cert FILE]"
 )
 
