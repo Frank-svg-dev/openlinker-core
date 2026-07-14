@@ -126,6 +126,67 @@ INSERT INTO agents (
 SQL
 }
 
+insert_migratable_run() {
+  psql_stdin --quiet <<'SQL'
+INSERT INTO runs (
+  id, user_id, agent_id, input, status, cost_cents,
+  platform_fee_cents, creator_revenue_cents, source,
+  idempotency_key_hash, idempotency_fingerprint,
+  connection_mode_snapshot, dispatch_deadline_at, run_deadline_at
+) VALUES (
+  '70000000-0000-4000-8000-000000000041',
+  '70000000-0000-4000-8000-000000000001',
+  '70000000-0000-4000-8000-000000000002',
+  '{"case":"migration-070-deferred-trigger"}', 'running', 0, 0, 0, 'api',
+  decode(repeat('33', 32), 'hex'), decode(repeat('44', 32), 'hex'),
+  'agent_node', clock_timestamp() + interval '2 minutes',
+  clock_timestamp() + interval '10 minutes'
+);
+
+BEGIN;
+INSERT INTO run_cancellations (
+  id, run_id, state, requested_by_type, requested_by_id, reason
+) VALUES (
+  '70000000-0000-4000-8000-000000000042',
+  '70000000-0000-4000-8000-000000000041',
+  'requested', 'user', '70000000-0000-4000-8000-000000000001',
+  'migration 070 deferred-trigger fixture'
+);
+INSERT INTO run_events (id, run_id, sequence, event_type, payload)
+VALUES (
+  '70000000-0000-4000-8000-000000000043',
+  '70000000-0000-4000-8000-000000000041',
+  1, 'run.canceled', '{"status":"canceled","terminal":true}'
+);
+INSERT INTO run_accounting_ledger (
+  run_id, terminal_event_id, agent_id, success_delta, revenue_delta_cents
+) VALUES (
+  '70000000-0000-4000-8000-000000000041',
+  '70000000-0000-4000-8000-000000000043',
+  '70000000-0000-4000-8000-000000000002', 0, 0
+);
+UPDATE runs
+SET status = 'canceled',
+    dispatch_state = 'terminal',
+    error_code = 'RUN_CANCEL_REQUESTED',
+    duration_ms = 1,
+    finished_at = clock_timestamp(),
+    terminal_event_id = '70000000-0000-4000-8000-000000000043',
+    cancel_request_id = '70000000-0000-4000-8000-000000000042',
+    cancel_state = 'requested',
+    cancel_requested_at = (
+      SELECT requested_at FROM run_cancellations
+      WHERE id = '70000000-0000-4000-8000-000000000042'
+    ),
+    cancel_reason = (
+      SELECT reason FROM run_cancellations
+      WHERE id = '70000000-0000-4000-8000-000000000042'
+    )
+WHERE id = '70000000-0000-4000-8000-000000000041';
+COMMIT;
+SQL
+}
+
 assert_boundary() {
   local want_schema="$1"
   local want_migration="$2"
@@ -151,6 +212,12 @@ BEGIN
     WHERE id = '70000000-0000-4000-8000-000000000002'
   ) <> '$want_endpoint' THEN
     RAISE EXCEPTION 'Agent Runtime boundary was not converted';
+  END IF;
+  IF (
+    SELECT connection_mode_snapshot FROM runs
+    WHERE id = '70000000-0000-4000-8000-000000000041'
+  ) <> '$want_mode' THEN
+    RAISE EXCEPTION 'Run Runtime boundary was not converted';
   END IF;
 END
 \$\$;
@@ -256,6 +323,7 @@ expect_apply_failure "migration 070 found an unknown connection or executor valu
 reset_database
 apply_through_069
 insert_agent
+insert_migratable_run
 
 echo "[070] apply SDK-first Runtime boundary"
 apply_070

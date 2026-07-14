@@ -143,6 +143,13 @@ BEGIN
 END
 $$;
 
+-- The set-based label rewrite queues deferred invariant checks on Runs and
+-- Attempts. Flush them after the trigger functions understand the new label
+-- and before altering either table; PostgreSQL rejects table DDL while those
+-- trigger events are still pending.
+SET CONSTRAINTS ALL IMMEDIATE;
+SET CONSTRAINTS ALL DEFERRED;
+
 ALTER TABLE agents
     ADD CONSTRAINT agents_connection_mode_valid
         CHECK (connection_mode IN ('direct_http', 'mcp_server', 'runtime')),
@@ -251,9 +258,6 @@ ALTER TABLE run_attempts
                 AND active_runtime_session_id IS NULL
             )
         );
-
-SET CONSTRAINTS ALL IMMEDIATE;
-SET CONSTRAINTS ALL DEFERRED;
 
 CREATE TRIGGER runs_v2_contract_identity
     BEFORE INSERT OR UPDATE OR DELETE ON runs
