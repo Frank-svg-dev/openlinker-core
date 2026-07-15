@@ -18,6 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/hostedcontract"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
@@ -359,9 +360,88 @@ func (s *Service) ValidateHostedExecutionTarget(ctx context.Context, sellerID, w
 		}
 		return nil, err
 	}
+	contractHash, err := s.hostedWorkflowContractHash(ctx, w, nodes)
+	if err != nil {
+		var he *httpx.HTTPError
+		if errors.As(err, &he) && he.Status < 500 {
+			result.UnavailableReason = "nodes_unavailable"
+			return result, nil
+		}
+		return nil, err
+	}
 	result.Executable = true
 	result.UnavailableReason = ""
+	result.ContractHash = contractHash
 	return result, nil
+}
+
+func (s *Service) hostedWorkflowContractHash(ctx context.Context, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
+	rawEdges := []map[string]interface{}{}
+	if len(w.Edges) > 0 {
+		if err := json.Unmarshal(w.Edges, &rawEdges); err != nil {
+			return "", httpx.BadRequest("workflow edges 不是合法 JSON")
+		}
+	}
+	nodeKeys := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		nodeKeys = append(nodeKeys, node.NodeKey)
+	}
+	edges, err := normalizeWorkflowEdges(nodeKeys, rawEdges)
+	if err != nil {
+		return "", err
+	}
+	agentHashes := map[uuid.UUID]string{}
+	contractNodes := make([]hostedcontract.WorkflowNode, 0, len(nodes))
+	for _, node := range nodes {
+		agentHash, ok := agentHashes[node.AgentID]
+		if !ok {
+			agentRow, err := s.queries.GetAgentByID(ctx, node.AgentID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return "", httpx.Conflict("workflow node Agent 当前不可用于 Hosted 执行")
+				}
+				return "", err
+			}
+			capability, err := s.queries.GetAgentCapabilityByAgentID(ctx, node.AgentID)
+			if err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return "", httpx.Conflict("workflow node Agent 缺少 capability")
+				}
+				return "", err
+			}
+			inputSchema := map[string]interface{}{}
+			outputSchema := map[string]interface{}{}
+			if json.Unmarshal(capability.InputSchema, &inputSchema) != nil || json.Unmarshal(capability.OutputSchema, &outputSchema) != nil {
+				return "", httpx.Conflict("workflow node Agent capability 无效")
+			}
+			mcpToolName := ""
+			if agentRow.MCPToolName != nil {
+				mcpToolName = *agentRow.MCPToolName
+			}
+			agentHash, err = hostedcontract.AgentHash(hostedcontract.Agent{
+				ID: node.AgentID.String(), ConnectionMode: agentRow.ConnectionMode,
+				EndpointURL: agentRow.EndpointURL, MCPToolName: mcpToolName,
+				CapabilityVersion: capability.Version, InputSchema: inputSchema, OutputSchema: outputSchema,
+			})
+			if err != nil {
+				return "", httpx.Conflict("workflow node Agent capability 无效")
+			}
+			agentHashes[node.AgentID] = agentHash
+		}
+		config := map[string]interface{}{}
+		if len(node.Config) > 0 && json.Unmarshal(node.Config, &config) != nil {
+			return "", httpx.BadRequest("workflow node config 不是合法 JSON")
+		}
+		contractNodes = append(contractNodes, hostedcontract.WorkflowNode{
+			ID: node.ID.String(), Key: node.NodeKey, Type: node.NodeType, AgentID: node.AgentID.String(),
+			Config: config, Position: node.Position, AgentContractHash: agentHash,
+		})
+	}
+	hash, err := hostedcontract.WorkflowHash(hostedcontract.Workflow{ID: w.ID.String(), Edges: edges, Nodes: contractNodes})
+	if err != nil {
+		return "", httpx.Conflict("workflow Hosted contract 无效")
+	}
+	return hash, nil
 }
 
 // StartHostedWorkflowRun keeps definition ownership and result ownership

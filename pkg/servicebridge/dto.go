@@ -24,16 +24,19 @@ type TargetValidationResponse struct {
 	TargetName        string `json:"target_name"`
 	Executable        bool   `json:"executable"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	ContractHash      string `json:"contract_hash,omitempty"`
 }
 
 type ExecutionRequest struct {
-	ExternalOrderID string                 `json:"external_order_id"`
-	BuyerUserID     string                 `json:"buyer_user_id"`
-	SellerUserID    string                 `json:"seller_user_id"`
-	TargetType      string                 `json:"target_type"`
-	TargetID        string                 `json:"target_id"`
-	Input           map[string]interface{} `json:"input"`
-	TraceID         string                 `json:"trace_id"`
+	ExternalOrderID      string                 `json:"external_order_id"`
+	BuyerUserID          string                 `json:"buyer_user_id"`
+	SellerUserID         string                 `json:"seller_user_id"`
+	TargetType           string                 `json:"target_type"`
+	TargetID             string                 `json:"target_id"`
+	Input                map[string]interface{} `json:"input"`
+	TraceID              string                 `json:"trace_id"`
+	ExpectedContractHash string                 `json:"expected_contract_hash"`
+	InputSchema          json.RawMessage        `json:"input_schema"`
 }
 
 type ExecutionStartResponse struct {

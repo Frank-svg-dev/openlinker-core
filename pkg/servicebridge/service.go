@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/hostedcontract"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
@@ -58,22 +61,10 @@ func (s *Service) ValidateTarget(ctx context.Context, req *TargetValidationReque
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.validateTarget(ctx, sellerID, targetType, targetID)
-	if err != nil || !resp.Executable || targetType != TargetTypeAgent || inputSchema == nil {
-		return resp, err
-	}
-	onboarding, err := s.agents.GetAgentOnboarding(ctx, targetID, sellerID)
-	if err != nil {
-		return nil, err
-	}
-	if onboarding.Capability == nil || !hostedInputSchemaCompatible(inputSchema, onboarding.Capability.InputSchema) {
-		resp.Executable = false
-		resp.UnavailableReason = "input_schema_incompatible"
-	}
-	return resp, nil
+	return s.validateTarget(ctx, sellerID, targetType, targetID, inputSchema)
 }
 
-func (s *Service) validateTarget(ctx context.Context, sellerID uuid.UUID, targetType string, targetID uuid.UUID) (*TargetValidationResponse, error) {
+func (s *Service) validateTarget(ctx context.Context, sellerID uuid.UUID, targetType string, targetID uuid.UUID, inputSchema map[string]interface{}) (*TargetValidationResponse, error) {
 	resp := &TargetValidationResponse{TargetType: targetType, TargetID: targetID.String()}
 	switch targetType {
 	case TargetTypeAgent:
@@ -99,7 +90,32 @@ func (s *Service) validateTarget(ctx context.Context, sellerID uuid.UUID, target
 			resp.UnavailableReason = "not_callable"
 			return resp, nil
 		}
+		onboarding, err := s.agents.GetAgentOnboarding(ctx, targetID, sellerID)
+		if err != nil {
+			return nil, err
+		}
+		if onboarding.Capability == nil || (inputSchema != nil && !hostedInputSchemaCompatible(inputSchema, onboarding.Capability.InputSchema)) {
+			resp.UnavailableReason = "input_schema_incompatible"
+			return resp, nil
+		}
+		connectionMode := strings.TrimSpace(target.ConnectionMode)
+		if connectionMode == "" {
+			connectionMode = "direct_http"
+		}
+		mcpToolName := ""
+		if target.MCPToolName != nil {
+			mcpToolName = *target.MCPToolName
+		}
+		contractHash, err := hostedcontract.AgentHash(hostedcontract.Agent{
+			ID: target.ID, ConnectionMode: connectionMode, EndpointURL: target.EndpointURL,
+			MCPToolName: mcpToolName, CapabilityVersion: onboarding.Capability.Version,
+			InputSchema: onboarding.Capability.InputSchema, OutputSchema: onboarding.Capability.OutputSchema,
+		})
+		if err != nil {
+			return nil, httpx.Internal("计算 Hosted Agent contract 失败")
+		}
 		resp.Executable = true
+		resp.ContractHash = contractHash
 		return resp, nil
 	case TargetTypeWorkflow:
 		target, err := s.workflows.ValidateHostedExecutionTarget(ctx, sellerID, targetID)
@@ -109,6 +125,10 @@ func (s *Service) validateTarget(ctx context.Context, sellerID uuid.UUID, target
 		resp.TargetName = target.TargetName
 		resp.Executable = target.Executable
 		resp.UnavailableReason = target.UnavailableReason
+		resp.ContractHash = target.ContractHash
+		if resp.Executable && !hostedcontract.Valid(resp.ContractHash) {
+			return nil, httpx.Internal("Workflow 返回了无效 Hosted contract")
+		}
 		return resp, nil
 	default:
 		return nil, httpx.BadRequest("target_type 必须是 agent 或 workflow")
@@ -121,13 +141,15 @@ func (s *Service) StartExecution(ctx context.Context, req *ExecutionRequest) (*E
 		return nil, err
 	}
 	record, err := s.store.Reserve(ctx, ExecutionRecord{
-		ExternalOrderID:  parsed.externalOrderID,
-		BuyerUserID:      parsed.buyerUserID,
-		SellerUserID:     parsed.sellerUserID,
-		TargetType:       parsed.targetType,
-		TargetID:         parsed.targetID,
-		InputFingerprint: fingerprint[:],
-		TraceID:          parsed.traceID,
+		ExternalOrderID:        parsed.externalOrderID,
+		BuyerUserID:            parsed.buyerUserID,
+		SellerUserID:           parsed.sellerUserID,
+		TargetType:             parsed.targetType,
+		TargetID:               parsed.targetID,
+		InputFingerprint:       fingerprint[:],
+		ExpectedContractHash:   &parsed.expectedContractHash,
+		InputSchemaFingerprint: parsed.inputSchemaFingerprint[:],
+		TraceID:                parsed.traceID,
 	})
 	if err != nil {
 		return nil, httpx.Internal("保存 Hosted 执行幂等记录失败")
@@ -143,12 +165,18 @@ func (s *Service) StartExecution(ctx context.Context, req *ExecutionRequest) (*E
 		return &ExecutionStartResponse{ExecutionID: record.ExecutionID.String(), Status: status.Status}, nil
 	}
 
-	validation, err := s.validateTarget(ctx, parsed.sellerUserID, parsed.targetType, parsed.targetID)
+	validation, err := s.validateTarget(ctx, parsed.sellerUserID, parsed.targetType, parsed.targetID, parsed.inputSchema)
 	if err != nil {
 		return nil, err
 	}
 	if !validation.Executable {
-		return nil, httpx.Conflict("该服务目标当前不可执行")
+		if validation.UnavailableReason == "input_schema_incompatible" {
+			return nil, targetContractChangedError()
+		}
+		return nil, targetUnavailableError()
+	}
+	if subtle.ConstantTimeCompare([]byte(validation.ContractHash), []byte(parsed.expectedContractHash)) != 1 {
+		return nil, targetContractChangedError()
 	}
 
 	var executionID uuid.UUID
@@ -287,13 +315,16 @@ func (s *Service) getExecutionStatus(ctx context.Context, record ExecutionRecord
 }
 
 type parsedExecution struct {
-	externalOrderID uuid.UUID
-	buyerUserID     uuid.UUID
-	sellerUserID    uuid.UUID
-	targetType      string
-	targetID        uuid.UUID
-	input           map[string]interface{}
-	traceID         string
+	externalOrderID        uuid.UUID
+	buyerUserID            uuid.UUID
+	sellerUserID           uuid.UUID
+	targetType             string
+	targetID               uuid.UUID
+	input                  map[string]interface{}
+	traceID                string
+	expectedContractHash   string
+	inputSchema            map[string]interface{}
+	inputSchemaFingerprint [sha256.Size]byte
 }
 
 func parseExecutionRequest(req *ExecutionRequest) (parsedExecution, [sha256.Size]byte, error) {
@@ -320,14 +351,32 @@ func parseExecutionRequest(req *ExecutionRequest) (parsedExecution, [sha256.Size
 	if input == nil {
 		input = map[string]interface{}{}
 	}
+	expectedContractHash := strings.TrimSpace(req.ExpectedContractHash)
+	if !hostedcontract.Valid(expectedContractHash) {
+		return parsedExecution{}, [sha256.Size]byte{}, httpx.NewError(http.StatusUnprocessableEntity, httpx.ErrorCode("HOSTED_CONTRACT_REQUIRED"), "expected_contract_hash 缺失或格式无效")
+	}
+	inputSchema, err := normalizeHostedInputSchema(req.InputSchema)
+	if err != nil || inputSchema == nil {
+		if err != nil {
+			return parsedExecution{}, [sha256.Size]byte{}, err
+		}
+		return parsedExecution{}, [sha256.Size]byte{}, httpx.NewError(http.StatusUnprocessableEntity, httpx.ErrorCode("HOSTED_CONTRACT_REQUIRED"), "input_schema 缺失")
+	}
+	canonicalSchema, err := runtime.CanonicalizeRFC8785(inputSchema)
+	if err != nil {
+		return parsedExecution{}, [sha256.Size]byte{}, httpx.BadRequest("input_schema 不是合法 I-JSON")
+	}
+	schemaFingerprint := sha256.Sum256(canonicalSchema)
 	parsed := parsedExecution{
 		externalOrderID: externalOrderID, buyerUserID: buyerID, sellerUserID: sellerID,
 		targetType: targetType, targetID: targetID, input: input, traceID: traceID,
+		expectedContractHash: expectedContractHash, inputSchema: inputSchema, inputSchemaFingerprint: schemaFingerprint,
 	}
 	canonical, err := runtime.CanonicalizeRFC8785(map[string]interface{}{
 		"buyer_user_id": buyerID.String(), "seller_user_id": sellerID.String(),
 		"target_type": targetType, "target_id": targetID.String(),
-		"input": input, "trace_id": traceID,
+		"input": input, "trace_id": traceID, "expected_contract_hash": expectedContractHash,
+		"input_schema": inputSchema,
 	})
 	if err != nil {
 		return parsedExecution{}, [sha256.Size]byte{}, httpx.BadRequest("input 不是合法 I-JSON")
@@ -376,7 +425,17 @@ func executionRecordMatches(record ExecutionRecord, parsed parsedExecution, fing
 		record.TargetType == parsed.targetType &&
 		record.TargetID == parsed.targetID &&
 		bytes.Equal(record.InputFingerprint, fingerprint[:]) &&
+		record.ExpectedContractHash != nil && *record.ExpectedContractHash == parsed.expectedContractHash &&
+		bytes.Equal(record.InputSchemaFingerprint, parsed.inputSchemaFingerprint[:]) &&
 		record.TraceID == parsed.traceID
+}
+
+func targetContractChangedError() *httpx.HTTPError {
+	return httpx.NewError(http.StatusConflict, httpx.ErrorCode("TARGET_CONTRACT_CHANGED"), "服务目标契约已变化，请重新下单")
+}
+
+func targetUnavailableError() *httpx.HTTPError {
+	return httpx.NewError(http.StatusConflict, httpx.ErrorCode("TARGET_UNAVAILABLE"), "该服务目标当前不可执行")
 }
 
 func normalizeRuntimeStatus(status string) (string, *SafeExecutionError) {

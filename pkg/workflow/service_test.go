@@ -1222,6 +1222,33 @@ func TestCreateWorkflowRejectsCyclicEdges(t *testing.T) {
 	require.Contains(t, err.Error(), "存在环")
 }
 
+func TestHostedWorkflowContractTracksNodeAgentCapability(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	sellerID := insertWorkflowUser(t, pool, "hosted-seller")
+	agentID := insertWorkflowAgent(t, pool, sellerID, "https://agent.example/run")
+	_, err := pool.Exec(context.Background(), `INSERT INTO agent_capabilities
+(agent_id,input_schema,output_schema,summary,version,published_at,updated_at)
+VALUES ($1,'{"type":"object"}'::jsonb,'{"type":"object"}'::jsonb,'hosted',1,NOW(),NOW())`, agentID)
+	require.NoError(t, err)
+	svc := workflow.NewService(pool, nil)
+	created, err := svc.CreateWorkflow(context.Background(), sellerID, &workflow.CreateWorkflowRequest{
+		Name: "Hosted contract", Nodes: []workflow.WorkflowNodeRequest{{Key: "run", AgentID: agentID, Config: map[string]interface{}{"mode": "strict"}}},
+	})
+	require.NoError(t, err)
+	workflowID := uuid.MustParse(created.ID)
+	first, err := svc.ValidateHostedExecutionTarget(context.Background(), sellerID, workflowID)
+	require.NoError(t, err)
+	require.True(t, first.Executable)
+	require.Regexp(t, `^hct:v1:[a-f0-9]{64}$`, first.ContractHash)
+
+	_, err = pool.Exec(context.Background(), `UPDATE agent_capabilities SET version=version+1, updated_at=NOW() WHERE agent_id=$1`, agentID)
+	require.NoError(t, err)
+	second, err := svc.ValidateHostedExecutionTarget(context.Background(), sellerID, workflowID)
+	require.NoError(t, err)
+	require.True(t, second.Executable)
+	require.NotEqual(t, first.ContractHash, second.ContractHash)
+}
+
 func setupWorkflowTestDB(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("TEST_DATABASE_URL")

@@ -29,6 +29,7 @@ type HostedTargetValidation struct {
 	TargetName        string `json:"target_name"`
 	Executable        bool   `json:"executable"`
 	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	ContractHash      string `json:"contract_hash,omitempty"`
 }
 
 type RerunWorkflowStepRequest struct {

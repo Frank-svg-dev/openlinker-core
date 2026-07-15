@@ -10,15 +10,17 @@ import (
 )
 
 type ExecutionRecord struct {
-	ExternalOrderID  uuid.UUID
-	BuyerUserID      uuid.UUID
-	SellerUserID     uuid.UUID
-	TargetType       string
-	TargetID         uuid.UUID
-	InputFingerprint []byte
-	TraceID          string
-	ExecutionKind    *string
-	ExecutionID      *uuid.UUID
+	ExternalOrderID        uuid.UUID
+	BuyerUserID            uuid.UUID
+	SellerUserID           uuid.UUID
+	TargetType             string
+	TargetID               uuid.UUID
+	InputFingerprint       []byte
+	ExpectedContractHash   *string
+	InputSchemaFingerprint []byte
+	TraceID                string
+	ExecutionKind          *string
+	ExecutionID            *uuid.UUID
 }
 
 type Store interface {
@@ -42,11 +44,11 @@ func (s *SQLStore) Reserve(ctx context.Context, record ExecutionRecord) (Executi
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO hosted_service_executions (
 			external_order_id, buyer_user_id, seller_user_id, target_type,
-			target_id, input_fingerprint, trace_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+			target_id, input_fingerprint, trace_id, expected_contract_hash, input_schema_fingerprint
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT (external_order_id) DO NOTHING
 	`, record.ExternalOrderID, record.BuyerUserID, record.SellerUserID, record.TargetType,
-		record.TargetID, record.InputFingerprint, record.TraceID)
+		record.TargetID, record.InputFingerprint, record.TraceID, record.ExpectedContractHash, record.InputSchemaFingerprint)
 	if err != nil {
 		return ExecutionRecord{}, err
 	}
@@ -59,7 +61,8 @@ func (s *SQLStore) Get(ctx context.Context, externalOrderID uuid.UUID) (Executio
 	}
 	row := s.pool.QueryRow(ctx, `
 		SELECT external_order_id, buyer_user_id, seller_user_id, target_type,
-		       target_id, input_fingerprint, trace_id, execution_kind, execution_id
+		       target_id, input_fingerprint, trace_id, expected_contract_hash,
+		       input_schema_fingerprint, execution_kind, execution_id
 		FROM hosted_service_executions
 		WHERE external_order_id = $1
 	`, externalOrderID)
@@ -76,7 +79,8 @@ func (s *SQLStore) Attach(ctx context.Context, externalOrderID uuid.UUID, execut
 		WHERE external_order_id = $1
 		  AND execution_id IS NULL
 		RETURNING external_order_id, buyer_user_id, seller_user_id, target_type,
-		          target_id, input_fingerprint, trace_id, execution_kind, execution_id
+		          target_id, input_fingerprint, trace_id, expected_contract_hash,
+		          input_schema_fingerprint, execution_kind, execution_id
 	`, externalOrderID, executionKind, executionID)
 	record, err := scanExecutionRecord(row)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -95,6 +99,8 @@ func scanExecutionRecord(row interface{ Scan(...any) error }) (ExecutionRecord, 
 		&record.TargetID,
 		&record.InputFingerprint,
 		&record.TraceID,
+		&record.ExpectedContractHash,
+		&record.InputSchemaFingerprint,
 		&record.ExecutionKind,
 		&record.ExecutionID,
 	)

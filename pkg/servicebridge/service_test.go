@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/hostedcontract"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/workflow"
@@ -39,6 +41,9 @@ func TestValidateTargetRequiresPublicCallableOwnedAgent(t *testing.T) {
 	})
 	if err != nil || resp.Executable || resp.UnavailableReason != "not_public" {
 		t.Fatalf("private ValidateTarget() = %#v, %v", resp, err)
+	}
+	if resp.ContractHash != "" {
+		t.Fatalf("private target leaked contract hash %q", resp.ContractHash)
 	}
 
 	agents.err = httpx.NotFound("secret owner detail")
@@ -70,6 +75,9 @@ func TestValidateTargetChecksListingInputAgainstAgentCapability(t *testing.T) {
 	if err != nil || !resp.Executable {
 		t.Fatalf("compatible ValidateTarget() = %#v, %v", resp, err)
 	}
+	if !hostedcontract.Valid(resp.ContractHash) {
+		t.Fatalf("compatible target contract hash = %q", resp.ContractHash)
+	}
 
 	resp, err = svc.ValidateTarget(context.Background(), &TargetValidationRequest{
 		SellerUserID: sellerID.String(), TargetType: TargetTypeAgent, TargetID: targetID.String(),
@@ -77,6 +85,9 @@ func TestValidateTargetChecksListingInputAgainstAgentCapability(t *testing.T) {
 	})
 	if err != nil || resp.Executable || resp.UnavailableReason != "input_schema_incompatible" {
 		t.Fatalf("incompatible ValidateTarget() = %#v, %v", resp, err)
+	}
+	if resp.ContractHash != "" {
+		t.Fatalf("incompatible target leaked contract hash %q", resp.ContractHash)
 	}
 }
 
@@ -88,9 +99,17 @@ func TestStartExecutionIsIdempotentAndRejectsSemanticReuse(t *testing.T) {
 		getResponse:   &runtime.RunResponse{RunID: runID.String(), Status: "running", StartedAt: time.Now()},
 	}
 	svc := NewService(agents, runtimeSvc, &fakeWorkflowService{}, newMemoryStore())
+	inputSchema := json.RawMessage(`[]`)
+	validation, err := svc.ValidateTarget(context.Background(), &TargetValidationRequest{
+		SellerUserID: sellerID.String(), TargetType: TargetTypeAgent, TargetID: targetID.String(), InputSchema: inputSchema,
+	})
+	if err != nil || !hostedcontract.Valid(validation.ContractHash) {
+		t.Fatalf("ValidateTarget contract = %#v, %v", validation, err)
+	}
 	req := &ExecutionRequest{
 		ExternalOrderID: orderID.String(), BuyerUserID: buyerID.String(), SellerUserID: sellerID.String(),
 		TargetType: TargetTypeAgent, TargetID: targetID.String(), Input: map[string]interface{}{"topic": "Go"}, TraceID: "trace-1",
+		ExpectedContractHash: validation.ContractHash, InputSchema: inputSchema,
 	}
 
 	first, err := svc.StartExecution(context.Background(), req)
@@ -109,6 +128,105 @@ func TestStartExecutionIsIdempotentAndRejectsSemanticReuse(t *testing.T) {
 	mutated.Input = map[string]interface{}{"topic": "Rust"}
 	_, err = svc.StartExecution(context.Background(), &mutated)
 	assertHTTPStatus(t, err, 409)
+
+	mutated = *req
+	mutated.ExpectedContractHash = "hct:v1:" + strings.Repeat("b", 64)
+	_, err = svc.StartExecution(context.Background(), &mutated)
+	assertHTTPStatus(t, err, 409)
+
+	mutated = *req
+	mutated.InputSchema = json.RawMessage(`[{"key":"topic","type":"text","required":false}]`)
+	_, err = svc.StartExecution(context.Background(), &mutated)
+	assertHTTPStatus(t, err, 409)
+}
+
+func TestStartExecutionRejectsMissingAndChangedContractBeforeRun(t *testing.T) {
+	orderID, buyerID, sellerID, targetID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	agents := callableAgent(targetID)
+	agents.onboarding = &agent.OnboardingResponse{Capability: &agent.CapabilityResponse{
+		Version: 1, InputSchema: map[string]interface{}{"type": "object", "properties": map[string]interface{}{}},
+		OutputSchema: map[string]interface{}{"type": "object"},
+	}}
+	runtimeSvc := &fakeRuntimeService{}
+	svc := NewService(agents, runtimeSvc, &fakeWorkflowService{}, newMemoryStore())
+	schema := json.RawMessage(`[]`)
+	validation, err := svc.ValidateTarget(context.Background(), &TargetValidationRequest{
+		SellerUserID: sellerID.String(), TargetType: TargetTypeAgent, TargetID: targetID.String(), InputSchema: schema,
+	})
+	if err != nil || !validation.Executable {
+		t.Fatalf("ValidateTarget() = %#v, %v", validation, err)
+	}
+	base := &ExecutionRequest{ExternalOrderID: orderID.String(), BuyerUserID: buyerID.String(), SellerUserID: sellerID.String(),
+		TargetType: TargetTypeAgent, TargetID: targetID.String(), Input: map[string]interface{}{}, TraceID: "trace-contract", InputSchema: schema}
+	_, err = svc.StartExecution(context.Background(), base)
+	assertHTTPCode(t, err, httpx.ErrorCode("HOSTED_CONTRACT_REQUIRED"))
+
+	base.ExpectedContractHash = validation.ContractHash
+	agents.onboarding.Capability.Version++
+	_, err = svc.StartExecution(context.Background(), base)
+	assertHTTPCode(t, err, httpx.ErrorCode("TARGET_CONTRACT_CHANGED"))
+	if runtimeSvc.startCalls != 0 {
+		t.Fatalf("StartRun calls = %d, want 0", runtimeSvc.startCalls)
+	}
+}
+
+func TestStartExecutionRejectsFrozenSchemaDriftBeforeRun(t *testing.T) {
+	orderID, buyerID, sellerID, targetID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	agents := callableAgent(targetID)
+	agents.onboarding = &agent.OnboardingResponse{Capability: &agent.CapabilityResponse{
+		Version:      1,
+		InputSchema:  map[string]interface{}{"type": "object", "properties": map[string]interface{}{"topic": map[string]interface{}{"type": "string"}}, "required": []interface{}{"topic"}, "additionalProperties": false},
+		OutputSchema: map[string]interface{}{"type": "object"},
+	}}
+	runtimeSvc := &fakeRuntimeService{}
+	svc := NewService(agents, runtimeSvc, &fakeWorkflowService{}, newMemoryStore())
+	compatible := json.RawMessage(`[{"key":"topic","type":"text","required":true}]`)
+	validation, err := svc.ValidateTarget(context.Background(), &TargetValidationRequest{SellerUserID: sellerID.String(), TargetType: TargetTypeAgent, TargetID: targetID.String(), InputSchema: compatible})
+	if err != nil || !validation.Executable {
+		t.Fatalf("ValidateTarget() = %#v, %v", validation, err)
+	}
+	_, err = svc.StartExecution(context.Background(), &ExecutionRequest{
+		ExternalOrderID: orderID.String(), BuyerUserID: buyerID.String(), SellerUserID: sellerID.String(),
+		TargetType: TargetTypeAgent, TargetID: targetID.String(), Input: map[string]interface{}{"topic": 42}, TraceID: "trace-schema",
+		ExpectedContractHash: validation.ContractHash,
+		InputSchema:          json.RawMessage(`[{"key":"topic","type":"number","required":true}]`),
+	})
+	assertHTTPCode(t, err, httpx.ErrorCode("TARGET_CONTRACT_CHANGED"))
+	if runtimeSvc.startCalls != 0 {
+		t.Fatalf("StartRun calls = %d, want 0", runtimeSvc.startCalls)
+	}
+}
+
+func TestStartExecutionRejectsWorkflowContractChangeBeforeRun(t *testing.T) {
+	orderID, buyerID, sellerID, workflowID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	initialHash, err := hostedcontract.WorkflowHash(hostedcontract.Workflow{ID: workflowID.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedHash, err := hostedcontract.WorkflowHash(hostedcontract.Workflow{ID: workflowID.String(), Edges: []map[string]interface{}{{"from": "a", "to": "b"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflows := &fakeWorkflowService{validation: &workflow.HostedTargetValidation{
+		Executable: true, TargetName: "Workflow", ContractHash: initialHash,
+	}}
+	svc := NewService(callableAgent(uuid.New()), &fakeRuntimeService{}, workflows, newMemoryStore())
+	validation, err := svc.ValidateTarget(context.Background(), &TargetValidationRequest{
+		SellerUserID: sellerID.String(), TargetType: TargetTypeWorkflow, TargetID: workflowID.String(), InputSchema: json.RawMessage(`[]`),
+	})
+	if err != nil || validation.ContractHash != initialHash {
+		t.Fatalf("ValidateTarget() = %#v, %v", validation, err)
+	}
+	workflows.validation = &workflow.HostedTargetValidation{Executable: true, TargetName: "Workflow", ContractHash: changedHash}
+	_, err = svc.StartExecution(context.Background(), &ExecutionRequest{
+		ExternalOrderID: orderID.String(), BuyerUserID: buyerID.String(), SellerUserID: sellerID.String(),
+		TargetType: TargetTypeWorkflow, TargetID: workflowID.String(), Input: map[string]interface{}{}, TraceID: "trace-workflow-contract",
+		ExpectedContractHash: initialHash, InputSchema: json.RawMessage(`[]`),
+	})
+	assertHTTPCode(t, err, httpx.ErrorCode("TARGET_CONTRACT_CHANGED"))
+	if workflows.startCalls != 0 {
+		t.Fatalf("StartHostedWorkflowRun calls = %d, want 0", workflows.startCalls)
+	}
 }
 
 func TestGetExecutionReturnsOutputArtifactsAndSafeFailure(t *testing.T) {
@@ -237,16 +355,19 @@ type fakeWorkflowService struct {
 	validation  *workflow.HostedTargetValidation
 	start       *workflow.WorkflowRunResponse
 	getResponse *workflow.WorkflowRunResponse
+	startCalls  int
 }
 
 func (f *fakeWorkflowService) ValidateHostedExecutionTarget(context.Context, uuid.UUID, uuid.UUID) (*workflow.HostedTargetValidation, error) {
 	if f.validation == nil {
-		return &workflow.HostedTargetValidation{Executable: true, TargetName: "Workflow"}, nil
+		hash, _ := hostedcontract.AgentHash(hostedcontract.Agent{ID: "workflow-fixture", ConnectionMode: "runtime"})
+		return &workflow.HostedTargetValidation{Executable: true, TargetName: "Workflow", ContractHash: hash}, nil
 	}
 	return f.validation, nil
 }
 
 func (f *fakeWorkflowService) StartHostedWorkflowRun(context.Context, uuid.UUID, uuid.UUID, uuid.UUID, uuid.UUID, map[string]interface{}) (*workflow.WorkflowRunResponse, error) {
+	f.startCalls++
 	if f.start == nil {
 		return nil, errors.New("unexpected StartHostedWorkflowRun")
 	}
@@ -276,6 +397,11 @@ func (m *memoryStore) Reserve(_ context.Context, record ExecutionRecord) (Execut
 		return existing, nil
 	}
 	record.InputFingerprint = append([]byte(nil), record.InputFingerprint...)
+	record.InputSchemaFingerprint = append([]byte(nil), record.InputSchemaFingerprint...)
+	if record.ExpectedContractHash != nil {
+		value := *record.ExpectedContractHash
+		record.ExpectedContractHash = &value
+	}
 	m.records[record.ExternalOrderID] = record
 	return record, nil
 }
@@ -310,5 +436,13 @@ func assertHTTPStatus(t *testing.T, err error, status int) {
 	var he *httpx.HTTPError
 	if !errors.As(err, &he) || he.Status != status {
 		t.Fatalf("error = %#v, want HTTP %d", err, status)
+	}
+}
+
+func assertHTTPCode(t *testing.T, err error, code httpx.ErrorCode) {
+	t.Helper()
+	var he *httpx.HTTPError
+	if !errors.As(err, &he) || he.Code != code {
+		t.Fatalf("error = %#v, want code %s", err, code)
 	}
 }
