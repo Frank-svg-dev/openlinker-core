@@ -141,7 +141,7 @@ func (q *Queries) ConfirmRunAssignment(ctx context.Context, arg ConfirmRunAssign
 	return i, err
 }
 
-const createAgentNodeRunOffer = `-- name: CreateAgentNodeRunOffer :one
+const createRuntimeRunOffer = `-- name: CreateRuntimeRunOffer :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -224,7 +224,7 @@ WHERE r.id = $8
 RETURNING id, run_id, agent_id, offer_no, attempt_no, executor_type, lease_id, fencing_token, runtime_token_id, runtime_worker_id, runtime_session_id, node_id, offered_by_core_instance_id, attached_core_instance_id, offered_at, offer_expires_at, accepted_at, last_renewed_at, lease_expires_at, attempt_deadline_at, finished_at, outcome, result_id, result_fingerprint, result_classification, result_acknowledged_at, last_client_event_seq, final_client_event_seq, error_code, error_detail_redacted, created_at, slot_acquired_at, slot_released_at, active_runtime_session_id
 `
 
-type CreateAgentNodeRunOfferParams struct {
+type CreateRuntimeRunOfferParams struct {
 	AttemptID        uuid.UUID `db:"attempt_id" json:"attempt_id"`
 	LeaseID          uuid.UUID `db:"lease_id" json:"lease_id"`
 	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
@@ -238,8 +238,8 @@ type CreateAgentNodeRunOfferParams struct {
 	WorkerID         string    `db:"worker_id" json:"worker_id"`
 }
 
-func (q *Queries) CreateAgentNodeRunOffer(ctx context.Context, arg CreateAgentNodeRunOfferParams) (RunAttempt, error) {
-	row := q.db.QueryRow(ctx, createAgentNodeRunOffer,
+func (q *Queries) CreateRuntimeRunOffer(ctx context.Context, arg CreateRuntimeRunOfferParams) (RunAttempt, error) {
+	row := q.db.QueryRow(ctx, createRuntimeRunOffer,
 		arg.AttemptID,
 		arg.LeaseID,
 		arg.CoreInstanceID,
@@ -556,7 +556,7 @@ func (q *Queries) GetExistingUnacceptedRunOfferForSession(ctx context.Context, a
 	return i, err
 }
 
-const lockAgentNodeRunAttemptForLeaseMutation = `-- name: LockAgentNodeRunAttemptForLeaseMutation :one
+const lockRuntimeRunAttemptForLeaseMutation = `-- name: LockRuntimeRunAttemptForLeaseMutation :one
 SELECT a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
 FROM run_attempts a
 WHERE a.run_id = $1
@@ -571,7 +571,7 @@ WHERE a.run_id = $1
 FOR UPDATE OF a
 `
 
-type LockAgentNodeRunAttemptForLeaseMutationParams struct {
+type LockRuntimeRunAttemptForLeaseMutationParams struct {
 	RunID            uuid.UUID  `db:"run_id" json:"run_id"`
 	AttemptID        uuid.UUID  `db:"attempt_id" json:"attempt_id"`
 	LeaseID          uuid.UUID  `db:"lease_id" json:"lease_id"`
@@ -582,8 +582,8 @@ type LockAgentNodeRunAttemptForLeaseMutationParams struct {
 	WorkerID         *string    `db:"worker_id" json:"worker_id"`
 }
 
-func (q *Queries) LockAgentNodeRunAttemptForLeaseMutation(ctx context.Context, arg LockAgentNodeRunAttemptForLeaseMutationParams) (RunAttempt, error) {
-	row := q.db.QueryRow(ctx, lockAgentNodeRunAttemptForLeaseMutation,
+func (q *Queries) LockRuntimeRunAttemptForLeaseMutation(ctx context.Context, arg LockRuntimeRunAttemptForLeaseMutationParams) (RunAttempt, error) {
+	row := q.db.QueryRow(ctx, lockRuntimeRunAttemptForLeaseMutation,
 		arg.RunID,
 		arg.AttemptID,
 		arg.LeaseID,
@@ -1262,7 +1262,7 @@ func (q *Queries) MarkRunAttemptCapacityReleased(ctx context.Context, arg MarkRu
 	return i, err
 }
 
-const mirrorRunAgentNodeOffer = `-- name: MirrorRunAgentNodeOffer :one
+const mirrorRuntimeRunOffer = `-- name: MirrorRuntimeRunOffer :one
 UPDATE runs r
 SET dispatch_state = 'offered',
     next_attempt_at = NULL,
@@ -1315,7 +1315,7 @@ RETURNING r.id, r.dispatch_state, r.offer_count, r.attempt_count,
           clock_timestamp() AS database_now
 `
 
-type MirrorRunAgentNodeOfferParams struct {
+type MirrorRuntimeRunOfferParams struct {
 	RunID            uuid.UUID  `db:"run_id" json:"run_id"`
 	AttemptID        uuid.UUID  `db:"attempt_id" json:"attempt_id"`
 	LeaseID          uuid.UUID  `db:"lease_id" json:"lease_id"`
@@ -1327,7 +1327,7 @@ type MirrorRunAgentNodeOfferParams struct {
 	CoreInstanceID   uuid.UUID  `db:"core_instance_id" json:"core_instance_id"`
 }
 
-type MirrorRunAgentNodeOfferRow struct {
+type MirrorRuntimeRunOfferRow struct {
 	ID                uuid.UUID  `db:"id" json:"id"`
 	DispatchState     string     `db:"dispatch_state" json:"dispatch_state"`
 	OfferCount        int32      `db:"offer_count" json:"offer_count"`
@@ -1347,8 +1347,8 @@ type MirrorRunAgentNodeOfferRow struct {
 	DatabaseNow       time.Time  `db:"database_now" json:"database_now"`
 }
 
-func (q *Queries) MirrorRunAgentNodeOffer(ctx context.Context, arg MirrorRunAgentNodeOfferParams) (MirrorRunAgentNodeOfferRow, error) {
-	row := q.db.QueryRow(ctx, mirrorRunAgentNodeOffer,
+func (q *Queries) MirrorRuntimeRunOffer(ctx context.Context, arg MirrorRuntimeRunOfferParams) (MirrorRuntimeRunOfferRow, error) {
+	row := q.db.QueryRow(ctx, mirrorRuntimeRunOffer,
 		arg.RunID,
 		arg.AttemptID,
 		arg.LeaseID,
@@ -1359,7 +1359,7 @@ func (q *Queries) MirrorRunAgentNodeOffer(ctx context.Context, arg MirrorRunAgen
 		arg.WorkerID,
 		arg.CoreInstanceID,
 	)
-	var i MirrorRunAgentNodeOfferRow
+	var i MirrorRuntimeRunOfferRow
 	err := row.Scan(
 		&i.ID,
 		&i.DispatchState,
@@ -1569,7 +1569,7 @@ func (q *Queries) MirrorRunLeaseRenewal(ctx context.Context, arg MirrorRunLeaseR
 	return i, err
 }
 
-const renewAgentNodeRunAttempt = `-- name: RenewAgentNodeRunAttempt :one
+const renewRuntimeRunAttempt = `-- name: RenewRuntimeRunAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -1633,7 +1633,7 @@ WHERE a.run_id = $3
 RETURNING a.id, a.run_id, a.agent_id, a.offer_no, a.attempt_no, a.executor_type, a.lease_id, a.fencing_token, a.runtime_token_id, a.runtime_worker_id, a.runtime_session_id, a.node_id, a.offered_by_core_instance_id, a.attached_core_instance_id, a.offered_at, a.offer_expires_at, a.accepted_at, a.last_renewed_at, a.lease_expires_at, a.attempt_deadline_at, a.finished_at, a.outcome, a.result_id, a.result_fingerprint, a.result_classification, a.result_acknowledged_at, a.last_client_event_seq, a.final_client_event_seq, a.error_code, a.error_detail_redacted, a.created_at, a.slot_acquired_at, a.slot_released_at, a.active_runtime_session_id
 `
 
-type RenewAgentNodeRunAttemptParams struct {
+type RenewRuntimeRunAttemptParams struct {
 	LeaseTtlMs       int64      `db:"lease_ttl_ms" json:"lease_ttl_ms"`
 	CoreInstanceID   uuid.UUID  `db:"core_instance_id" json:"core_instance_id"`
 	RunID            uuid.UUID  `db:"run_id" json:"run_id"`
@@ -1646,8 +1646,8 @@ type RenewAgentNodeRunAttemptParams struct {
 	WorkerID         *string    `db:"worker_id" json:"worker_id"`
 }
 
-func (q *Queries) RenewAgentNodeRunAttempt(ctx context.Context, arg RenewAgentNodeRunAttemptParams) (RunAttempt, error) {
-	row := q.db.QueryRow(ctx, renewAgentNodeRunAttempt,
+func (q *Queries) RenewRuntimeRunAttempt(ctx context.Context, arg RenewRuntimeRunAttemptParams) (RunAttempt, error) {
+	row := q.db.QueryRow(ctx, renewRuntimeRunAttempt,
 		arg.LeaseTtlMs,
 		arg.CoreInstanceID,
 		arg.RunID,

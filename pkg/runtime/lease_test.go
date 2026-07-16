@@ -486,7 +486,7 @@ type runtimeLeaseTransactionFake struct {
 	nodeSlotErr       error
 
 	createdAttempt    db.RunAttempt
-	mirrorOfferParams db.MirrorRunAgentNodeOfferParams
+	mirrorOfferParams db.MirrorRuntimeRunOfferParams
 	mirrorOfferErr    error
 	run               db.LockRunForLeaseMutationRow
 	attempt           db.RunAttempt
@@ -609,7 +609,7 @@ func (f *runtimeLeaseTransactionFake) ClaimRuntimeNodeSlot(_ context.Context, pa
 	return db.RuntimeNode{NodeID: f.principal.NodeID, Inflight: f.nodeInflight}, nil
 }
 
-func (f *runtimeLeaseTransactionFake) CreateAgentNodeRunOffer(_ context.Context, params db.CreateAgentNodeRunOfferParams) (db.RunAttempt, error) {
+func (f *runtimeLeaseTransactionFake) CreateRuntimeRunOffer(_ context.Context, params db.CreateRuntimeRunOfferParams) (db.RunAttempt, error) {
 	f.call("create_offer")
 	workerID, sessionID, nodeID, credentialID := f.principal.WorkerID, f.principal.RuntimeSessionID, f.principal.NodeID, f.principal.CredentialID
 	f.createdAttempt = db.RunAttempt{
@@ -626,13 +626,13 @@ func (f *runtimeLeaseTransactionFake) CreateAgentNodeRunOffer(_ context.Context,
 	return f.createdAttempt, nil
 }
 
-func (f *runtimeLeaseTransactionFake) MirrorRunAgentNodeOffer(_ context.Context, params db.MirrorRunAgentNodeOfferParams) (db.MirrorRunAgentNodeOfferRow, error) {
+func (f *runtimeLeaseTransactionFake) MirrorRuntimeRunOffer(_ context.Context, params db.MirrorRuntimeRunOfferParams) (db.MirrorRuntimeRunOfferRow, error) {
 	f.call("mirror_offer")
 	f.mirrorOfferParams = params
 	if f.mirrorOfferErr != nil {
-		return db.MirrorRunAgentNodeOfferRow{}, f.mirrorOfferErr
+		return db.MirrorRuntimeRunOfferRow{}, f.mirrorOfferErr
 	}
-	return db.MirrorRunAgentNodeOfferRow{
+	return db.MirrorRuntimeRunOfferRow{
 		ID: f.createdAttempt.RunID, DispatchState: string(RuntimeDispatchOffered),
 		ActiveAttemptID: &f.createdAttempt.ID, LeaseID: &f.createdAttempt.LeaseID, FencingToken: f.createdAttempt.FencingToken,
 	}, nil
@@ -643,7 +643,7 @@ func (f *runtimeLeaseTransactionFake) LockRunForLeaseMutation(_ context.Context,
 	return f.run, nil
 }
 
-func (f *runtimeLeaseTransactionFake) LockAgentNodeRunAttemptForLeaseMutation(_ context.Context, _ db.LockAgentNodeRunAttemptForLeaseMutationParams) (db.RunAttempt, error) {
+func (f *runtimeLeaseTransactionFake) LockRuntimeRunAttemptForLeaseMutation(_ context.Context, _ db.LockRuntimeRunAttemptForLeaseMutationParams) (db.RunAttempt, error) {
 	f.call("lock_attempt")
 	return f.attempt, nil
 }
@@ -666,7 +666,7 @@ func (f *runtimeLeaseTransactionFake) MirrorRunConfirmedAssignment(_ context.Con
 	return db.MirrorRunConfirmedAssignmentRow{ID: f.run.ID, DispatchState: string(RuntimeDispatchExecuting), AttemptCount: 1}, nil
 }
 
-func (f *runtimeLeaseTransactionFake) RenewAgentNodeRunAttempt(_ context.Context, _ db.RenewAgentNodeRunAttemptParams) (db.RunAttempt, error) {
+func (f *runtimeLeaseTransactionFake) RenewRuntimeRunAttempt(_ context.Context, _ db.RenewRuntimeRunAttemptParams) (db.RunAttempt, error) {
 	f.call("renew")
 	f.renewCalls++
 	attempt := f.attempt

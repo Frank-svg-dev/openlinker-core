@@ -80,6 +80,49 @@ func TestRuntimePublicBoundaryUsesCanonicalNamesAndPaths(t *testing.T) {
 	assertNoVersionedRuntimeIdentifiers(t, repositoryRoot)
 }
 
+func TestRuntimeLeaseSymbolsRemainAdapterNeutral(t *testing.T) {
+	repositoryRoot := runtimeRepositoryRoot(t)
+	forbidden := []string{
+		"Create" + "Agent" + "Node" + "RunOffer",
+		"MirrorRun" + "Agent" + "Node" + "Offer",
+		"Lock" + "Agent" + "Node" + "RunAttemptForLeaseMutation",
+		"Renew" + "Agent" + "Node" + "RunAttempt",
+	}
+
+	err := filepath.WalkDir(repositoryRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if path != repositoryRoot && runtimeBoundaryIgnoredDirectory(entry.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relativePath := relativeRuntimeBoundaryPath(repositoryRoot, path)
+		if !runtimeBoundaryRuntimeSource(relativePath) {
+			return nil
+		}
+		extension := strings.ToLower(filepath.Ext(path))
+		if extension != ".go" && extension != ".sql" {
+			return nil
+		}
+		body, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, symbol := range forbidden {
+			if strings.Contains(string(body), symbol) {
+				t.Errorf("active Runtime lease source %s contains Adapter-specific symbol %s", relativePath, symbol)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan Runtime lease symbols: %v", err)
+	}
+}
+
 func assertNoVersionedRuntimeIdentifiers(t *testing.T, repositoryRoot string) {
 	t.Helper()
 	fileSet := token.NewFileSet()

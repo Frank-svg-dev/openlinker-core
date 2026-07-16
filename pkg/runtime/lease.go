@@ -229,7 +229,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 		}
 
 		attemptID, leaseID := uuid.New(), uuid.New()
-		attempt, err := tx.CreateAgentNodeRunOffer(ctx, db.CreateAgentNodeRunOfferParams{
+		attempt, err := tx.CreateRuntimeRunOffer(ctx, db.CreateRuntimeRunOfferParams{
 			AttemptID:        attemptID,
 			LeaseID:          leaseID,
 			CoreInstanceID:   s.coreInstanceID,
@@ -251,7 +251,7 @@ func (s *RuntimeLeaseService) ClaimOffer(
 		if attempt.ID != attemptID || attempt.LeaseID != leaseID || attempt.RunID != candidate.ID {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 		}
-		mirrored, err := tx.MirrorRunAgentNodeOffer(ctx, mirrorOfferParams(principal, attempt))
+		mirrored, err := tx.MirrorRuntimeRunOffer(ctx, mirrorOfferParams(principal, attempt))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
@@ -452,7 +452,7 @@ func (s *RuntimeLeaseService) RenewLease(
 			return newRuntimeLeaseError(RuntimeLeaseErrorLeaseExpired, nil)
 		}
 
-		updated, err := tx.RenewAgentNodeRunAttempt(ctx, renewAttemptParams(principal, s.coreInstanceID, s.config.LeaseTTL, request.AttemptIdentity))
+		updated, err := tx.RenewRuntimeRunAttempt(ctx, renewAttemptParams(principal, s.coreInstanceID, s.config.LeaseTTL, request.AttemptIdentity))
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return newRuntimeLeaseError(RuntimeLeaseErrorLeaseExpired, err)
@@ -717,7 +717,7 @@ func lockLeaseMutation(
 	if run.AgentID != principal.AgentID || identity.AgentID != run.AgentID {
 		return db.LockRunForLeaseMutationRow{}, db.RunAttempt{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
-	attempt, err := tx.LockAgentNodeRunAttemptForLeaseMutation(ctx, attemptLockParams(principal, identity))
+	attempt, err := tx.LockRuntimeRunAttemptForLeaseMutation(ctx, attemptLockParams(principal, identity))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return db.LockRunForLeaseMutationRow{}, db.RunAttempt{}, newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
@@ -1018,17 +1018,17 @@ func existingOfferParams(principal RuntimeSessionPrincipal) db.GetExistingUnacce
 	}
 }
 
-func attemptLockParams(principal RuntimeSessionPrincipal, identity AttemptIdentity) db.LockAgentNodeRunAttemptForLeaseMutationParams {
+func attemptLockParams(principal RuntimeSessionPrincipal, identity AttemptIdentity) db.LockRuntimeRunAttemptForLeaseMutationParams {
 	sessionID, nodeID, credentialID, workerID := principal.RuntimeSessionID, principal.NodeID, principal.CredentialID, principal.WorkerID
-	return db.LockAgentNodeRunAttemptForLeaseMutationParams{
+	return db.LockRuntimeRunAttemptForLeaseMutationParams{
 		RunID: identity.RunID, AttemptID: identity.AttemptID, LeaseID: identity.LeaseID, FencingToken: identity.FencingToken,
 		RuntimeSessionID: &sessionID, NodeID: &nodeID, CredentialID: &credentialID, WorkerID: &workerID,
 	}
 }
 
-func mirrorOfferParams(principal RuntimeSessionPrincipal, attempt db.RunAttempt) db.MirrorRunAgentNodeOfferParams {
+func mirrorOfferParams(principal RuntimeSessionPrincipal, attempt db.RunAttempt) db.MirrorRuntimeRunOfferParams {
 	sessionID, nodeID, credentialID, workerID := principal.RuntimeSessionID, principal.NodeID, principal.CredentialID, principal.WorkerID
-	return db.MirrorRunAgentNodeOfferParams{
+	return db.MirrorRuntimeRunOfferParams{
 		RunID: attempt.RunID, AttemptID: attempt.ID, LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
 		RuntimeSessionID: &sessionID, NodeID: &nodeID, CredentialID: &credentialID, WorkerID: &workerID,
 		CoreInstanceID: principal.CoreInstanceID,
@@ -1053,9 +1053,9 @@ func mirrorConfirmedParams(principal RuntimeSessionPrincipal, coreInstanceID uui
 	}
 }
 
-func renewAttemptParams(principal RuntimeSessionPrincipal, coreInstanceID uuid.UUID, ttl time.Duration, identity AttemptIdentity) db.RenewAgentNodeRunAttemptParams {
+func renewAttemptParams(principal RuntimeSessionPrincipal, coreInstanceID uuid.UUID, ttl time.Duration, identity AttemptIdentity) db.RenewRuntimeRunAttemptParams {
 	sessionID, nodeID, credentialID, workerID := principal.RuntimeSessionID, principal.NodeID, principal.CredentialID, principal.WorkerID
-	return db.RenewAgentNodeRunAttemptParams{
+	return db.RenewRuntimeRunAttemptParams{
 		LeaseTtlMs: ttl.Milliseconds(), CoreInstanceID: coreInstanceID, RunID: identity.RunID,
 		AttemptID: identity.AttemptID, LeaseID: identity.LeaseID, FencingToken: identity.FencingToken,
 		RuntimeSessionID: &sessionID, NodeID: &nodeID, CredentialID: &credentialID, WorkerID: &workerID,
@@ -1080,13 +1080,13 @@ type runtimeLeaseTransaction interface {
 	ClaimRuntimeNodeSlot(context.Context, db.ClaimRuntimeNodeSlotParams) (db.RuntimeNode, error)
 	ReleaseRuntimeSessionSlot(context.Context, uuid.UUID) (db.RuntimeSession, error)
 	ReleaseRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
-	CreateAgentNodeRunOffer(context.Context, db.CreateAgentNodeRunOfferParams) (db.RunAttempt, error)
-	MirrorRunAgentNodeOffer(context.Context, db.MirrorRunAgentNodeOfferParams) (db.MirrorRunAgentNodeOfferRow, error)
+	CreateRuntimeRunOffer(context.Context, db.CreateRuntimeRunOfferParams) (db.RunAttempt, error)
+	MirrorRuntimeRunOffer(context.Context, db.MirrorRuntimeRunOfferParams) (db.MirrorRuntimeRunOfferRow, error)
 	LockRunForLeaseMutation(context.Context, uuid.UUID) (db.LockRunForLeaseMutationRow, error)
-	LockAgentNodeRunAttemptForLeaseMutation(context.Context, db.LockAgentNodeRunAttemptForLeaseMutationParams) (db.RunAttempt, error)
+	LockRuntimeRunAttemptForLeaseMutation(context.Context, db.LockRuntimeRunAttemptForLeaseMutationParams) (db.RunAttempt, error)
 	ConfirmRunAssignment(context.Context, db.ConfirmRunAssignmentParams) (db.RunAttempt, error)
 	MirrorRunConfirmedAssignment(context.Context, db.MirrorRunConfirmedAssignmentParams) (db.MirrorRunConfirmedAssignmentRow, error)
-	RenewAgentNodeRunAttempt(context.Context, db.RenewAgentNodeRunAttemptParams) (db.RunAttempt, error)
+	RenewRuntimeRunAttempt(context.Context, db.RenewRuntimeRunAttemptParams) (db.RunAttempt, error)
 	MirrorRunLeaseRenewal(context.Context, db.MirrorRunLeaseRenewalParams) (db.MirrorRunLeaseRenewalRow, error)
 	FinishUnacceptedRunOffer(context.Context, db.FinishUnacceptedRunOfferParams) (db.RunAttempt, error)
 	ResetRunAfterUnacceptedOffer(context.Context, db.ResetRunAfterUnacceptedOfferParams) (db.ResetRunAfterUnacceptedOfferRow, error)
@@ -1159,17 +1159,17 @@ func (t *postgresRuntimeLeaseTransaction) ReleaseRuntimeSessionSlot(ctx context.
 func (t *postgresRuntimeLeaseTransaction) ReleaseRuntimeNodeSlot(ctx context.Context, id uuid.UUID) (db.RuntimeNode, error) {
 	return t.queries.ReleaseRuntimeNodeSlot(ctx, id)
 }
-func (t *postgresRuntimeLeaseTransaction) CreateAgentNodeRunOffer(ctx context.Context, params db.CreateAgentNodeRunOfferParams) (db.RunAttempt, error) {
-	return t.queries.CreateAgentNodeRunOffer(ctx, params)
+func (t *postgresRuntimeLeaseTransaction) CreateRuntimeRunOffer(ctx context.Context, params db.CreateRuntimeRunOfferParams) (db.RunAttempt, error) {
+	return t.queries.CreateRuntimeRunOffer(ctx, params)
 }
-func (t *postgresRuntimeLeaseTransaction) MirrorRunAgentNodeOffer(ctx context.Context, params db.MirrorRunAgentNodeOfferParams) (db.MirrorRunAgentNodeOfferRow, error) {
-	return t.queries.MirrorRunAgentNodeOffer(ctx, params)
+func (t *postgresRuntimeLeaseTransaction) MirrorRuntimeRunOffer(ctx context.Context, params db.MirrorRuntimeRunOfferParams) (db.MirrorRuntimeRunOfferRow, error) {
+	return t.queries.MirrorRuntimeRunOffer(ctx, params)
 }
 func (t *postgresRuntimeLeaseTransaction) LockRunForLeaseMutation(ctx context.Context, id uuid.UUID) (db.LockRunForLeaseMutationRow, error) {
 	return t.queries.LockRunForLeaseMutation(ctx, id)
 }
-func (t *postgresRuntimeLeaseTransaction) LockAgentNodeRunAttemptForLeaseMutation(ctx context.Context, params db.LockAgentNodeRunAttemptForLeaseMutationParams) (db.RunAttempt, error) {
-	return t.queries.LockAgentNodeRunAttemptForLeaseMutation(ctx, params)
+func (t *postgresRuntimeLeaseTransaction) LockRuntimeRunAttemptForLeaseMutation(ctx context.Context, params db.LockRuntimeRunAttemptForLeaseMutationParams) (db.RunAttempt, error) {
+	return t.queries.LockRuntimeRunAttemptForLeaseMutation(ctx, params)
 }
 func (t *postgresRuntimeLeaseTransaction) ConfirmRunAssignment(ctx context.Context, params db.ConfirmRunAssignmentParams) (db.RunAttempt, error) {
 	return t.queries.ConfirmRunAssignment(ctx, params)
@@ -1177,8 +1177,8 @@ func (t *postgresRuntimeLeaseTransaction) ConfirmRunAssignment(ctx context.Conte
 func (t *postgresRuntimeLeaseTransaction) MirrorRunConfirmedAssignment(ctx context.Context, params db.MirrorRunConfirmedAssignmentParams) (db.MirrorRunConfirmedAssignmentRow, error) {
 	return t.queries.MirrorRunConfirmedAssignment(ctx, params)
 }
-func (t *postgresRuntimeLeaseTransaction) RenewAgentNodeRunAttempt(ctx context.Context, params db.RenewAgentNodeRunAttemptParams) (db.RunAttempt, error) {
-	return t.queries.RenewAgentNodeRunAttempt(ctx, params)
+func (t *postgresRuntimeLeaseTransaction) RenewRuntimeRunAttempt(ctx context.Context, params db.RenewRuntimeRunAttemptParams) (db.RunAttempt, error) {
+	return t.queries.RenewRuntimeRunAttempt(ctx, params)
 }
 func (t *postgresRuntimeLeaseTransaction) MirrorRunLeaseRenewal(ctx context.Context, params db.MirrorRunLeaseRenewalParams) (db.MirrorRunLeaseRenewalRow, error) {
 	return t.queries.MirrorRunLeaseRenewal(ctx, params)

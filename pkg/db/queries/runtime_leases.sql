@@ -212,7 +212,7 @@ ORDER BY
 LIMIT 1
 FOR UPDATE OF r SKIP LOCKED;
 
--- name: CreateAgentNodeRunOffer :one
+-- name: CreateRuntimeRunOffer :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )
@@ -294,7 +294,7 @@ WHERE r.id = sqlc.arg(run_id)
   )
 RETURNING *;
 
--- name: MirrorRunAgentNodeOffer :one
+-- name: MirrorRuntimeRunOffer :one
 UPDATE runs r
 SET dispatch_state = 'offered',
     next_attempt_at = NULL,
@@ -361,7 +361,7 @@ WHERE r.id = sqlc.arg(run_id)
   AND r.runtime_contract_id = 'openlinker.runtime.v2'
 FOR UPDATE OF r;
 
--- name: LockAgentNodeRunAttemptForLeaseMutation :one
+-- name: LockRuntimeRunAttemptForLeaseMutation :one
 SELECT a.*
 FROM run_attempts a
 WHERE a.run_id = sqlc.arg(run_id)
@@ -471,7 +471,7 @@ RETURNING r.id, r.dispatch_state, r.offer_count, r.attempt_count,
           r.lease_accepted_at, r.lease_expires_at, r.attempt_deadline_at,
           clock_timestamp() AS database_now;
 
--- name: RenewAgentNodeRunAttempt :one
+-- name: RenewRuntimeRunAttempt :one
 WITH database_clock AS MATERIALIZED (
     SELECT clock_timestamp() AS database_now
 )

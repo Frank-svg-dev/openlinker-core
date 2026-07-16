@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -69,6 +70,86 @@ func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
 	require.Contains(t, manifest.States.Run, "success")
 	require.Equal(t, []string{"needs_agent", "open", "matched", "completed"}, manifest.States.Task)
 	require.Equal(t, "dag_async_agent_workflow_api", manifest.Workflows.Builder)
+}
+
+func TestRuntimeDiscoveryPolicyFixtureMatchesCoreManifest(t *testing.T) {
+	raw, err := os.ReadFile("../../contracts/runtime-discovery-policy-fixtures.json")
+	require.NoError(t, err)
+	var fixture struct {
+		Cases []struct {
+			Name     string             `json:"name"`
+			Manifest OpenLinkerManifest `json:"manifest"`
+		} `json:"cases"`
+		PolicyRecovery struct {
+			HTTP []struct {
+				Message string `json:"message"`
+				Recover bool   `json:"recover"`
+			} `json:"http"`
+			WebSocketClose []struct {
+				Reason  string `json:"reason"`
+				Recover bool   `json:"recover"`
+			} `json:"websocket_close"`
+		} `json:"policy_recovery"`
+		FallbackReasonCases []struct {
+			Reason string `json:"reason"`
+		} `json:"fallback_reason_cases"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &fixture))
+
+	var canonical *OpenLinkerManifest
+	for _, testCase := range fixture.Cases {
+		if testCase.Name == "full_auto_ws_pull" {
+			copy := testCase.Manifest
+			canonical = &copy
+			break
+		}
+	}
+	require.NotNil(t, canonical, "canonical policy fixture must contain full_auto_ws_pull")
+
+	manifest := NewManifest(&config.Config{
+		APIURL:             "https://api.example.test",
+		FrontendURL:        "https://app.example.test",
+		RuntimeMTLSEnabled: true,
+		RuntimeMTLSAPIURL:  canonical.BaseURLs.Runtime,
+	})
+	require.Equal(t, canonical.BaseURLs.Runtime, manifest.BaseURLs.Runtime)
+	require.Equal(t, canonical.Runtime.Enabled, manifest.Runtime.Enabled)
+	require.Equal(t, canonical.Runtime.MTLSRequired, manifest.Runtime.MTLSRequired)
+	require.Equal(t, canonical.Runtime.Transports, manifest.Runtime.Transports)
+	require.Equal(t, canonical.Runtime.DefaultTransport, manifest.Runtime.DefaultTransport)
+	require.Equal(t, canonical.Runtime.TransportPolicy, manifest.Runtime.TransportPolicy)
+
+	var recoverableHTTP, recoverableWebSocket []string
+	for _, testCase := range fixture.PolicyRecovery.HTTP {
+		if testCase.Recover {
+			recoverableHTTP = append(recoverableHTTP, testCase.Message)
+		}
+	}
+	for _, testCase := range fixture.PolicyRecovery.WebSocketClose {
+		if testCase.Recover {
+			recoverableWebSocket = append(recoverableWebSocket, testCase.Reason)
+		}
+	}
+	require.ElementsMatch(t, []string{
+		coreruntime.RuntimeTransportForbiddenSignal,
+		coreruntime.RuntimePolicyChangedSignal,
+	}, recoverableHTTP)
+	require.Equal(t, []string{coreruntime.RuntimePolicyChangedSignal}, recoverableWebSocket)
+
+	fixtureReasons := map[string]struct{}{}
+	for _, testCase := range fixture.FallbackReasonCases {
+		fixtureReasons[testCase.Reason] = struct{}{}
+	}
+	coreReasons := []coreruntime.RuntimeTransportReason{
+		coreruntime.RuntimeTransportReasonExplicit,
+		coreruntime.RuntimeTransportReasonWebSocketUnavailable,
+		coreruntime.RuntimeTransportReasonPolicyForced,
+		coreruntime.RuntimeTransportReasonRecovery,
+	}
+	require.Len(t, fixtureReasons, len(coreReasons))
+	for _, reason := range coreReasons {
+		require.Contains(t, fixtureReasons, string(reason))
+	}
 }
 
 func TestNewManifestFallsBackToLocalPublicEntrypoints(t *testing.T) {

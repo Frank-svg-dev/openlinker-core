@@ -202,12 +202,12 @@ func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 		"outstanding.accepted_at IS NULL",
 		"outstanding.finished_at IS NULL",
 	} {
-		if !strings.Contains(createAgentNodeRunOffer, fragment) {
+		if !strings.Contains(createRuntimeRunOffer, fragment) {
 			t.Fatalf("offer insert missing %q", fragment)
 		}
 	}
 
-	for _, query := range []string{confirmRunAssignment, renewAgentNodeRunAttempt} {
+	for _, query := range []string{confirmRunAssignment, renewRuntimeRunAttempt} {
 		if strings.Contains(query, "offer_expires_at >=") ||
 			strings.Contains(query, "lease_expires_at >=") {
 			t.Fatal("ACK/renew must reject the exact expiry boundary")
@@ -231,7 +231,7 @@ func TestRuntimeOfferAndLeaseQueriesAreFencedAndDatabaseTimed(t *testing.T) {
 		"GREATEST(",
 		"LEAST(",
 	} {
-		if !strings.Contains(renewAgentNodeRunAttempt, fragment) {
+		if !strings.Contains(renewRuntimeRunAttempt, fragment) {
 			t.Fatalf("renew query missing %q", fragment)
 		}
 	}
@@ -335,7 +335,7 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 	}
 	dbtx := &fakeDBTX{row: fakeRow{values: attemptValues}}
 	q := New(dbtx)
-	got, err := q.CreateAgentNodeRunOffer(context.Background(), CreateAgentNodeRunOfferParams{
+	got, err := q.CreateRuntimeRunOffer(context.Background(), CreateRuntimeRunOfferParams{
 		AttemptID: attemptID, LeaseID: leaseID, CoreInstanceID: coreID,
 		OfferTtlMs: 30_000, LeaseTtlMs: 60_000, AttemptTtlMs: 300_000,
 		RuntimeSessionID: sessionID, RunID: runID, NodeID: nodeID,
@@ -343,14 +343,14 @@ func TestRuntimeLeaseGeneratedMethodsScanAndPreserveArgumentOrder(t *testing.T) 
 	})
 	if err != nil || got.ID != attemptID || got.RuntimeSessionID == nil ||
 		*got.RuntimeSessionID != sessionID {
-		t.Fatalf("CreateAgentNodeRunOffer = %#v, %v", got, err)
+		t.Fatalf("CreateRuntimeRunOffer = %#v, %v", got, err)
 	}
 	wantArgs := []any{
 		attemptID, leaseID, coreID, int64(30_000), int64(60_000),
 		int64(300_000), sessionID, runID, nodeID, tokenID, workerID,
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, wantArgs) {
-		t.Fatalf("CreateAgentNodeRunOffer args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("CreateRuntimeRunOffer args = %#v", dbtx.queryRowArgs)
 	}
 
 	grantID, targetSessionID := uuid.New(), uuid.New()

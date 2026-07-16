@@ -143,7 +143,7 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		if err != nil || candidate.ID != fixture.runID || candidate.DatabaseNow.IsZero() {
 			t.Fatalf("claim candidate = %#v, %v", candidate, err)
 		}
-		attempt, err := q.CreateAgentNodeRunOffer(ctx, CreateAgentNodeRunOfferParams{
+		attempt, err := q.CreateRuntimeRunOffer(ctx, CreateRuntimeRunOfferParams{
 			AttemptID: fixture.attemptID, LeaseID: fixture.leaseID,
 			CoreInstanceID: fixture.coreID, OfferTtlMs: 30_000,
 			LeaseTtlMs: 60_000, AttemptTtlMs: 300_000,
@@ -152,9 +152,9 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 			WorkerID: fixture.workerID,
 		})
 		if err != nil || attempt.OfferNo != 1 || attempt.FencingToken != 1 {
-			t.Fatalf("CreateAgentNodeRunOffer = %#v, %v", attempt, err)
+			t.Fatalf("CreateRuntimeRunOffer = %#v, %v", attempt, err)
 		}
-		mirrored, err := q.MirrorRunAgentNodeOffer(ctx, MirrorRunAgentNodeOfferParams{
+		mirrored, err := q.MirrorRuntimeRunOffer(ctx, MirrorRuntimeRunOfferParams{
 			RunID: fixture.runID, AttemptID: fixture.attemptID,
 			LeaseID: fixture.leaseID, FencingToken: attempt.FencingToken,
 			RuntimeSessionID: &fixture.sourceSessionID, NodeID: &fixture.nodeID,
@@ -163,7 +163,7 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		})
 		if err != nil || mirrored.DispatchState != "offered" ||
 			mirrored.ActiveAttemptID == nil || *mirrored.ActiveAttemptID != fixture.attemptID {
-			t.Fatalf("MirrorRunAgentNodeOffer = %#v, %v", mirrored, err)
+			t.Fatalf("MirrorRuntimeRunOffer = %#v, %v", mirrored, err)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			t.Fatalf("offer transaction invariant failed: %v", err)
@@ -202,7 +202,7 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		if _, err := q.LockRunForLeaseMutation(ctx, fixture.runID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.LockAgentNodeRunAttemptForLeaseMutation(ctx, LockAgentNodeRunAttemptForLeaseMutationParams{
+		if _, err := q.LockRuntimeRunAttemptForLeaseMutation(ctx, LockRuntimeRunAttemptForLeaseMutationParams{
 			RunID: fixture.runID, AttemptID: fixture.attemptID,
 			LeaseID: fixture.leaseID, FencingToken: 1,
 			RuntimeSessionID: &fixture.sourceSessionID, NodeID: &fixture.nodeID,
@@ -244,7 +244,7 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 		if _, err := q.LockRunForLeaseMutation(ctx, fixture.runID); err != nil {
 			t.Fatal(err)
 		}
-		renewed, err := q.RenewAgentNodeRunAttempt(ctx, RenewAgentNodeRunAttemptParams{
+		renewed, err := q.RenewRuntimeRunAttempt(ctx, RenewRuntimeRunAttemptParams{
 			LeaseTtlMs: 90_000, CoreInstanceID: fixture.coreID,
 			RunID: fixture.runID, AttemptID: fixture.attemptID,
 			LeaseID: fixture.leaseID, FencingToken: 1,
@@ -252,7 +252,7 @@ func TestRuntimeLeaseAndResumeQueriesPostgres16(t *testing.T) {
 			CredentialID: &fixture.tokenID, WorkerID: &fixture.workerID,
 		})
 		if err != nil || renewed.LastRenewedAt == nil {
-			t.Fatalf("RenewAgentNodeRunAttempt = %#v, %v", renewed, err)
+			t.Fatalf("RenewRuntimeRunAttempt = %#v, %v", renewed, err)
 		}
 		if _, err := q.MirrorRunLeaseRenewal(ctx, MirrorRunLeaseRenewalParams{
 			RunID: fixture.runID, AttemptID: fixture.attemptID,

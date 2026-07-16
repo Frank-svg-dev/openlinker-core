@@ -197,6 +197,58 @@ func TestAuthorizerSupportsCurrentAndNextKeysAndRejectsUnknownKid(t *testing.T) 
 	}
 }
 
+func TestAuthorizerRejectsExpiredTokenAndRemovedPreviousKey(t *testing.T) {
+	previousSeed := bytes.Repeat([]byte{10}, ed25519.SeedSize)
+	nextSeed := bytes.Repeat([]byte{11}, ed25519.SeedSize)
+	nextPrivateKey := ed25519.NewKeyFromSeed(nextSeed)
+	authorizer, err := NewAuthorizer(
+		[]VerificationKey{{
+			KeyID:     "next",
+			PublicKey: base64.RawStdEncoding.EncodeToString(nextPrivateKey.Public().(ed25519.PublicKey)),
+		}},
+		"openlinker-cloud", "openlinker-core.external-execution", "openlinker-cloud",
+		&memoryReplayStore{seen: map[string]struct{}{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	previousSigner, err := NewServiceTokenSigner(
+		base64.RawStdEncoding.EncodeToString(previousSeed), "previous", "openlinker-cloud",
+		"openlinker-core.external-execution", "openlinker-cloud", 30*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousToken, err := previousSigner.Sign(ScopeValidateTarget, uuid.NewString())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, authErr := authorizer.Authorize(context.Background(), previousToken, ScopeValidateTarget)
+	assertHTTPStatus(t, authErr, http.StatusUnauthorized)
+
+	now := time.Now().UTC()
+	expiredClaims := ServiceTokenClaims{
+		Scope: ScopeValidateTarget, DelegatedActor: uuid.NewString(), CallerServiceID: "openlinker-cloud",
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer: "openlinker-cloud", Subject: serviceTokenSubject,
+			Audience:  jwt.ClaimStrings{"openlinker-core.external-execution"},
+			ExpiresAt: jwt.NewNumericDate(now.Add(-10 * time.Second)),
+			NotBefore: jwt.NewNumericDate(now.Add(-47 * time.Second)),
+			IssuedAt:  jwt.NewNumericDate(now.Add(-45 * time.Second)),
+			ID:        "expired-after-rotation-jti",
+		},
+	}
+	expired := jwt.NewWithClaims(jwt.SigningMethodEdDSA, expiredClaims)
+	expired.Header["kid"] = "next"
+	expiredToken, err := expired.SignedString(nextPrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, authErr = authorizer.Authorize(context.Background(), expiredToken, ScopeValidateTarget)
+	assertHTTPStatus(t, authErr, http.StatusUnauthorized)
+}
+
 func TestAuthorizerSeparatesIssuerFromCallerServiceIdentity(t *testing.T) {
 	seed := bytes.Repeat([]byte{8}, ed25519.SeedSize)
 	privateKey := ed25519.NewKeyFromSeed(seed)
