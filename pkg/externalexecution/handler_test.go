@@ -68,6 +68,7 @@ func TestHandlerFailsClosedWhenReplayStoreFails(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodPost, "/internal/external-execution-targets/validate", strings.NewReader(`{}`))
 	req.Header.Set(echo.HeaderAuthorization, "Bearer "+token)
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	c := echo.New().NewContext(req, httptest.NewRecorder())
 	assertHTTPStatus(t, NewHandler(&fakeExecutionHandlerService{}, authorizer).ValidateTarget(c), http.StatusServiceUnavailable)
 }

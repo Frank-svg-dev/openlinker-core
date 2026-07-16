@@ -60,7 +60,8 @@ type Config struct {
 	ExternalExecutionJWTIssuer           string `envconfig:"EXTERNAL_EXECUTION_JWT_ISSUER" default:"openlinker-cloud"`
 	ExternalExecutionJWTAudience         string `envconfig:"EXTERNAL_EXECUTION_JWT_AUDIENCE" default:"openlinker-core.external-execution"`
 	// Fixed to the migration-074 legacy namespace until an explicit rekey migration exists.
-	ExternalExecutionCallerServiceID string `envconfig:"EXTERNAL_EXECUTION_CALLER_SERVICE_ID" default:"openlinker-cloud"`
+	ExternalExecutionCallerServiceID        string `envconfig:"EXTERNAL_EXECUTION_CALLER_SERVICE_ID" default:"openlinker-cloud"`
+	ExternalExecutionRequestBindingRequired bool   `envconfig:"EXTERNAL_EXECUTION_REQUEST_BINDING_REQUIRED" default:"false"`
 
 	// A2A gRPC binding. Disabled by default so existing HTTP deployments do not
 	// need to expose an additional HTTP/2 port.

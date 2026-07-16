@@ -29,6 +29,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("EXTERNAL_EXECUTION_JWT_CURRENT_KEY_ID", "cloud-key-2026-07")
 	t.Setenv("EXTERNAL_EXECUTION_JWT_NEXT_PUBLIC_KEY", "base64-next-public-key")
 	t.Setenv("EXTERNAL_EXECUTION_JWT_NEXT_KEY_ID", "cloud-key-2026-08")
+	t.Setenv("EXTERNAL_EXECUTION_REQUEST_BINDING_REQUIRED", "true")
 	t.Setenv("ENV", "production")
 	t.Setenv("PORT", "9090")
 	t.Setenv("ALLOW_LOCAL_HTTP_ENDPOINTS", "true")
@@ -71,6 +72,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 		cfg.ExternalExecutionJWTCurrentKeyID != "cloud-key-2026-07" || cfg.ExternalExecutionJWTIssuer != "openlinker-cloud" ||
 		cfg.ExternalExecutionJWTAudience != "openlinker-core.external-execution" ||
 		cfg.ExternalExecutionCallerServiceID != "openlinker-cloud" ||
+		!cfg.ExternalExecutionRequestBindingRequired ||
 		cfg.ExternalExecutionJWTNextPublicKey != "base64-next-public-key" || cfg.ExternalExecutionJWTNextKeyID != "cloud-key-2026-08" {
 		t.Fatalf("external execution config = %#v", cfg)
 	}

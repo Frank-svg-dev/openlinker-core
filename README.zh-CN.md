@@ -204,6 +204,7 @@ User Token 的签发和验证已经是 Core 本地能力，不需要外部验证
 | `EXTERNAL_EXECUTION_JWT_CURRENT_PUBLIC_KEY` | 只用于验证产品无关的 External Execution Ed25519 服务 JWT；Redis 重放防护故障时 fail closed | 未配置可信服务端执行客户端时留空 |
 | `EXTERNAL_EXECUTION_JWT_CURRENT_KEY_ID` / `ISSUER` / `AUDIENCE` | 固定签名密钥代际、token 签发方和受众；issuer 同时隔离防重放命名空间 | 必须与可信客户端配置完全一致 |
 | `EXTERNAL_EXECUTION_CALLER_SERVICE_ID` | 签名 token 中稳定的业务调用方身份，与 issuer 独立 | migration 074 的历史行仍受支持期间必须严格为 `openlinker-cloud`；变更前必须先做显式数据 rekey migration |
+| `EXTERNAL_EXECUTION_REQUEST_BINDING_REQUIRED` | 要求 External Execution JWT 精确绑定最终 method、escaped path 和正文摘要 | 仅 Release A 兼容窗口设为 `false`；最大 60 秒 TTL、2 秒 leeway、在途窗口结束且 legacy 观测归零后必须设为 `true` |
 | `EXTERNAL_EXECUTION_JWT_NEXT_PUBLIC_KEY` / `NEXT_KEY_ID` | 滚动换钥期间可选的第二把验证公钥 | 两项同时配置或同时留空；next kid 必须不同于 current |
 
 ## 常用命令

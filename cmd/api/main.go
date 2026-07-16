@@ -498,12 +498,17 @@ func buildExternalExecutionAuthorizer(cfg *config.Config, redisClient *redis.Cli
 			KeyID: cfg.ExternalExecutionJWTNextKeyID, PublicKey: cfg.ExternalExecutionJWTNextPublicKey,
 		})
 	}
+	options := make([]externalexecution.AuthorizerOption, 0, 1)
+	if cfg.ExternalExecutionRequestBindingRequired {
+		options = append(options, externalexecution.WithRequestBindingRequired())
+	}
 	return externalexecution.NewAuthorizer(
 		keys,
 		cfg.ExternalExecutionJWTIssuer,
 		cfg.ExternalExecutionJWTAudience,
 		cfg.ExternalExecutionCallerServiceID,
 		externalexecution.NewRedisReplayStore(redisClient),
+		options...,
 	)
 }
 

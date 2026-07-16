@@ -225,6 +225,7 @@ can introspect the same token through Core.
 | `EXTERNAL_EXECUTION_JWT_CURRENT_PUBLIC_KEY` | Ed25519 public key used only to verify product-neutral External Execution service JWTs; replay protection fails closed through Redis | Leave empty unless a trusted server-side execution client is configured |
 | `EXTERNAL_EXECUTION_JWT_CURRENT_KEY_ID` / `ISSUER` / `AUDIENCE` | Pins the accepted signing key, token issuer, and audience; issuer also namespaces replay protection | Must exactly match the trusted client configuration |
 | `EXTERNAL_EXECUTION_CALLER_SERVICE_ID` | Stable business caller identity carried in the signed token, independent from issuer | Must remain exactly `openlinker-cloud` while migration 074 legacy rows are supported; changing it requires an explicit data rekey migration |
+| `EXTERNAL_EXECUTION_REQUEST_BINDING_REQUIRED` | Requires every External Execution JWT to bind the final method, escaped path, and exact body digest | Keep `false` only for the Release A compatibility window; set `true` after the maximum 60-second JWT TTL, 2-second leeway, in-flight window, and zero legacy observations |
 | `EXTERNAL_EXECUTION_JWT_NEXT_PUBLIC_KEY` / `NEXT_KEY_ID` | Optional second verification key for staged rotation | Set both or neither; the next kid must differ from current |
 
 ## Common Commands

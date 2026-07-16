@@ -23,10 +23,12 @@ import (
 )
 
 const (
-	ScopeValidateTarget = "target.validate"
-	ScopeStartExecution = "execution.start"
-	ScopeReadExecution  = "execution.read"
-	ErrorCodeJTIReplay  = "EXTERNAL_EXECUTION_JTI_REPLAY"
+	ScopeValidateTarget            = "target.validate"
+	ScopeStartExecution            = "execution.start"
+	ScopeReadExecution             = "execution.read"
+	ErrorCodeJTIReplay             = "EXTERNAL_EXECUTION_JTI_REPLAY"
+	ErrorCodeRequestBindingInvalid = "EXTERNAL_EXECUTION_REQUEST_BINDING_INVALID"
+	RequestBindingVersionV1        = "v1"
 	// LegacyCutoverCallerServiceID is the caller namespace assigned to every
 	// pre-074 execution row. Deployments must keep this identity until a future
 	// migration explicitly rekeys that historical namespace.
@@ -39,6 +41,22 @@ const (
 )
 
 type ServiceTokenClaims struct {
+	Scope                 string `json:"scope"`
+	DelegatedActor        string `json:"delegated_actor"`
+	CallerServiceID       string `json:"caller_service_id"`
+	RequestBindingVersion string `json:"request_binding_version,omitempty"`
+	RequestMethod         string `json:"request_method,omitempty"`
+	RequestPath           string `json:"request_path,omitempty"`
+	RequestBodySHA256     string `json:"request_body_sha256,omitempty"`
+	jwt.RegisteredClaims
+}
+
+// serviceTokenVerificationClaims deliberately omits request-binding fields.
+// Binding values are decoded from the raw claims JSON only after signature and
+// base service claims verification, so null/partial/wrongly typed binding keys
+// are classified as binding failures instead of being mistaken for legacy or
+// collapsed into a generic JWT parse failure.
+type serviceTokenVerificationClaims struct {
 	Scope           string `json:"scope"`
 	DelegatedActor  string `json:"delegated_actor"`
 	CallerServiceID string `json:"caller_service_id"`
@@ -92,6 +110,29 @@ func NewServiceTokenSigner(rawPrivateKey, keyID, issuer, audience, callerService
 }
 
 func (s *ServiceTokenSigner) Sign(scope, delegatedActor string) (string, error) {
+	return s.sign(scope, delegatedActor, nil)
+}
+
+// SignRequest issues a v1 credential bound to the exact HTTP request bytes.
+// escapedPath must be the final request URL's EscapedPath, not a route template.
+func (s *ServiceTokenSigner) SignRequest(scope, delegatedActor, method, escapedPath string, body []byte) (string, error) {
+	method = strings.TrimSpace(method)
+	if method == "" || method != strings.ToUpper(method) {
+		return "", errors.New("external execution request method must be uppercase")
+	}
+	if escapedPath == "" || !strings.HasPrefix(escapedPath, "/") ||
+		strings.ContainsAny(escapedPath, "?#") || strings.TrimSpace(escapedPath) != escapedPath {
+		return "", errors.New("external execution request escaped path is invalid")
+	}
+	return s.sign(scope, delegatedActor, &RequestBinding{
+		Version: RequestBindingVersionV1,
+		Method:  method,
+		Path:    escapedPath,
+		BodySHA: RequestBodySHA256(body),
+	})
+}
+
+func (s *ServiceTokenSigner) sign(scope, delegatedActor string, binding *RequestBinding) (string, error) {
 	if s == nil || len(s.privateKey) != ed25519.PrivateKeySize {
 		return "", errors.New("external execution service signer is not configured")
 	}
@@ -114,6 +155,12 @@ func (s *ServiceTokenSigner) Sign(scope, delegatedActor string) (string, error) 
 			IssuedAt:  jwt.NewNumericDate(now),
 			ID:        uuid.NewString(),
 		},
+	}
+	if binding != nil {
+		claims.RequestBindingVersion = binding.Version
+		claims.RequestMethod = binding.Method
+		claims.RequestPath = binding.Path
+		claims.RequestBodySHA256 = binding.BodySHA
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims)
 	token.Header["kid"] = s.keyID
@@ -145,15 +192,27 @@ func (s *RedisReplayStore) Consume(ctx context.Context, issuer, jti string, ttl 
 }
 
 type Authorizer struct {
-	publicKeys map[string]ed25519.PublicKey
-	issuer     string
-	audience   string
-	callerID   string
-	replay     ReplayStore
-	now        func() time.Time
+	publicKeys            map[string]ed25519.PublicKey
+	issuer                string
+	audience              string
+	callerID              string
+	replay                ReplayStore
+	requireRequestBinding bool
+	now                   func() time.Time
 }
 
-func NewAuthorizer(keys []VerificationKey, issuer, audience, callerServiceID string, replay ReplayStore) (*Authorizer, error) {
+type AuthorizerOption func(*Authorizer)
+
+// WithRequestBindingRequired selects the Release B fail-closed mode. Without
+// this option Release A accepts only tokens whose four binding keys are all
+// absent; partial, null, malformed, or unknown binding claims still fail.
+func WithRequestBindingRequired() AuthorizerOption {
+	return func(authorizer *Authorizer) {
+		authorizer.requireRequestBinding = true
+	}
+}
+
+func NewAuthorizer(keys []VerificationKey, issuer, audience, callerServiceID string, replay ReplayStore, options ...AuthorizerOption) (*Authorizer, error) {
 	issuer = strings.TrimSpace(issuer)
 	audience = strings.TrimSpace(audience)
 	callerServiceID = strings.TrimSpace(callerServiceID)
@@ -184,16 +243,33 @@ func NewAuthorizer(keys []VerificationKey, issuer, audience, callerServiceID str
 	if len(publicKeys) == 0 {
 		return nil, errors.New("at least one external execution JWT verification key is required")
 	}
-	return &Authorizer{
+	authorizer := &Authorizer{
 		publicKeys: publicKeys, issuer: issuer, audience: audience, callerID: callerServiceID, replay: replay, now: time.Now,
-	}, nil
+	}
+	for _, option := range options {
+		if option != nil {
+			option(authorizer)
+		}
+	}
+	return authorizer, nil
 }
 
 func (a *Authorizer) Authorize(ctx context.Context, rawToken, requiredScope string) (*Principal, error) {
+	verified, err := a.verify(rawToken, requiredScope)
+	if err != nil {
+		return nil, err
+	}
+	if verified.bindingClaimCount != 0 || a.requireRequestBinding {
+		return nil, requestBindingInvalidError()
+	}
+	return a.consume(ctx, verified)
+}
+
+func (a *Authorizer) verify(rawToken, requiredScope string) (*verifiedServiceToken, error) {
 	if a == nil || len(a.publicKeys) == 0 || a.replay == nil {
 		return nil, httpx.ServiceUnavailable("外部执行认证暂不可用")
 	}
-	claims := &ServiceTokenClaims{}
+	claims := &serviceTokenVerificationClaims{}
 	token, err := jwt.ParseWithClaims(
 		strings.TrimSpace(rawToken),
 		claims,
@@ -241,14 +317,44 @@ func (a *Authorizer) Authorize(ctx context.Context, rawToken, requiredScope stri
 	if issuedAt.After(now.Add(serviceTokenLeeway)) || !expiresAt.After(now) || expiresAt.Sub(issuedAt) > maximumServiceTokenTTL {
 		return nil, httpx.Unauthorized("外部执行服务凭据无效")
 	}
-	consumed, err := a.replay.Consume(ctx, claims.Issuer, claims.ID, expiresAt.Sub(now)+serviceTokenLeeway)
+	binding, bindingClaimCount, bindingValuesValid, err := parseRequestBindingClaims(rawToken)
+	if err != nil {
+		return nil, httpx.Unauthorized("外部执行服务凭据无效")
+	}
+	return &verifiedServiceToken{
+		claims:             claims,
+		principal:          &Principal{CallerServiceID: claims.CallerServiceID, ActorUserID: actorID},
+		expiresAt:          expiresAt,
+		binding:            binding,
+		bindingClaimCount:  bindingClaimCount,
+		bindingValuesValid: bindingValuesValid,
+	}, nil
+}
+
+func (a *Authorizer) consume(ctx context.Context, verified *verifiedServiceToken) (*Principal, error) {
+	if a == nil || verified == nil || verified.claims == nil || verified.principal == nil {
+		return nil, httpx.ServiceUnavailable("外部执行认证暂不可用")
+	}
+	now := a.now().UTC()
+	if !verified.expiresAt.After(now) {
+		return nil, httpx.Unauthorized("外部执行服务凭据无效")
+	}
+	consumed, err := a.replay.Consume(
+		ctx,
+		verified.claims.Issuer,
+		verified.claims.ID,
+		verified.expiresAt.Sub(now)+serviceTokenLeeway,
+	)
 	if err != nil {
 		return nil, httpx.ServiceUnavailable("外部执行防重放校验暂不可用")
 	}
 	if !consumed {
 		return nil, httpx.NewError(http.StatusConflict, httpx.ErrorCode(ErrorCodeJTIReplay), "外部执行服务凭据已使用")
 	}
-	return &Principal{CallerServiceID: claims.CallerServiceID, ActorUserID: actorID}, nil
+	if verified.bindingClaimCount == 0 {
+		recordLegacyRequestBindingAccepted()
+	}
+	return verified.principal, nil
 }
 
 func ParseEd25519PrivateKey(raw string) (ed25519.PrivateKey, error) {
