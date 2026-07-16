@@ -32,6 +32,12 @@ func TestRuntimeSchemaIdentityTracksTerminalCancellationReapMigration(t *testing
 	}
 }
 
+func TestRuntimeClusterMemberLiveWindowIsCanonical(t *testing.T) {
+	if RuntimeClusterMemberLiveWindow != 15*time.Second {
+		t.Fatalf("RuntimeClusterMemberLiveWindow = %s", RuntimeClusterMemberLiveWindow)
+	}
+}
+
 func TestRuntimeClusterReadinessHealthyReplicaSet(t *testing.T) {
 	identity := runtimeClusterTestIdentity()
 	repository := newRuntimeClusterRepositoryFake(identity, 2)

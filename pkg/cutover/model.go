@@ -114,19 +114,29 @@ type DatabaseEvidence struct {
 	OtherClientBackends int64 `json:"other_client_backends"`
 }
 
+type RetirementEvidence struct {
+	LiveWindowMilliseconds int64 `json:"live_window_ms"`
+	MembersBefore          int64 `json:"members_before"`
+	LiveMembers            int64 `json:"live_members"`
+	StaleMembers           int64 `json:"stale_members"`
+	RetiredStaleMembers    int64 `json:"retired_stale_members"`
+	MembersAfter           int64 `json:"members_after"`
+}
+
 type Report struct {
-	DatabaseTime           time.Time        `json:"database_time"`
-	SchemaInstalled        bool             `json:"runtime_schema_installed"`
-	Control                *Control         `json:"control,omitempty"`
-	Current                Current          `json:"current"`
-	Members                []Member         `json:"members"`
-	Legacy                 *LegacyEvidence  `json:"legacy,omitempty"`
-	Database               DatabaseEvidence `json:"database"`
-	Readiness              Readiness        `json:"readiness"`
-	ReopenReadiness        *Readiness       `json:"reopen_readiness,omitempty"`
-	SignalBus              SignalBus        `json:"signal_bus"`
-	Changed                bool             `json:"changed,omitempty"`
-	RuntimeUninstalledNoop bool             `json:"runtime_uninstalled_noop,omitempty"`
+	DatabaseTime           time.Time           `json:"database_time"`
+	SchemaInstalled        bool                `json:"runtime_schema_installed"`
+	Control                *Control            `json:"control,omitempty"`
+	Current                Current             `json:"current"`
+	Members                []Member            `json:"members"`
+	Legacy                 *LegacyEvidence     `json:"legacy,omitempty"`
+	Database               DatabaseEvidence    `json:"database"`
+	Retirement             *RetirementEvidence `json:"retirement,omitempty"`
+	Readiness              Readiness           `json:"readiness"`
+	ReopenReadiness        *Readiness          `json:"reopen_readiness,omitempty"`
+	SignalBus              SignalBus           `json:"signal_bus"`
+	Changed                bool                `json:"changed,omitempty"`
+	RuntimeUninstalledNoop bool                `json:"runtime_uninstalled_noop,omitempty"`
 }
 
 func (r Report) MarshalJSON() ([]byte, error) {
@@ -157,6 +167,10 @@ type Identity struct {
 type PreflightOptions struct {
 	RequireExclusive bool
 	RequireNoMembers bool
+}
+
+type RetirementOptions struct {
+	AllowRuntimeUninstalledNoop bool
 }
 
 type TransitionRequest struct {

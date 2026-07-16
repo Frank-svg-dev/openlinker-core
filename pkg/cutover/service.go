@@ -415,6 +415,197 @@ func (s *Service) Reopen(ctx context.Context, req TransitionRequest) (Report, er
 	return s.transition(ctx, "normal", req)
 }
 
+// RetireStaleMembers removes abandoned membership rows only after proving that
+// this command is the sole database client and no member is still live. The
+// follow-up migration preflight remains the authoritative exclusivity gate.
+func (s *Service) RetireStaleMembers(ctx context.Context, opts RetirementOptions) (Report, error) {
+	if s == nil || s.pool == nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	return s.retireStaleMembers(ctx, s.pool.BeginTx, opts)
+}
+
+type beginTxFunc func(context.Context, pgx.TxOptions) (pgx.Tx, error)
+
+func (s *Service) retireStaleMembers(ctx context.Context, begin beginTxFunc, opts RetirementOptions) (Report, error) {
+	if s == nil || begin == nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	tx, err := begin(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	report := Report{
+		Members:   []Member{},
+		SignalBus: SignalBus{Mode: s.signalMode},
+		Retirement: &RetirementEvidence{
+			LiveWindowMilliseconds: s.liveWindow.Milliseconds(),
+		},
+	}
+	var controlPresent, contractsPresent, membersPresent bool
+	if err = tx.QueryRow(ctx, `
+SELECT to_regclass('public.runtime_cluster_control') IS NOT NULL,
+       to_regclass('public.runtime_schema_contracts') IS NOT NULL,
+       to_regclass('public.runtime_cluster_members') IS NOT NULL
+`).Scan(&controlPresent, &contractsPresent, &membersPresent); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	present := 0
+	for _, tablePresent := range []bool{controlPresent, contractsPresent, membersPresent} {
+		if tablePresent {
+			present++
+		}
+	}
+	if present == 0 {
+		if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&report.DatabaseTime); err != nil {
+			return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+		}
+		if !opts.AllowRuntimeUninstalledNoop {
+			report.Readiness = readiness([]Blocker{
+				blocker(BlockerClusterSchemaUnavailable, "cluster", "Runtime schema is not installed"),
+			})
+			return report, &OperationError{Code: BlockerClusterSchemaUnavailable}
+		}
+		if err = tx.Commit(ctx); err != nil {
+			return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+		}
+		report.Readiness = readiness(nil)
+		report.RuntimeUninstalledNoop = true
+		report.SignalBus.Healthy = s.signalHealthy(ctx)
+		return report, nil
+	}
+	if present != 3 {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	// SHARE ROW EXCLUSIVE conflicts with the ROW EXCLUSIVE locks taken by
+	// membership inserts, heartbeats, and deletes while still allowing readers.
+	if _, err = tx.Exec(ctx, `LOCK TABLE runtime_cluster_members IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	if err = tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&report.DatabaseTime); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	if report.Database.OtherClientBackends, err = otherDatabaseClientBackends(ctx, tx); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+
+	rows, err := tx.Query(ctx, `
+SELECT instance_id, release_version, release_commit, schema_version,
+       schema_checksum, runtime_contract_id, runtime_contract_digest,
+       started_at, heartbeat_at, draining, ready
+FROM runtime_cluster_members
+ORDER BY started_at, instance_id
+	`)
+	if err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	cutoff := report.DatabaseTime.Add(-s.liveWindow)
+	for rows.Next() {
+		var member Member
+		if err = rows.Scan(
+			&member.InstanceID, &member.ReleaseID, &member.GitSHA,
+			&member.SchemaVersion, &member.SchemaChecksum,
+			&member.RuntimeContractID, &member.RuntimeContractDigest,
+			&member.StartedAt, &member.LastSeenAt, &member.Draining, &member.Ready,
+		); err != nil {
+			rows.Close()
+			return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+		}
+		member.Live = !member.LastSeenAt.Before(cutoff)
+		report.Members = append(report.Members, member)
+		if member.Live {
+			report.Retirement.LiveMembers++
+		} else {
+			report.Retirement.StaleMembers++
+		}
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	rows.Close()
+	report.SchemaInstalled = true
+	report.Retirement.MembersBefore = int64(len(report.Members))
+	report.Retirement.MembersAfter = report.Retirement.MembersBefore
+
+	var blockers []Blocker
+	if report.Database.OtherClientBackends > 0 {
+		blockers = append(blockers, blocker(BlockerDatabaseClientsActive, "database", "other application database clients are still connected"))
+	}
+	if report.Retirement.LiveMembers > 0 {
+		blockers = append(blockers, blocker(BlockerClusterMembersRegistered, "cluster", "live runtime cluster members prevent stale-member retirement"))
+	}
+	if len(blockers) > 0 {
+		report.Readiness = readiness(uniqueBlockers(blockers))
+		return report, &OperationError{Code: report.Readiness.Blockers[0].Code}
+	}
+
+	if report.Database.OtherClientBackends, err = otherDatabaseClientBackends(ctx, tx); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	if report.Database.OtherClientBackends > 0 {
+		report.Readiness = readiness([]Blocker{
+			blocker(BlockerDatabaseClientsActive, "database", "another application database client connected before stale-member deletion"),
+		})
+		return report, &OperationError{Code: BlockerDatabaseClientsActive}
+	}
+	var retired int64
+	if report.Retirement.StaleMembers > 0 {
+		tag, deleteErr := tx.Exec(ctx, `
+DELETE FROM runtime_cluster_members
+WHERE heartbeat_at < $1
+`, cutoff)
+		if deleteErr != nil || tag.RowsAffected() != report.Retirement.StaleMembers {
+			return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+		}
+		retired = tag.RowsAffected()
+	}
+	if err = tx.QueryRow(ctx, `SELECT COUNT(*)::bigint FROM runtime_cluster_members`).Scan(&report.Retirement.MembersAfter); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	if report.Retirement.MembersAfter != 0 {
+		report.Readiness = readiness([]Blocker{
+			blocker(BlockerClusterMembersRegistered, "cluster", "runtime cluster membership rows remain after stale-member retirement"),
+		})
+		return report, &OperationError{Code: BlockerClusterMembersRegistered}
+	}
+	if report.Database.OtherClientBackends, err = otherDatabaseClientBackends(ctx, tx); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	if report.Database.OtherClientBackends > 0 {
+		report.Readiness = readiness([]Blocker{
+			blocker(BlockerDatabaseClientsActive, "database", "another application database client connected before stale-member retirement commit"),
+		})
+		return report, &OperationError{Code: BlockerDatabaseClientsActive}
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}
+	}
+	report.Retirement.RetiredStaleMembers = retired
+	report.Members = []Member{}
+	report.Readiness = readiness(nil)
+	report.Changed = report.Retirement.RetiredStaleMembers > 0
+	report.SignalBus.Healthy = s.signalHealthy(ctx)
+	return report, nil
+}
+
+func otherDatabaseClientBackends(ctx context.Context, tx pgx.Tx) (int64, error) {
+	if _, err := tx.Exec(ctx, `SELECT pg_stat_clear_snapshot()`); err != nil {
+		return 0, err
+	}
+	var count int64
+	err := tx.QueryRow(ctx, `
+SELECT COUNT(*)::bigint
+FROM pg_stat_activity
+WHERE datid = (SELECT oid FROM pg_database WHERE datname = current_database())
+  AND pid <> pg_backend_pid()
+  AND backend_type = 'client backend'
+`).Scan(&count)
+	return count, err
+}
+
 func (s *Service) transition(ctx context.Context, target string, req TransitionRequest) (Report, error) {
 	if s == nil || s.pool == nil {
 		return Report{}, &OperationError{Code: BlockerDatabaseUnavailable}

@@ -151,6 +151,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 				RuntimeContractID: runtime.RuntimeContractID, RuntimeContractDigest: runtime.RuntimeContractDigest,
 			},
 			SignalMode: signalMode, SignalHealth: opts.RuntimeSignalBus,
+			LiveWindow: runtime.RuntimeClusterMemberLiveWindow,
 		})).Register(api, jwtMiddleware, opts.AdminMiddleware)
 	}
 	agentSvc.SetDryRunner(runtimeSvc)

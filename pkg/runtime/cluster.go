@@ -38,8 +38,11 @@ const (
 
 	runtimeClusterHeartbeatInterval = 5 * time.Second
 	runtimeClusterHeartbeatTimeout  = 4 * time.Second
-	runtimeClusterMemberLiveWindow  = 15 * time.Second
 	runtimeClusterDependencyTimeout = 2 * time.Second
+
+	// RuntimeClusterMemberLiveWindow is the canonical liveness boundary for
+	// readiness and cutover retirement. A heartbeat exactly at the cutoff is live.
+	RuntimeClusterMemberLiveWindow = 15 * time.Second
 )
 
 type RuntimeClusterMode string
@@ -141,7 +144,7 @@ func NewRuntimeClusterCoordinator(
 		identity,
 		requireSignal,
 		runtimeClusterHeartbeatInterval,
-		runtimeClusterMemberLiveWindow,
+		RuntimeClusterMemberLiveWindow,
 	)
 }
 

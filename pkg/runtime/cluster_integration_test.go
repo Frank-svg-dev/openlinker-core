@@ -40,7 +40,7 @@ func TestRuntimeClusterPostgresMembershipAndMaintenanceGate(t *testing.T) {
 	if err = repository.UpsertMember(ctx, identity, false, true); err != nil {
 		t.Fatalf("upsert member: %v", err)
 	}
-	snapshot, err := repository.Snapshot(ctx, runtimeClusterMemberLiveWindow)
+	snapshot, err := repository.Snapshot(ctx, RuntimeClusterMemberLiveWindow)
 	if err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}

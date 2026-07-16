@@ -28,6 +28,26 @@ func TestParseCommandRequiresExplicitCASAndCutoverIdentity(t *testing.T) {
 	}
 }
 
+func TestRetireStaleMembersHasNoUnsafeMutationFlags(t *testing.T) {
+	getenv := func(key string) string {
+		if key == "DATABASE_URL" {
+			return "postgres://openlinker:secret@postgres/openlinker"
+		}
+		return ""
+	}
+	var stderr bytes.Buffer
+	if _, err := parseCommand("retire-stale-members", nil, &stderr, getenv); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := parseCommand("retire-stale-members", []string{"--runtime-uninstalled-ok"}, &stderr, getenv)
+	if err != nil || !cfg.allowRuntimeUninstalledNoop {
+		t.Fatalf("cfg=%#v err=%v", cfg, err)
+	}
+	if _, err := parseCommand("retire-stale-members", []string{"--force"}, &stderr, getenv); err == nil {
+		t.Fatal("retire-stale-members accepted an unsafe force flag")
+	}
+}
+
 func TestRuntimeUninstalledMaintenanceNoopStillNeedsExplicitFlag(t *testing.T) {
 	getenv := func(key string) string {
 		if key == "DATABASE_URL" {
@@ -50,6 +70,9 @@ func TestHelpAndUnknownCommandDoNotConnect(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run([]string{"help"}, &stdout, &stderr, getenv); code != exitOK || !strings.Contains(stdout.String(), "runtime-cutover") {
 		t.Fatalf("help code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "retire-stale-members") {
+		t.Fatalf("help omitted retire-stale-members: %q", stdout.String())
 	}
 	stdout.Reset()
 	stderr.Reset()

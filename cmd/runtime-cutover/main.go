@@ -72,7 +72,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		return exitOK
 	}
 	switch command {
-	case "status", "preflight", "drain", "hard-maintenance", "reopen":
+	case "status", "preflight", "retire-stale-members", "drain", "hard-maintenance", "reopen":
 	default:
 		usage(stderr)
 		return exitUsage
@@ -126,6 +126,7 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 			RuntimeContractDigest: openlinkerruntime.RuntimeContractDigest,
 		},
 		SignalMode: cfg.signalMode, SignalHealth: signalHealth,
+		LiveWindow: openlinkerruntime.RuntimeClusterMemberLiveWindow,
 	})
 	request := cutover.TransitionRequest{
 		ExpectedVersion:             cfg.expectedVersion,
@@ -157,6 +158,10 @@ func run(args []string, stdout, stderr io.Writer, getenv func(string) string) in
 		if err == nil && !report.Readiness.Ready {
 			err = &cutover.OperationError{Code: report.Readiness.Blockers[0].Code}
 		}
+	case "retire-stale-members":
+		report, err = service.RetireStaleMembers(ctx, cutover.RetirementOptions{
+			AllowRuntimeUninstalledNoop: cfg.allowRuntimeUninstalledNoop,
+		})
 	case "drain":
 		report, err = service.Drain(ctx, request)
 	case "hard-maintenance":
@@ -207,6 +212,8 @@ func parseCommand(command string, args []string, stderr io.Writer, getenv func(s
 	case "preflight":
 		fs.BoolVar(&cfg.requireExclusive, "require-exclusive", false, "block while another database client is connected")
 		fs.BoolVar(&cfg.requireNoMembers, "require-no-members", false, "block while any cluster membership row remains")
+	case "retire-stale-members":
+		fs.BoolVar(&cfg.allowRuntimeUninstalledNoop, "runtime-uninstalled-ok", false, "return an explicit no-op when Runtime schema is not installed")
 	case "drain":
 		fs.Int64Var(&cfg.expectedVersion, "expected-version", 0, "required runtime_cluster_control CAS version")
 		fs.IntVar(&cfg.expectedReplicas, "expected-replicas", 0, "required exact Core replica count")
@@ -278,5 +285,5 @@ func writeError(writer io.Writer, code string) {
 }
 
 func usage(writer io.Writer) {
-	fmt.Fprintln(writer, "usage: runtime-cutover <status|preflight|drain|hard-maintenance|reopen> [flags]")
+	fmt.Fprintln(writer, "usage: runtime-cutover <status|preflight|retire-stale-members|drain|hard-maintenance|reopen> [flags]")
 }
