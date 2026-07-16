@@ -1277,6 +1277,271 @@ func TestWorkflowStepCopyAndRunNodeErrorEdges(t *testing.T) {
 	}
 }
 
+func TestRunWorkflowNodeAttachesChildRunBeforeWaiting(t *testing.T) {
+	runID := uuid.New()
+	workflowID := uuid.New()
+	userID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	stepID := uuid.New()
+	childRunID := uuid.New()
+	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
+	stepValues[0] = stepID
+	successStepValues := append([]any(nil), stepValues...)
+	successStepValues[5] = &childRunID
+	successStepValues[6] = workflowRunStatusSuccess
+	successStepValues[8] = []byte(`{"summary":"done"}`)
+
+	dbtx := &workflowFakeDBTX{
+		execRowsAffected: 1,
+		queryRowRows: []workflowFakeRow{
+			{values: stepValues},
+			{values: successStepValues},
+		},
+	}
+	runtimeClient := &workflowRuntimeFake{
+		runResponse: &runtimemod.RunResponse{RunID: childRunID.String(), Status: runtimeRunStatusRunning},
+		getRunResponse: &runtimemod.RunResponse{
+			RunID:  childRunID.String(),
+			Status: runtimeRunStatusSuccess,
+			Output: map[string]interface{}{"summary": "done"},
+		},
+		onGetRun: func(gotRunID uuid.UUID) error {
+			if gotRunID != childRunID {
+				return fmt.Errorf("GetRun runID = %s, want %s", gotRunID, childRunID)
+			}
+			if !strings.Contains(dbtx.execSQL, "-- name: AttachWorkflowRunStepRun") {
+				return fmt.Errorf("GetRun called before child run attachment: %q", dbtx.execSQL)
+			}
+			if !reflect.DeepEqual(dbtx.execArgs, []any{stepID, childRunID}) {
+				return fmt.Errorf("attachment args = %#v", dbtx.execArgs)
+			}
+			return nil
+		},
+	}
+	svc := &Service{queries: db.New(dbtx), runtime: runtimeClient}
+	result := svc.runWorkflowNode(
+		context.Background(),
+		userID,
+		db.Workflow{ID: workflowID},
+		db.WorkflowRun{ID: runID, UserID: userID},
+		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
+		map[string]interface{}{"node_key": "extract"},
+		0,
+	)
+	if result.Err != nil || result.Output["summary"] != "done" {
+		t.Fatalf("runWorkflowNode result = %#v", result)
+	}
+	if runtimeClient.getRunCalls != 1 {
+		t.Fatalf("GetRun calls = %d, want 1", runtimeClient.getRunCalls)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepSuccess") {
+		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
+	}
+	terminalRunID, ok := dbtx.queryRowArgs[1].(*uuid.UUID)
+	if !ok || terminalRunID == nil || *terminalRunID != childRunID {
+		t.Fatalf("terminal step run_id = %#v, want %s", dbtx.queryRowArgs[1], childRunID)
+	}
+}
+
+func TestRunWorkflowNodeRejectsInvalidChildRunIDWithoutWaiting(t *testing.T) {
+	runID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
+	failedStepValues := append([]any(nil), stepValues...)
+	failedStepValues[6] = workflowRunStatusFailed
+
+	dbtx := &workflowFakeDBTX{queryRowRows: []workflowFakeRow{
+		{values: stepValues},
+		{values: failedStepValues},
+	}}
+	runtimeClient := &workflowRuntimeFake{runResponse: &runtimemod.RunResponse{
+		RunID:  "not-a-uuid",
+		Status: runtimeRunStatusRunning,
+	}}
+	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
+		context.Background(),
+		uuid.New(),
+		db.Workflow{ID: uuid.New()},
+		db.WorkflowRun{ID: runID},
+		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
+		map[string]interface{}{"node_key": "extract"},
+		0,
+	)
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "runID 无效") {
+		t.Fatalf("runWorkflowNode error = %v", result.Err)
+	}
+	if runtimeClient.getRunCalls != 0 {
+		t.Fatalf("GetRun calls = %d, want 0", runtimeClient.getRunCalls)
+	}
+	if dbtx.execSQL != "" {
+		t.Fatalf("invalid child run must not be attached: %q", dbtx.execSQL)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepFailed") {
+		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
+	}
+	invalidRunID, ok := dbtx.queryRowArgs[1].(*uuid.UUID)
+	if !ok || invalidRunID != nil {
+		t.Fatalf("invalid child run_id persisted as %#v", dbtx.queryRowArgs[1])
+	}
+}
+
+func TestRunWorkflowNodeDurablyAttachesChildRunAfterContextCancellation(t *testing.T) {
+	runID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	stepID := uuid.New()
+	childRunID := uuid.New()
+	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
+	stepValues[0] = stepID
+	failedStepValues := append([]any(nil), stepValues...)
+	failedStepValues[5] = &childRunID
+	failedStepValues[6] = workflowRunStatusFailed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dbtx := &workflowFakeDBTX{
+		execRowsAffected: 1,
+		queryRowRows: []workflowFakeRow{
+			{values: stepValues},
+			{values: failedStepValues},
+		},
+	}
+	runtimeClient := &workflowRuntimeFake{
+		runResponse: &runtimemod.RunResponse{
+			RunID:  childRunID.String(),
+			Status: runtimeRunStatusRunning,
+		},
+		getRunResponse: &runtimemod.RunResponse{
+			RunID:  childRunID.String(),
+			Status: runtimeRunStatusRunning,
+		},
+		onRun: cancel,
+	}
+	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
+		ctx,
+		uuid.New(),
+		db.Workflow{ID: uuid.New()},
+		db.WorkflowRun{ID: runID},
+		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
+		map[string]interface{}{"node_key": "extract"},
+		0,
+	)
+	if result.Err == nil || !strings.Contains(result.Err.Error(), context.Canceled.Error()) {
+		t.Fatalf("runWorkflowNode error = %v, want context cancellation after attachment", result.Err)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("source context error = %v, want canceled", ctx.Err())
+	}
+	if !errors.Is(runtimeClient.getRunContextErr, context.Canceled) {
+		t.Fatalf("GetRun context error = %v, want original cancellation", runtimeClient.getRunContextErr)
+	}
+	if dbtx.execContextErr != nil {
+		t.Fatalf("durable child run attachment inherited canceled context: %v", dbtx.execContextErr)
+	}
+	if !strings.Contains(dbtx.execSQL, "-- name: AttachWorkflowRunStepRun") ||
+		!reflect.DeepEqual(dbtx.execArgs, []any{stepID, childRunID}) {
+		t.Fatalf("attachment = %q %#v", dbtx.execSQL, dbtx.execArgs)
+	}
+	if dbtx.queryRowContextErr != nil {
+		t.Fatalf("terminal step evidence inherited canceled context: %v", dbtx.queryRowContextErr)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepFailed") {
+		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
+	}
+}
+
+func TestRunWorkflowNodeStopsWhenChildRunAttachmentErrors(t *testing.T) {
+	runID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	stepID := uuid.New()
+	childRunID := uuid.New()
+	attachErr := errors.New("attach unavailable")
+	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
+	stepValues[0] = stepID
+	failedStepValues := append([]any(nil), stepValues...)
+	failedStepValues[5] = &childRunID
+	failedStepValues[6] = workflowRunStatusFailed
+
+	ctx, cancel := context.WithCancel(context.Background())
+	dbtx := &workflowFakeDBTX{
+		execErr: attachErr,
+		queryRowRows: []workflowFakeRow{
+			{values: stepValues},
+			{values: failedStepValues},
+		},
+	}
+	runtimeClient := &workflowRuntimeFake{runResponse: &runtimemod.RunResponse{
+		RunID:  childRunID.String(),
+		Status: runtimeRunStatusRunning,
+	}, onRun: cancel}
+	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
+		ctx,
+		uuid.New(),
+		db.Workflow{ID: uuid.New()},
+		db.WorkflowRun{ID: runID},
+		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
+		map[string]interface{}{"node_key": "extract"},
+		0,
+	)
+	if result.Err == nil || !strings.Contains(result.Err.Error(), attachErr.Error()) {
+		t.Fatalf("runWorkflowNode error = %v", result.Err)
+	}
+	if runtimeClient.getRunCalls != 0 {
+		t.Fatalf("GetRun calls = %d, want 0", runtimeClient.getRunCalls)
+	}
+	if !errors.Is(ctx.Err(), context.Canceled) {
+		t.Fatalf("source context error = %v, want canceled", ctx.Err())
+	}
+	if !strings.Contains(dbtx.execSQL, "-- name: AttachWorkflowRunStepRun") {
+		t.Fatalf("attachment query = %q", dbtx.execSQL)
+	}
+	if !strings.Contains(dbtx.queryRowSQL, "-- name: MarkWorkflowRunStepFailed") {
+		t.Fatalf("terminal step query = %q", dbtx.queryRowSQL)
+	}
+	terminalRunID, ok := dbtx.queryRowArgs[1].(*uuid.UUID)
+	if !ok || terminalRunID == nil || *terminalRunID != childRunID {
+		t.Fatalf("terminal step run_id = %#v, want %s", dbtx.queryRowArgs[1], childRunID)
+	}
+	if dbtx.queryRowContextErr != nil {
+		t.Fatalf("attachment compensation inherited canceled context: %v", dbtx.queryRowContextErr)
+	}
+}
+
+func TestRunWorkflowNodeStopsWhenChildRunAttachmentIsRejected(t *testing.T) {
+	runID := uuid.New()
+	nodeID := uuid.New()
+	agentID := uuid.New()
+	stepValues := workflowFakeStepValues(runID, nodeID, agentID, "extract", workflowRunStatusRunning)
+	dbtx := &workflowFakeDBTX{
+		execRowsAffected: 0,
+		queryRowRows:     []workflowFakeRow{{values: stepValues}},
+	}
+	runtimeClient := &workflowRuntimeFake{runResponse: &runtimemod.RunResponse{
+		RunID:  uuid.NewString(),
+		Status: runtimeRunStatusRunning,
+	}}
+	result := (&Service{queries: db.New(dbtx), runtime: runtimeClient}).runWorkflowNode(
+		context.Background(),
+		uuid.New(),
+		db.Workflow{ID: uuid.New()},
+		db.WorkflowRun{ID: runID},
+		db.WorkflowNode{ID: nodeID, NodeKey: "extract", AgentID: agentID},
+		map[string]interface{}{"node_key": "extract"},
+		0,
+	)
+	if result.Err == nil || !strings.Contains(result.Err.Error(), "不再接受子 run 关联") {
+		t.Fatalf("runWorkflowNode error = %v", result.Err)
+	}
+	if runtimeClient.getRunCalls != 0 {
+		t.Fatalf("GetRun calls = %d, want 0", runtimeClient.getRunCalls)
+	}
+	if dbtx.queryRowCalls != 1 {
+		t.Fatalf("QueryRow calls = %d, want only CreateWorkflowRunStep", dbtx.queryRowCalls)
+	}
+}
+
 func TestWorkflowNodeRunIdempotencyKeyIsStablePrintableASCII(t *testing.T) {
 	runID := uuid.New()
 	left := workflowNodeRunIdempotencyKey(runID, "  中文节点\n")
@@ -1292,6 +1557,36 @@ func TestWorkflowNodeRunIdempotencyKeyIsStablePrintableASCII(t *testing.T) {
 	}
 	if left == workflowNodeRunIdempotencyKey(runID, "另一个节点") {
 		t.Fatal("different workflow nodes produced the same idempotency key")
+	}
+}
+
+func TestWorkflowChildRunIDFromResponseFailsClosed(t *testing.T) {
+	validRunID := uuid.New()
+	tests := []struct {
+		name    string
+		resp    *runtimemod.RunResponse
+		want    uuid.UUID
+		wantErr bool
+	}{
+		{name: "nil response", wantErr: true},
+		{name: "missing run id", resp: &runtimemod.RunResponse{}, wantErr: true},
+		{name: "invalid run id", resp: &runtimemod.RunResponse{RunID: "not-a-uuid"}, wantErr: true},
+		{name: "nil run id", resp: &runtimemod.RunResponse{RunID: uuid.Nil.String()}, wantErr: true},
+		{name: "valid run id", resp: &runtimemod.RunResponse{RunID: "  " + validRunID.String() + "  "}, want: validRunID},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := workflowChildRunIDFromResponse(tt.resp)
+			if tt.wantErr {
+				if err == nil || got != uuid.Nil {
+					t.Fatalf("workflowChildRunIDFromResponse() = %s, %v; want fail closed", got, err)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("workflowChildRunIDFromResponse() = %s, %v; want %s", got, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -1461,20 +1756,59 @@ func userIDFromCtxOnly(c echo.Context) error {
 }
 
 type workflowFakeDBTX struct {
-	row              workflowFakeRow
-	queryRowRows     []workflowFakeRow
-	queryRowCalls    int
-	queryResults     []workflowFakeQueryResult
-	queryCalls       int
-	execErr          error
-	execContextErr   error
-	execRowsAffected int64
-	queryRowSQL      string
-	queryRowArgs     []any
-	querySQL         string
-	queryArgs        []any
-	execSQL          string
-	execArgs         []any
+	row                workflowFakeRow
+	queryRowRows       []workflowFakeRow
+	queryRowCalls      int
+	queryResults       []workflowFakeQueryResult
+	queryCalls         int
+	execErr            error
+	execContextErr     error
+	execRowsAffected   int64
+	queryRowSQL        string
+	queryRowArgs       []any
+	queryRowContextErr error
+	querySQL           string
+	queryArgs          []any
+	execSQL            string
+	execArgs           []any
+}
+
+type workflowRuntimeFake struct {
+	runResponse      *runtimemod.RunResponse
+	runErr           error
+	onRun            func()
+	getRunResponse   *runtimemod.RunResponse
+	getRunErr        error
+	getRunCalls      int
+	getRunContextErr error
+	onGetRun         func(uuid.UUID) error
+}
+
+func (f *workflowRuntimeFake) Run(
+	context.Context,
+	uuid.UUID,
+	*runtimemod.RunRequest,
+	string,
+) (*runtimemod.RunResponse, error) {
+	if f.onRun != nil {
+		f.onRun()
+	}
+	return f.runResponse, f.runErr
+}
+
+func (f *workflowRuntimeFake) GetRun(
+	ctx context.Context,
+	_ uuid.UUID,
+	runID uuid.UUID,
+) (*runtimemod.RunResponse, error) {
+	f.getRunCalls++
+	f.getRunContextErr = ctx.Err()
+	if f.onGetRun != nil {
+		if err := f.onGetRun(runID); err != nil {
+			return nil, err
+		}
+	}
+	return f.getRunResponse, f.getRunErr
 }
 
 func (f *workflowFakeDBTX) Exec(ctx context.Context, sql string, args ...interface{}) (pgconn.CommandTag, error) {
@@ -1501,9 +1835,10 @@ func (f *workflowFakeDBTX) Query(_ context.Context, sql string, args ...interfac
 	return &workflowFakeRows{rows: result.rows, err: result.rowsErr}, nil
 }
 
-func (f *workflowFakeDBTX) QueryRow(_ context.Context, sql string, args ...interface{}) pgx.Row {
+func (f *workflowFakeDBTX) QueryRow(ctx context.Context, sql string, args ...interface{}) pgx.Row {
 	f.queryRowSQL = sql
 	f.queryRowArgs = append([]any(nil), args...)
+	f.queryRowContextErr = ctx.Err()
 	if f.queryRowCalls < len(f.queryRowRows) {
 		row := f.queryRowRows[f.queryRowCalls]
 		f.queryRowCalls++

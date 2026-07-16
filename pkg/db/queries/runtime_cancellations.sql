@@ -154,6 +154,7 @@ SET state = sqlc.arg(next_state),
 WHERE run_id = sqlc.arg(run_id)
   AND id = sqlc.arg(cancellation_id)
   AND state = sqlc.arg(expected_state)
+  AND state NOT IN ('stopped', 'unsupported', 'failed')
   AND sqlc.arg(next_state) IN ('delivered', 'stopping', 'stopped', 'unsupported', 'failed', 'unconfirmed')
 RETURNING *;
 
@@ -284,7 +285,16 @@ WHERE a.run_id = sqlc.arg(run_id)
         AND r.status = 'canceled'
         AND r.dispatch_state = 'terminal'
         AND c.target_attempt_id = a.id
-        AND c.state IN ('stopped', 'unconfirmed')
+        AND (
+            c.state IN ('stopped', 'unconfirmed')
+            OR (
+                c.state IN ('unsupported', 'failed')
+                AND c.error_code IS NOT NULL
+                AND c.requested_at
+                    + (sqlc.arg(command_deadline_ms)::bigint * INTERVAL '1 millisecond')
+                    <= clock_timestamp()
+            )
+        )
   )
 RETURNING *;
 

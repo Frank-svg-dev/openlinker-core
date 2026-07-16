@@ -220,6 +220,59 @@ func TestRuntimeCancellationDeadlineReaperMarksUnconfirmedAndReleasesOnce(t *tes
 	require.Equal(t, []string{"find_due"}, fixture.tx.calls)
 }
 
+func TestRuntimeCancellationDeadlineReaperPreservesNegativeTerminalEvidenceAndReleasesOnce(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		state     RuntimeCancelState
+		errorCode string
+	}{
+		{name: "failed", state: RuntimeCancelFailed, errorCode: "ATTEMPT_IDENTITY_MISMATCH"},
+		{name: "unsupported", state: RuntimeCancelUnsupported, errorCode: "CANCEL_NOT_SUPPORTED"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newRuntimeCancellationFixture(t)
+			fixture.tx.cancellation = deliveredRuntimeCancellation(fixture)
+			fixture.tx.cancellation.State = string(testCase.state)
+			fixture.tx.cancellation.ErrorCode = runtimeCancellationStringPointer(testCase.errorCode)
+			fixture.tx.cancellation.AcknowledgedAt = runtimeCancellationTimePointer(fixture.databaseNow)
+			fixture.tx.cancellation.RequestedAt = fixture.databaseNow.Add(-defaultRuntimeCancellationDeadline)
+			originalUpdatedAt := fixture.tx.cancellation.UpdatedAt
+
+			state, err := fixture.coordinator.ReapExpiredCancellation(context.Background())
+			require.NoError(t, err)
+			require.NotNil(t, state)
+			require.Equal(t, testCase.state, state.CancelState)
+			require.Equal(t, testCase.errorCode, state.ErrorCode)
+			require.Equal(t, string(testCase.state), fixture.tx.cancellation.State)
+			require.Equal(t, testCase.errorCode, *fixture.tx.cancellation.ErrorCode)
+			require.Equal(t, originalUpdatedAt, fixture.tx.cancellation.UpdatedAt)
+			require.Equal(t, runtimeCancellationUnconfirmedCode, fixture.tx.finishedErrorCode)
+			require.Equal(t, 1, fixture.tx.finishCalls)
+			require.Equal(t, 1, fixture.tx.capacityCASCalls)
+			require.Equal(t, int32(0), fixture.tx.sessionInflight)
+			require.Equal(t, int32(0), fixture.tx.nodeInflight)
+			require.Equal(t, []string{
+				"find_due", "lock_reap_session", "lock_reap_node", "lock_due_run",
+				"lock_attempt", "lock_cancellation", "finish_attempt", "capacity_cas",
+				"release_session", "release_node", "mirror_cancellation",
+			}, fixture.tx.calls)
+
+			fixture.tx.calls = nil
+			replayed, err := fixture.coordinator.ReapExpiredCancellation(context.Background())
+			require.NoError(t, err)
+			require.Nil(t, replayed)
+			require.Equal(t, 1, fixture.tx.finishCalls)
+			require.Equal(t, 1, fixture.tx.capacityCASCalls)
+			require.Equal(t, []string{"find_due"}, fixture.tx.calls)
+		})
+	}
+}
+
+func TestRuntimeCancellationNegativeTerminalStatesCannotTransition(t *testing.T) {
+	require.False(t, runtimeCancellationTransitionAllowed(RuntimeCancelFailed, RuntimeCancelStopped))
+	require.False(t, runtimeCancellationTransitionAllowed(RuntimeCancelUnsupported, RuntimeCancelStopped))
+}
+
 type runtimeCancellationFixture struct {
 	databaseNow  time.Time
 	ownerID      uuid.UUID
@@ -350,11 +403,12 @@ type runtimeCancellationTransactionFake struct {
 	publicRun    db.Run
 	calls        []string
 
-	sessionInflight  int32
-	nodeInflight     int32
-	persistCalls     int
-	finishCalls      int
-	capacityCASCalls int
+	sessionInflight   int32
+	nodeInflight      int32
+	persistCalls      int
+	finishCalls       int
+	capacityCASCalls  int
+	finishedErrorCode string
 }
 
 func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeCoreCancellation(
@@ -532,13 +586,17 @@ func (f *runtimeCancellationTransactionFake) MirrorRuntimeRunCancellationState(_
 	}, nil
 }
 
-func (f *runtimeCancellationTransactionFake) FinishRuntimeCanceledAttempt(_ context.Context, _ db.FinishRuntimeCanceledAttemptParams) (db.RunAttempt, error) {
+func (f *runtimeCancellationTransactionFake) FinishRuntimeCanceledAttempt(_ context.Context, params db.FinishRuntimeCanceledAttemptParams) (db.RunAttempt, error) {
 	f.call("finish_attempt")
 	f.finishCalls++
 	finished := f.attempt
 	finishedAt := f.databaseNow
 	outcome := "canceled"
 	finished.FinishedAt, finished.Outcome = &finishedAt, &outcome
+	finished.ErrorCode = params.ErrorCode
+	if params.ErrorCode != nil {
+		f.finishedErrorCode = *params.ErrorCode
+	}
 	f.attempt = finished
 	return finished, nil
 }

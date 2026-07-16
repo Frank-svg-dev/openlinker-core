@@ -2,6 +2,8 @@ package workflow_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
@@ -604,6 +607,131 @@ func TestStartWorkflowRunQueuesAndWorkerExecutes(t *testing.T) {
 	require.Equal(t, int32(1), history.Total)
 	require.Len(t, history.Items, 1)
 	require.Equal(t, queued.ID, history.Items[0].ID)
+}
+
+func TestRuntimeWorkflowStepExposesChildRunIDWhileRunning(t *testing.T) {
+	pool := setupWorkflowTestDB(t)
+	ctx := context.Background()
+	coreID := uuid.New()
+	userID := insertWorkflowUser(t, pool, "wf-runtime-user")
+	creatorID := insertWorkflowUser(t, pool, "wf-runtime-creator")
+	agentID := insertWorkflowAgent(t, pool, creatorID, "openlinker-runtime://workflow-running-step")
+	_, err := pool.Exec(ctx, `UPDATE agents SET connection_mode = 'runtime' WHERE id = $1`, agentID)
+	require.NoError(t, err)
+	insertWorkflowRuntimeSession(t, pool, coreID, creatorID, agentID)
+
+	runtimeSvc := runtimemod.NewService(pool, &config.Config{RunTimeoutSeconds: 5})
+	runtimeSvc.ConfigureCoreRuntime(coreID)
+	svc := workflow.NewService(pool, runtimeSvc)
+	created, err := svc.CreateWorkflow(ctx, userID, &workflow.CreateWorkflowRequest{
+		Name:  "Runtime running step visibility",
+		Nodes: []workflow.WorkflowNodeRequest{{Key: "worker", Title: "Worker", AgentID: agentID}},
+	})
+	require.NoError(t, err)
+	queued, err := svc.StartWorkflowRun(ctx, userID, uuid.MustParse(created.ID), &workflow.RunWorkflowRequest{
+		Input: map[string]interface{}{"topic": "observe child run"},
+	})
+	require.NoError(t, err)
+
+	workerCtx, cancelWorker := context.WithCancel(ctx)
+	type workerResult struct {
+		claimed bool
+		err     error
+	}
+	workerDone := make(chan workerResult, 1)
+	go func() {
+		claimed, claimErr := svc.ClaimAndRunPendingWorkflow(workerCtx)
+		workerDone <- workerResult{claimed: claimed, err: claimErr}
+	}()
+	defer cancelWorker()
+
+	workflowRunID := uuid.MustParse(queued.ID)
+	var stepID uuid.UUID
+	var childRunIDText string
+	require.Eventually(t, func() bool {
+		var status string
+		err := pool.QueryRow(ctx, `
+			SELECT id, status, COALESCE(run_id::text, '')
+			FROM workflow_run_steps
+			WHERE workflow_run_id = $1`, workflowRunID).Scan(&stepID, &status, &childRunIDText)
+		return err == nil && status == "running" && childRunIDText != ""
+	}, 5*time.Second, 25*time.Millisecond, "running workflow step never exposed its child run_id")
+	childRunID, err := uuid.Parse(childRunIDText)
+	require.NoError(t, err)
+	require.NotEqual(t, uuid.Nil, childRunID)
+
+	var childStatus, dispatchState string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT status, dispatch_state
+		FROM runs
+		WHERE id = $1`, childRunID).Scan(&childStatus, &dispatchState))
+	require.Equal(t, "running", childStatus)
+	require.Equal(t, "pending", dispatchState)
+
+	queries := db.New(pool)
+	attached, err := queries.AttachWorkflowRunStepRun(ctx, db.AttachWorkflowRunStepRunParams{ID: stepID, RunID: childRunID})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), attached, "same child run attachment must be idempotent")
+	attached, err = queries.AttachWorkflowRunStepRun(ctx, db.AttachWorkflowRunStepRunParams{ID: stepID, RunID: uuid.New()})
+	require.NoError(t, err)
+	require.Equal(t, int64(0), attached, "a different child run must not replace the attachment")
+
+	conflictingRunID := uuid.New()
+	msg := "must not replace child run evidence"
+	_, err = queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+		ID:           stepID,
+		ErrorMessage: &msg,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "nil child run must not clear attached evidence")
+	_, err = queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+		ID:           stepID,
+		RunID:        &conflictingRunID,
+		ErrorMessage: &msg,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "different child run must not replace attached evidence")
+	_, err = queries.MarkWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
+		ID:     stepID,
+		RunID:  &conflictingRunID,
+		Output: []byte(`{}`),
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "different child run must not claim terminal success")
+
+	var storedRunID uuid.UUID
+	var storedStatus string
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT run_id, status
+		FROM workflow_run_steps
+		WHERE id = $1`, stepID).Scan(&storedRunID, &storedStatus))
+	require.Equal(t, childRunID, storedRunID)
+	require.Equal(t, "running", storedStatus)
+
+	_, err = queries.MarkWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
+		ID:     stepID,
+		RunID:  &childRunID,
+		Output: []byte(`{"ok":true}`),
+	})
+	require.NoError(t, err)
+	_, err = queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+		ID:           stepID,
+		RunID:        &childRunID,
+		ErrorMessage: &msg,
+	})
+	require.ErrorIs(t, err, pgx.ErrNoRows, "terminal success must not be reversed")
+	require.NoError(t, pool.QueryRow(ctx, `
+		SELECT run_id, status
+		FROM workflow_run_steps
+		WHERE id = $1`, stepID).Scan(&storedRunID, &storedStatus))
+	require.Equal(t, childRunID, storedRunID)
+	require.Equal(t, "success", storedStatus)
+
+	cancelWorker()
+	select {
+	case result := <-workerDone:
+		require.True(t, result.claimed)
+		require.NoError(t, result.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("workflow worker did not stop after context cancellation")
+	}
 }
 
 func TestStartRunWorkerProcessesPendingRunsInBurst(t *testing.T) {
@@ -1318,6 +1446,61 @@ func insertWorkflowAgent(t *testing.T, pool *pgxpool.Pool, creatorID uuid.UUID, 
 	)
 	require.NoError(t, err)
 	return id
+}
+
+func insertWorkflowRuntimeSession(
+	t *testing.T,
+	pool *pgxpool.Pool,
+	coreID, creatorID, agentID uuid.UUID,
+) {
+	t.Helper()
+	ctx := context.Background()
+	tokenID, nodeID, sessionID, attachmentID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	workerID := uuid.NewString()
+	certificateSerial := hex.EncodeToString(nodeID[:])
+	thumbprintDigest := sha256.Sum256(nodeID[:])
+	thumbprint := hex.EncodeToString(thumbprintDigest[:])
+	prefix := "ol_agent_" + hex.EncodeToString(tokenID[:6])
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `
+		INSERT INTO agent_tokens (
+			id, agent_id, creator_user_id, name, prefix, token_hash,
+			scopes, status, redeemed_at
+		) VALUES ($1, $2, $3, 'Workflow Runtime Session', $4, $5,
+			ARRAY['agent:call', 'agent:pull']::text[], 'active_runtime', clock_timestamp())`,
+		tokenID, agentID, creatorID, prefix, "hash-"+tokenID.String())
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO runtime_nodes (
+			node_id, display_name, device_certificate_serial,
+			device_public_key_thumbprint, node_version, protocol_version,
+			runtime_contract_id, runtime_contract_digest, features,
+			capacity, last_seen_at
+		) VALUES ($1, 'Workflow Runtime Session', $2, $3, 'test-v2', 2,
+			'openlinker.runtime.v2', $4, $5, 1, clock_timestamp())`,
+		nodeID, certificateSerial, thumbprint, runtimemod.RuntimeContractDigest,
+		runtimemod.RuntimeRequiredFeatures())
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO runtime_sessions (
+			runtime_session_id, node_id, agent_id, credential_id, worker_id,
+			session_epoch, device_certificate_serial, node_version,
+			protocol_version, runtime_contract_id, runtime_contract_digest,
+			features, capacity, attached_core_instance_id
+		) VALUES ($1, $2, $3, $4, $5, 1, $6, 'test-v2', 2,
+			'openlinker.runtime.v2', $7, $8, 1, $9)`,
+		sessionID, nodeID, agentID, tokenID, workerID, certificateSerial,
+		runtimemod.RuntimeContractDigest, runtimemod.RuntimeRequiredFeatures(), coreID)
+	require.NoError(t, err)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO runtime_session_attachments (
+			id, runtime_session_id, core_instance_id, attachment_kind
+		) VALUES ($1, $2, $3, 'connected')`, attachmentID, sessionID, coreID)
+	require.NoError(t, err)
+	require.NoError(t, tx.Commit(ctx))
 }
 
 func setWorkflowAgentUnreachable(t *testing.T, pool *pgxpool.Pool, agentID uuid.UUID) {

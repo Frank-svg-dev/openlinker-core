@@ -336,15 +336,26 @@ RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
           created_at, updated_at;
 
+-- name: AttachWorkflowRunStepRun :execrows
+-- A matching re-attachment is accepted and deliberately touches updated_at.
+UPDATE workflow_run_steps
+SET run_id = $2,
+    updated_at = NOW()
+WHERE id = $1
+  AND status = 'running'
+  AND (run_id IS NULL OR run_id = $2);
+
 -- name: MarkWorkflowRunStepSuccess :one
 UPDATE workflow_run_steps
 SET status = 'success',
-    run_id = $2,
+    run_id = COALESCE(run_id, $2),
     output = $3,
     error_message = NULL,
     finished_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
+  AND status = 'running'
+  AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
           created_at, updated_at;
@@ -352,11 +363,13 @@ RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
 -- name: MarkWorkflowRunStepFailed :one
 UPDATE workflow_run_steps
 SET status = 'failed',
-    run_id = $2,
+    run_id = COALESCE(run_id, $2),
     error_message = $3,
     finished_at = NOW(),
     updated_at = NOW()
 WHERE id = $1
+  AND status = 'running'
+  AND (run_id IS NULL OR run_id = $2)
 RETURNING id, workflow_run_id, workflow_node_id, node_key, agent_id, run_id,
           status, input, output, error_message, sequence, started_at, finished_at,
           created_at, updated_at;

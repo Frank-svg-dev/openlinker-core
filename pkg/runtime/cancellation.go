@@ -407,7 +407,9 @@ func (c *RuntimeCancellationCoordinator) AckCancel(
 		}
 
 		if request.CancelState == RuntimeCancelStopped {
-			if finishErr := finishRuntimeCancellationAttempt(ctx, tx, attempt, errorCode); finishErr != nil {
+			if finishErr := finishRuntimeCancellationAttempt(
+				ctx, tx, attempt, errorCode, c.commandDeadline,
+			); finishErr != nil {
 				return finishErr
 			}
 		}
@@ -600,24 +602,37 @@ func (c *RuntimeCancellationCoordinator) ReapExpiredCancellation(
 		}
 
 		errorCode := runtimeCancellationUnconfirmedCode
-		advanced, advanceErr := tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
-			NextState:      string(RuntimeCancelUnconfirmed),
-			ErrorCode:      &errorCode,
-			RunID:          cancellation.RunID,
-			CancellationID: cancellation.ID,
-			ExpectedState:  cancellation.State,
-		})
-		if errors.Is(advanceErr, pgx.ErrNoRows) {
-			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, advanceErr)
+		reapedCancellation := cancellation
+		switch RuntimeCancelState(cancellation.State) {
+		case RuntimeCancelRequested, RuntimeCancelDelivered, RuntimeCancelStopping:
+			advanced, advanceErr := tx.AdvanceRuntimeRunCancellation(ctx, db.AdvanceRuntimeRunCancellationParams{
+				NextState:      string(RuntimeCancelUnconfirmed),
+				ErrorCode:      &errorCode,
+				RunID:          cancellation.RunID,
+				CancellationID: cancellation.ID,
+				ExpectedState:  cancellation.State,
+			})
+			if errors.Is(advanceErr, pgx.ErrNoRows) {
+				return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, advanceErr)
+			}
+			if advanceErr != nil {
+				return advanceErr
+			}
+			reapedCancellation = advanced
+		case RuntimeCancelFailed, RuntimeCancelUnsupported:
+			// Negative acknowledgements are terminal evidence. The deadline only
+			// authorizes ending the still-fenced Attempt and releasing capacity;
+			// it must not rewrite the cancellation state or its original error.
+		default:
+			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 		}
-		if advanceErr != nil {
-			return advanceErr
-		}
-		if finishErr := finishRuntimeCancellationAttempt(ctx, tx, attempt, &errorCode); finishErr != nil {
+		if finishErr := finishRuntimeCancellationAttempt(
+			ctx, tx, attempt, &errorCode, c.commandDeadline,
+		); finishErr != nil {
 			return finishErr
 		}
 		mirrored, mirrorErr := tx.MirrorRuntimeRunCancellationState(ctx, db.MirrorRuntimeRunCancellationStateParams{
-			RunID: advanced.RunID, CancellationID: advanced.ID,
+			RunID: reapedCancellation.RunID, CancellationID: reapedCancellation.ID,
 		})
 		if errors.Is(mirrorErr, pgx.ErrNoRows) {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, mirrorErr)
@@ -625,10 +640,10 @@ func (c *RuntimeCancellationCoordinator) ReapExpiredCancellation(
 		if mirrorErr != nil {
 			return mirrorErr
 		}
-		if mirrored.CancelState == nil || *mirrored.CancelState != advanced.State {
+		if mirrored.CancelState == nil || *mirrored.CancelState != reapedCancellation.State {
 			return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, nil)
 		}
-		value := runtimeCancellationStateFromDB(advanced)
+		value := runtimeCancellationStateFromDB(reapedCancellation)
 		state = &value
 		return nil
 	})
@@ -773,10 +788,15 @@ func finishRuntimeCancellationAttempt(
 	tx runtimeCancellationTransaction,
 	attempt db.RunAttempt,
 	errorCode *string,
+	commandDeadline time.Duration,
 ) error {
+	if commandDeadline < time.Millisecond || commandDeadline > time.Hour {
+		return errRuntimeCancellationNotReady
+	}
 	finished, err := tx.FinishRuntimeCanceledAttempt(ctx, db.FinishRuntimeCanceledAttemptParams{
 		ErrorCode: errorCode, RunID: attempt.RunID, AttemptID: attempt.ID,
 		LeaseID: attempt.LeaseID, FencingToken: attempt.FencingToken,
+		CommandDeadlineMs: commandDeadline.Milliseconds(),
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return newRuntimeLeaseError(RuntimeLeaseErrorStaleLease, err)
@@ -1074,8 +1094,6 @@ func runtimeCancellationTransitionAllowed(current, next RuntimeCancelState) bool
 		return next == RuntimeCancelStopping || runtimeCancellationAckFinalState(next)
 	case RuntimeCancelStopping:
 		return runtimeCancellationAckFinalState(next)
-	case RuntimeCancelUnsupported, RuntimeCancelFailed:
-		return next == RuntimeCancelStopped
 	default:
 		return false
 	}

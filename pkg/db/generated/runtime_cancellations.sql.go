@@ -352,6 +352,7 @@ SET state = $1,
 WHERE run_id = $3
   AND id = $4
   AND state = $5
+  AND state NOT IN ('stopped', 'unsupported', 'failed')
   AND $1 IN ('delivered', 'stopping', 'stopped', 'unsupported', 'failed', 'unconfirmed')
 RETURNING *`
 
@@ -522,22 +523,33 @@ WHERE a.run_id = $2
         AND r.status = 'canceled'
         AND r.dispatch_state = 'terminal'
         AND c.target_attempt_id = a.id
-        AND c.state IN ('stopped', 'unconfirmed')
+        AND (
+            c.state IN ('stopped', 'unconfirmed')
+            OR (
+                c.state IN ('unsupported', 'failed')
+                AND c.error_code IS NOT NULL
+                AND c.requested_at
+                    + ($6::bigint * INTERVAL '1 millisecond')
+                    <= clock_timestamp()
+            )
+        )
   )
 RETURNING *`
 
 type FinishRuntimeCanceledAttemptParams struct {
-	ErrorCode    *string   `db:"error_code" json:"error_code"`
-	RunID        uuid.UUID `db:"run_id" json:"run_id"`
-	AttemptID    uuid.UUID `db:"attempt_id" json:"attempt_id"`
-	LeaseID      uuid.UUID `db:"lease_id" json:"lease_id"`
-	FencingToken int64     `db:"fencing_token" json:"fencing_token"`
+	ErrorCode         *string   `db:"error_code" json:"error_code"`
+	RunID             uuid.UUID `db:"run_id" json:"run_id"`
+	AttemptID         uuid.UUID `db:"attempt_id" json:"attempt_id"`
+	LeaseID           uuid.UUID `db:"lease_id" json:"lease_id"`
+	FencingToken      int64     `db:"fencing_token" json:"fencing_token"`
+	CommandDeadlineMs int64     `db:"command_deadline_ms" json:"command_deadline_ms"`
 }
 
 func (q *Queries) FinishRuntimeCanceledAttempt(ctx context.Context, arg FinishRuntimeCanceledAttemptParams) (RunAttempt, error) {
 	var attempt RunAttempt
 	err := scanRunAttempt(q.db.QueryRow(ctx, finishRuntimeCanceledAttempt,
 		arg.ErrorCode, arg.RunID, arg.AttemptID, arg.LeaseID, arg.FencingToken,
+		arg.CommandDeadlineMs,
 	), &attempt)
 	return attempt, err
 }

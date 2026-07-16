@@ -26,6 +26,12 @@ func TestRuntimeSchemaChecksumMatchesCurrentContractTuple(t *testing.T) {
 	}
 }
 
+func TestRuntimeSchemaIdentityTracksTerminalCancellationReapMigration(t *testing.T) {
+	if RuntimeSchemaVersion != 76 || RuntimeSchemaMigrationName != "076_runtime_cancellation_terminal_reap" {
+		t.Fatalf("runtime schema identity = %d:%s", RuntimeSchemaVersion, RuntimeSchemaMigrationName)
+	}
+}
+
 func TestRuntimeClusterReadinessHealthyReplicaSet(t *testing.T) {
 	identity := runtimeClusterTestIdentity()
 	repository := newRuntimeClusterRepositoryFake(identity, 2)

@@ -197,6 +197,104 @@ func TestRuntimeCancellationDeadlineReaperStopsDeliveryAndReleasesAtomically(t *
 	require.Equal(t, cancellationState, runCancelState)
 }
 
+func TestRuntimeCancellationDeadlineReaperPreservesNegativeTerminalEvidenceAndReleasesOnce(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		state     runtime.RuntimeCancelState
+		errorCode string
+	}{
+		{name: "failed", state: runtime.RuntimeCancelFailed, errorCode: "ATTEMPT_IDENTITY_MISMATCH"},
+		{name: "unsupported", state: runtime.RuntimeCancelUnsupported, errorCode: "CANCEL_NOT_SUPPORTED"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			pool := setupTestDB(t)
+			requireRuntimeCancellationSchemaVersion(t, pool, 76)
+			fixture := insertEventStoreExecutingAttempt(t, pool, 5*time.Minute)
+			coordinator := runtime.NewRuntimeCancellationCoordinator(pool)
+
+			var ownerID uuid.UUID
+			require.NoError(t, pool.QueryRow(context.Background(),
+				`SELECT user_id FROM runs WHERE id = $1`, fixture.identity.RunID).Scan(&ownerID))
+			created, err := coordinator.CancelOwnedRun(
+				context.Background(), ownerID, fixture.identity.RunID, "negative terminal reaper",
+			)
+			require.NoError(t, err)
+			principal := runtimeCancellationSessionPrincipal(t, pool, fixture)
+			commands, err := coordinator.PollCommands(context.Background(), principal)
+			require.NoError(t, err)
+			require.Len(t, commands.Commands, 1)
+			decoded, err := runtime.DecodePendingCommand(commands.Commands[0])
+			require.NoError(t, err)
+			require.NotNil(t, decoded.Cancel)
+
+			terminal, err := coordinator.AckCancel(context.Background(), principal, runtime.RunCancelAckPayload{
+				CancellationID:  decoded.Cancel.CancellationID,
+				AttemptIdentity: decoded.Cancel.AttemptIdentity,
+				CancelState:     testCase.state,
+				ErrorCode:       testCase.errorCode,
+			})
+			require.NoError(t, err)
+			require.Equal(t, testCase.state, terminal.CancelState)
+			require.Equal(t, testCase.errorCode, terminal.ErrorCode)
+			assertRuntimeCancellationAttemptCapacity(t, pool, fixture, false, 1, 1)
+
+			expireRuntimeCancellationRequestAtDatabaseClock(
+				t, pool, fixture.identity.RunID, created.Cancellation.ID,
+			)
+			var beforeState, beforeErrorCode, beforeRunState string
+			var beforeUpdatedAt time.Time
+			require.NoError(t, pool.QueryRow(context.Background(), `
+				SELECT c.state, c.error_code, c.updated_at, r.cancel_state
+				FROM run_cancellations c
+				JOIN runs r ON r.id = c.run_id AND r.cancel_request_id = c.id
+				WHERE c.run_id = $1 AND c.id = $2`,
+				fixture.identity.RunID, created.Cancellation.ID,
+			).Scan(&beforeState, &beforeErrorCode, &beforeUpdatedAt, &beforeRunState))
+
+			reaped, err := coordinator.ReapExpiredCancellation(context.Background())
+			require.NoError(t, err)
+			require.NotNil(t, reaped)
+			require.Equal(t, testCase.state, reaped.CancelState)
+			require.Equal(t, testCase.errorCode, reaped.ErrorCode)
+			assertRuntimeCancellationAttemptCapacity(t, pool, fixture, true, 0, 0)
+
+			var afterState, afterErrorCode, afterRunState, attemptErrorCode string
+			var afterUpdatedAt, finishedAt, slotReleasedAt time.Time
+			require.NoError(t, pool.QueryRow(context.Background(), `
+				SELECT c.state, c.error_code, c.updated_at, r.cancel_state,
+				       a.error_code, a.finished_at, a.slot_released_at
+				FROM run_cancellations c
+				JOIN runs r ON r.id = c.run_id AND r.cancel_request_id = c.id
+				JOIN run_attempts a ON a.run_id = c.run_id AND a.id = c.target_attempt_id
+				WHERE c.run_id = $1 AND c.id = $2`,
+				fixture.identity.RunID, created.Cancellation.ID,
+			).Scan(
+				&afterState, &afterErrorCode, &afterUpdatedAt, &afterRunState,
+				&attemptErrorCode, &finishedAt, &slotReleasedAt,
+			))
+			require.Equal(t, beforeState, afterState)
+			require.Equal(t, beforeErrorCode, afterErrorCode)
+			require.Equal(t, beforeUpdatedAt, afterUpdatedAt)
+			require.Equal(t, beforeRunState, afterRunState)
+			require.Equal(t, testCase.errorCode, afterErrorCode)
+			require.Equal(t, "CANCEL_UNCONFIRMED", attemptErrorCode)
+
+			again, err := coordinator.ReapExpiredCancellation(context.Background())
+			require.NoError(t, err)
+			require.Nil(t, again)
+			assertRuntimeCancellationAttemptCapacity(t, pool, fixture, true, 0, 0)
+			var replayedFinishedAt, replayedSlotReleasedAt time.Time
+			require.NoError(t, pool.QueryRow(context.Background(), `
+				SELECT finished_at, slot_released_at
+				FROM run_attempts WHERE run_id = $1 AND id = $2`,
+				fixture.identity.RunID, fixture.identity.AttemptID,
+			).Scan(&replayedFinishedAt, &replayedSlotReleasedAt))
+			require.Equal(t, finishedAt, replayedFinishedAt)
+			require.Equal(t, slotReleasedAt, replayedSlotReleasedAt)
+		})
+	}
+}
+
 func TestRuntimeCancellationCoreAttemptEndsOnlyAfterExecutionStops(t *testing.T) {
 	pool := setupTestDB(t)
 	requireRuntimeCancellationSchema(t, pool)
@@ -451,6 +549,10 @@ func TestRuntimeCancellationCancelAckRace1000Contenders(t *testing.T) {
 }
 
 func requireRuntimeCancellationSchema(t *testing.T, pool *pgxpool.Pool) {
+	requireRuntimeCancellationSchemaVersion(t, pool, 65)
+}
+
+func requireRuntimeCancellationSchemaVersion(t *testing.T, pool *pgxpool.Pool, minimum int32) {
 	t.Helper()
 	var version int32
 	var migration string
@@ -458,8 +560,11 @@ func requireRuntimeCancellationSchema(t *testing.T, pool *pgxpool.Pool) {
 		SELECT schema_version, migration_name
 		FROM runtime_schema_contracts
 		WHERE runtime_contract_id = 'openlinker.runtime.v2' AND is_current`).Scan(&version, &migration))
-	if version < 65 {
-		t.Skipf("runtime cancellation v2 migration is not installed: version=%d migration=%s", version, migration)
+	if version < minimum {
+		t.Skipf(
+			"runtime cancellation schema is older than required: version=%d minimum=%d migration=%s",
+			version, minimum, migration,
+		)
 	}
 }
 

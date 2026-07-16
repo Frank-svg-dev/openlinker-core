@@ -2318,6 +2318,10 @@ func TestGeneratedExecQueriesPropagateExecErrors(t *testing.T) {
 			})
 			return err
 		}},
+		{name: "AttachWorkflowRunStepRun", run: func() error {
+			_, err := q.AttachWorkflowRunStepRun(ctx, AttachWorkflowRunStepRunParams{ID: id, RunID: id})
+			return err
+		}},
 	}
 
 	for _, tt := range tests {
@@ -2692,6 +2696,25 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("CreateWorkflowRunStep args = %#v", dbtx.queryRowArgs)
 	}
 
+	dbtx.execTag = pgconn.NewCommandTag("UPDATE 1")
+	attached, err := q.AttachWorkflowRunStepRun(context.Background(), AttachWorkflowRunStepRunParams{
+		ID:    stepID,
+		RunID: childRunID,
+	})
+	if err != nil || attached != 1 {
+		t.Fatalf("AttachWorkflowRunStepRun = %d, %v", attached, err)
+	}
+	requireSQLName(t, dbtx.execSQL, "AttachWorkflowRunStepRun")
+	if !strings.Contains(dbtx.execSQL, "status = 'running'") ||
+		!strings.Contains(dbtx.execSQL, "run_id IS NULL OR run_id = $2") ||
+		!strings.Contains(dbtx.execSQL, "updated_at = NOW()") ||
+		strings.Contains(dbtx.execSQL, "CASE WHEN run_id IS NULL") {
+		t.Fatalf("AttachWorkflowRunStepRun must fence status and child run identity: %s", dbtx.execSQL)
+	}
+	if !reflect.DeepEqual(dbtx.execArgs, []any{stepID, childRunID}) {
+		t.Fatalf("AttachWorkflowRunStepRun args = %#v", dbtx.execArgs)
+	}
+
 	successStepValues := append([]any{}, stepValues...)
 	successStepValues[6] = "success"
 	successStepValues[8] = []byte(`{"step":"ok"}`)
@@ -2706,6 +2729,11 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("MarkWorkflowRunStepSuccess error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "MarkWorkflowRunStepSuccess")
+	if !strings.Contains(dbtx.queryRowSQL, "run_id = COALESCE(run_id, $2)") ||
+		!strings.Contains(dbtx.queryRowSQL, "status = 'running'") ||
+		!strings.Contains(dbtx.queryRowSQL, "run_id IS NULL OR run_id = $2") {
+		t.Fatalf("MarkWorkflowRunStepSuccess must preserve child run evidence and fence terminal state: %s", dbtx.queryRowSQL)
+	}
 	if successStep.ID != stepID || successStep.Status != "success" || successStep.FinishedAt == nil {
 		t.Fatalf("MarkWorkflowRunStepSuccess scan = %#v", successStep)
 	}
@@ -2724,6 +2752,11 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		t.Fatalf("MarkWorkflowRunStepFailed error = %v", err)
 	}
 	requireSQLName(t, dbtx.queryRowSQL, "MarkWorkflowRunStepFailed")
+	if !strings.Contains(dbtx.queryRowSQL, "run_id = COALESCE(run_id, $2)") ||
+		!strings.Contains(dbtx.queryRowSQL, "status = 'running'") ||
+		!strings.Contains(dbtx.queryRowSQL, "run_id IS NULL OR run_id = $2") {
+		t.Fatalf("MarkWorkflowRunStepFailed must preserve child run evidence and fence terminal state: %s", dbtx.queryRowSQL)
+	}
 	if failedStep.ID != stepID || failedStep.Status != "failed" || failedStep.ErrorMessage == nil {
 		t.Fatalf("MarkWorkflowRunStepFailed scan = %#v", failedStep)
 	}

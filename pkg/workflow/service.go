@@ -27,7 +27,12 @@ import (
 type Service struct {
 	queries *db.Queries
 	pool    *pgxpool.Pool
-	runtime *runtime.Service
+	runtime workflowRuntime
+}
+
+type workflowRuntime interface {
+	Run(context.Context, uuid.UUID, *runtime.RunRequest, string) (*runtime.RunResponse, error)
+	GetRun(context.Context, uuid.UUID, uuid.UUID) (*runtime.RunResponse, error)
 }
 
 const defaultWorkflowRunMaxAttempts int32 = 3
@@ -53,6 +58,7 @@ const (
 const workflowNodeRunPollInterval = 250 * time.Millisecond
 const workflowNodeRunPollMaxLoops = 240
 const workflowRunClaimReleaseTimeout = 5 * time.Second
+const workflowStepEvidenceWriteTimeout = 5 * time.Second
 
 func normalizeRunStatus(status string) string {
 	return strings.ToLower(strings.TrimSpace(status))
@@ -1145,26 +1151,47 @@ func (s *Service) runWorkflowNode(
 	}, "api")
 	if err != nil {
 		msg := err.Error()
-		_, _ = s.queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
 			ID:           step.ID,
 			ErrorMessage: &msg,
 		})
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
 	}
-	resp.Status = normalizeRunStatus(resp.Status)
-	childRunID := uuid.Nil
-	if resp.RunID != "" {
-		childRunID, _ = uuid.Parse(resp.RunID)
+	childRunID, err := workflowChildRunIDFromResponse(resp)
+	if err != nil {
+		msg := err.Error()
+		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+			ID:           step.ID,
+			ErrorMessage: &msg,
+		})
+		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
 	}
 	childRunIDPtr := &childRunID
-	if childRunID == uuid.Nil {
-		childRunIDPtr = nil
+	attachCtx, cancelAttach := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
+	attached, err := s.queries.AttachWorkflowRunStepRun(attachCtx, db.AttachWorkflowRunStepRunParams{
+		ID:    step.ID,
+		RunID: childRunID,
+	})
+	cancelAttach()
+	if err != nil {
+		msg := fmt.Sprintf("关联 step 子 run 失败: %v", err)
+		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+			ID:           step.ID,
+			RunID:        childRunIDPtr,
+			ErrorMessage: &msg,
+		})
+		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
 	}
+	if attached != 1 {
+		msg := "workflow step 不再接受子 run 关联"
+		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: errors.New(msg)}
+	}
+	resp.Status = normalizeRunStatus(resp.Status)
 	if resp.Status == runtimeRunStatusRunning || resp.Status == runtimeRunStatusPending {
 		completed, err := s.waitForRuntimeRunCompletion(ctx, userID, childRunID)
 		if err != nil {
 			msg := err.Error()
-			_, _ = s.queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+			_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
 				ID:           step.ID,
 				RunID:        childRunIDPtr,
 				ErrorMessage: &msg,
@@ -1178,7 +1205,7 @@ func (s *Service) runWorkflowNode(
 		if msg == "" {
 			msg = "workflow step " + node.NodeKey + " returned status " + resp.Status
 		}
-		_, _ = s.queries.MarkWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
+		_ = s.markWorkflowRunStepFailed(ctx, db.MarkWorkflowRunStepFailedParams{
 			ID:           step.ID,
 			RunID:        childRunIDPtr,
 			ErrorMessage: &msg,
@@ -1190,7 +1217,7 @@ func (s *Service) runWorkflowNode(
 		output = map[string]interface{}{}
 	}
 	outputJSON, _ := json.Marshal(output)
-	if _, err := s.queries.MarkWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
+	if err := s.markWorkflowRunStepSuccess(ctx, db.MarkWorkflowRunStepSuccessParams{
 		ID:     step.ID,
 		RunID:  childRunIDPtr,
 		Output: outputJSON,
@@ -1198,6 +1225,41 @@ func (s *Service) runWorkflowNode(
 		return workflowNodeRunResult{NodeKey: node.NodeKey, Err: fmt.Errorf("更新 step 失败: %w", err)}
 	}
 	return workflowNodeRunResult{NodeKey: node.NodeKey, Output: output}
+}
+
+func (s *Service) markWorkflowRunStepFailed(
+	ctx context.Context,
+	params db.MarkWorkflowRunStepFailedParams,
+) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
+	defer cancel()
+	_, err := s.queries.MarkWorkflowRunStepFailed(writeCtx, params)
+	return err
+}
+
+func (s *Service) markWorkflowRunStepSuccess(
+	ctx context.Context,
+	params db.MarkWorkflowRunStepSuccessParams,
+) error {
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), workflowStepEvidenceWriteTimeout)
+	defer cancel()
+	_, err := s.queries.MarkWorkflowRunStepSuccess(writeCtx, params)
+	return err
+}
+
+func workflowChildRunIDFromResponse(resp *runtime.RunResponse) (uuid.UUID, error) {
+	if resp == nil {
+		return uuid.Nil, errors.New("workflow runtime 返回空响应")
+	}
+	raw := strings.TrimSpace(resp.RunID)
+	if raw == "" {
+		return uuid.Nil, errors.New("workflow node runID 为空")
+	}
+	runID, err := uuid.Parse(raw)
+	if err != nil || runID == uuid.Nil {
+		return uuid.Nil, errors.New("workflow node runID 无效")
+	}
+	return runID, nil
 }
 
 // workflowNodeRunIdempotencyKey keeps the human node key out of the wire key.
