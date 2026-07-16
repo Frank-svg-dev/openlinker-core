@@ -34,31 +34,39 @@ Included:
 - direct HTTP, MCP server, and transport-neutral Runtime Worker invocation modes
 - A2A JSON-RPC / HTTP+JSON surfaces, Agent Card support, and optional gRPC
 - MCP HTTP entrypoints and REST fallback APIs
-- task, workflow, delivery, webhook, and local admin APIs
+- private task matching, workflow, delivery, webhook, and local admin APIs
 - self-hosted deployment support with Postgres and Redis
 
 Hosted product boundary:
 
+- hosted registration, sign-in, verification codes, account recovery, and OAuth
+- service listings, service orders, order snapshots, and seller operations
 - wallet balances, charges, withdrawals, and Stripe flows
-- hosted marketplace ranking and commercial dashboard composition
+- hosted Agent-market ranking and commercial dashboard composition
 - managed account, token-policy, and commercial access dashboards
 - official certification, recommendation, and abuse-policy internals
 
 These services stay in the hosted product layer and are not Core dependencies.
+Core retains authentication primitives, including optional OAuth support, for
+self-hosted deployments. That does not make hosted account or OAuth routes
+Core-owned: the hosted product terminates its own `/api/v1/auth/*` surface in
+Cloud. Core tasks remain private matching and orchestration records; they are
+not a public task-bidding marketplace.
 
 ## Open-source Architecture
 
 The open-source repositories use Core as the shared registry and run control
-plane. Hosted deployments can attach an optional bridge at the Core API
-boundary, but closed product modules are intentionally not part of this diagram.
+plane. A hosted deployment can use a protected, idempotent execution bridge to
+start a Core Agent or Workflow Run and synchronize its terminal result. Hosted
+account, listing, order, and commercial modules remain outside this repository.
 
 ```mermaid
 flowchart LR
   CoreWeb["openlinker-core-web<br/>self-hosted UI"] -->|"REST / session APIs"| Core
-  SDKs["openlinker-go / openlinker-js / openlinker-python<br/>client and runtime SDKs"] -->|"HTTP / A2A / MCP bindings"| Core
+  SDKs["openlinker-go / openlinker-js / openlinker-python<br/>client and runtime SDKs"] -->|"REST / SSE / A2A / Runtime"| Core
   MCPCaller["MCP or A2A caller"] -->|"tool call / message/send"| Core
 
-  HostedBridge["Hosted Bridge<br/>optional deployment adapter"] -.->|"authorized Core APIs"| Core
+  HostedBridge["Hosted execution bridge<br/>protected and idempotent"] -.->|"start Run / sync result"| Core
 
   Core["openlinker-core<br/>auth / registry / runs / events"]
 
@@ -79,6 +87,11 @@ Prerequisites:
 - Go 1.25 or newer
 - Docker or a local Postgres and Redis installation
 - `make`
+
+Prebuilt binaries are published with checksums on
+[GitHub Releases](https://github.com/OpenLinker-ai/openlinker-core/releases).
+Pin a release and verify its adjacent `.sha256` file before installation. The
+source workflow below is the recommended path for contributors.
 
 Start dependencies:
 

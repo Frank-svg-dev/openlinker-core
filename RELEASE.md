@@ -9,8 +9,9 @@ when maintainers intentionally publish a release.
 
 ## Pre-Release Checklist
 
-1. Confirm `README.md`, `CONTRIBUTING.md`, `SECURITY.md`, `SUPPORT.md`, and
-   examples are current.
+1. Confirm `README.md` and `README.zh-CN.md` describe the same Core/Hosted,
+   private-Task, authentication, and Runtime boundaries, and that
+   `CONTRIBUTING`, `SECURITY`, `SUPPORT`, and examples are current.
 2. Confirm `CHANGELOG.md` describes user-visible changes, migrations, and
    compatibility notes.
 3. Run `docker compose config -q`.
