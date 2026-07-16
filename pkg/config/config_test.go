@@ -25,6 +25,10 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("OAUTH_SESSION_SECRET", "oauth-secret")
 	t.Setenv("OPENLINKER_INTERNAL_TOKEN", "internal-secret")
+	t.Setenv("EXTERNAL_EXECUTION_JWT_CURRENT_PUBLIC_KEY", "base64-public-key")
+	t.Setenv("EXTERNAL_EXECUTION_JWT_CURRENT_KEY_ID", "cloud-key-2026-07")
+	t.Setenv("EXTERNAL_EXECUTION_JWT_NEXT_PUBLIC_KEY", "base64-next-public-key")
+	t.Setenv("EXTERNAL_EXECUTION_JWT_NEXT_KEY_ID", "cloud-key-2026-08")
 	t.Setenv("ENV", "production")
 	t.Setenv("PORT", "9090")
 	t.Setenv("ALLOW_LOCAL_HTTP_ENDPOINTS", "true")
@@ -62,6 +66,13 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.InternalToken != "internal-secret" {
 		t.Fatalf("InternalToken = %q", cfg.InternalToken)
+	}
+	if !cfg.ExternalExecutionEnabled() || cfg.ExternalExecutionJWTCurrentPublicKey != "base64-public-key" ||
+		cfg.ExternalExecutionJWTCurrentKeyID != "cloud-key-2026-07" || cfg.ExternalExecutionJWTIssuer != "openlinker-cloud" ||
+		cfg.ExternalExecutionJWTAudience != "openlinker-core.external-execution" ||
+		cfg.ExternalExecutionCallerServiceID != "openlinker-cloud" ||
+		cfg.ExternalExecutionJWTNextPublicKey != "base64-next-public-key" || cfg.ExternalExecutionJWTNextKeyID != "cloud-key-2026-08" {
+		t.Fatalf("external execution config = %#v", cfg)
 	}
 	if cfg.LLMCompleteURL != "https://cloud.internal/llm" {
 		t.Fatalf("LLMCompleteURL = %q", cfg.LLMCompleteURL)

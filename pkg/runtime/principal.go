@@ -97,10 +97,12 @@ func (p lockedRuntimePrincipal) matches(principal RuntimeEventPrincipal) bool {
 		p.session.RuntimeSessionID == *principal.RuntimeSessionID &&
 		p.session.NodeID == *principal.NodeID && p.session.AgentID == principal.AgentID &&
 		p.session.CredentialID == *principal.CredentialID && p.session.WorkerID == *principal.WorkerID &&
+		p.session.RuntimeContractDigest == principal.RuntimeContractDigest &&
 		p.session.AttachedCoreInstanceID != nil && *p.session.AttachedCoreInstanceID == *principal.CoreInstanceID &&
 		p.attachment.ID == *principal.AttachmentID && p.attachment.RuntimeSessionID == *principal.RuntimeSessionID &&
 		p.attachment.CoreInstanceID == *principal.CoreInstanceID && p.attachment.DetachedAt == nil &&
 		p.node.NodeID == *principal.NodeID &&
+		p.node.RuntimeContractDigest == principal.RuntimeContractDigest &&
 		p.node.DeviceCertificateSerial == *principal.DeviceCertificateSerial &&
 		p.node.DevicePublicKeyThumbprint == *principal.DevicePublicKeyThumbprintSHA256 &&
 		p.credential.ID == *principal.CredentialID && p.credential.AgentID != nil &&

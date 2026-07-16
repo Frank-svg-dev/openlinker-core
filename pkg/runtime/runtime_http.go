@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	runtimeTokenScope         = "agent:pull"
-	RuntimeAttachmentIDHeader = "OpenLinker-Runtime-Attachment"
+	runtimeTokenScope           = "agent:pull"
+	RuntimeAttachmentIDHeader   = "OpenLinker-Runtime-Attachment"
+	RuntimeFallbackReasonHeader = "OpenLinker-Runtime-Fallback-Reason"
 )
 
 // RuntimeTokenValidator authenticates the Agent half of a runtime principal.
@@ -78,6 +79,7 @@ type RuntimeCancellationAPI interface {
 type RuntimeHTTPDependencies struct {
 	TokenValidator      RuntimeTokenValidator
 	DeviceAuthenticator RuntimeDeviceAuthenticator
+	TransportPolicy     RuntimeTransportPolicyProvider
 	Sessions            RuntimeSessionAPI
 	Leases              RuntimeLeaseAPI
 	EventProjector      RuntimeEventProjector
@@ -95,6 +97,17 @@ type RuntimeHTTPDependencies struct {
 type RuntimeHTTPController struct {
 	dependencies RuntimeHTTPDependencies
 	webSockets   *runtimeWSRegistry
+}
+
+// runtimePreviousReadyPayload is the strict pre-attachment-generation Ready
+// shape. It is selected only from the committed Session's database digest;
+// request data can never opt a current Session out of its attachment fence.
+type runtimePreviousReadyPayload struct {
+	CoreInstanceID  string    `json:"core_instance_id" runtime:"required"`
+	Features        []string  `json:"features" runtime:"required"`
+	OfferTTLSeconds int64     `json:"offer_ttl_seconds" runtime:"required"`
+	LeaseTTLSeconds int64     `json:"lease_ttl_seconds" runtime:"required"`
+	DatabaseTime    time.Time `json:"database_time" runtime:"required"`
 }
 
 func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
@@ -142,20 +155,86 @@ func (h *RuntimeHTTPController) Register(api *echo.Group) {
 	if h == nil {
 		h = NewRuntimeHTTPController(RuntimeHTTPDependencies{})
 	}
-	api.POST("/agent-runtime/sessions", h.CreateSession)
-	api.POST("/agent-runtime/sessions/:id/heartbeat", h.HeartbeatSession)
-	api.POST("/agent-runtime/sessions/:id/close", h.CloseSession)
-	api.POST("/agent-runtime/runs/claim", h.ClaimRun)
-	api.POST("/agent-runtime/runs/:id/assignment-ack", h.AckAssignment)
-	api.POST("/agent-runtime/runs/:id/assignment-reject", h.RejectAssignment)
-	api.POST("/agent-runtime/runs/:id/lease-renew", h.RenewLease)
-	api.POST("/agent-runtime/runs/:id/events", h.AppendEvent)
-	api.POST("/agent-runtime/runs/:id/result", h.FinalizeResult)
-	api.POST("/agent-runtime/runs/resume", h.ResumeRuns)
-	api.POST("/agent-runtime/runs/:id/cancel-ack", h.AckCancel)
-	api.GET("/agent-runtime/commands", h.PollCommands)
+	api.POST("/agent-runtime/sessions", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, false, h.CreateSession,
+	))
+	api.POST("/agent-runtime/sessions/:id/heartbeat", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.HeartbeatSession,
+	))
+	api.POST("/agent-runtime/sessions/:id/close", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.CloseSession,
+	))
+	api.POST("/agent-runtime/runs/claim", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.ClaimRun,
+	))
+	api.POST("/agent-runtime/runs/:id/assignment-ack", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.AckAssignment,
+	))
+	api.POST("/agent-runtime/runs/:id/assignment-reject", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.RejectAssignment,
+	))
+	api.POST("/agent-runtime/runs/:id/lease-renew", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.RenewLease,
+	))
+	api.POST("/agent-runtime/runs/:id/events", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.AppendEvent,
+	))
+	api.POST("/agent-runtime/runs/:id/result", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.FinalizeResult,
+	))
+	api.POST("/agent-runtime/runs/resume", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.ResumeRuns,
+	))
+	api.POST("/agent-runtime/runs/:id/cancel-ack", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.AckCancel,
+	))
+	api.GET("/agent-runtime/commands", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.PollCommands,
+	))
+	// call-agent is an assignment-scoped auxiliary HTTP operation used by both
+	// connection modes; it is not a long-poll attachment endpoint.
 	api.POST("/agent-runtime/call-agent", h.CallAgent)
 	api.GET("/agent-runtime/ws", h.WebSocket)
+}
+
+func (h *RuntimeHTTPController) runtimeTransportEndpoint(
+	transport RuntimeTransport,
+	established bool,
+	next echo.HandlerFunc,
+) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		if admissionErr := h.runtimeTransportAdmission(transport, established); admissionErr != nil {
+			// Policy admission must never become an unauthenticated oracle or
+			// replace the canonical Agent Token + device-mTLS 401 boundary.
+			if _, authenticationErr := h.authenticate(c); authenticationErr != nil {
+				return writeRuntimeError(c, authenticationErr)
+			}
+			return writeRuntimeError(c, admissionErr)
+		}
+		return next(c)
+	}
+}
+
+func (h *RuntimeHTTPController) runtimeTransportAdmission(
+	transport RuntimeTransport,
+	established bool,
+) *RuntimeTransportError {
+	policy := h.currentRuntimeTransportPolicy()
+	if runtimeTransportAllowed(policy, transport) {
+		return nil
+	}
+	if established {
+		return runtimePolicyChangedError()
+	}
+	return runtimeTransportForbiddenError()
+}
+
+func (h *RuntimeHTTPController) currentRuntimeTransportPolicy() RuntimeTransportPolicy {
+	policy := CurrentRuntimeTransportPolicy()
+	if h != nil && h.dependencies.TransportPolicy != nil {
+		policy = h.dependencies.TransportPolicy()
+	}
+	return effectiveRuntimeTransportPolicy(policy)
 }
 
 func (h *RuntimeHTTPController) CreateSession(c echo.Context) error {
@@ -166,11 +245,21 @@ func (h *RuntimeHTTPController) CreateSession(c echo.Context) error {
 	if h.dependencies.Sessions == nil {
 		return writeRuntimeError(c, runtimeUnavailableError())
 	}
+	reportedReason, reasonErr := runtimeFallbackReasonFromRequest(c.Request())
+	if reasonErr != nil {
+		return writeRuntimeError(c, reasonErr)
+	}
 	hello, err := DecodeRuntimeBody[RuntimeHelloPayload](c.Request().Body)
 	if err != nil {
 		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request := runtimeSessionRequestFromHello(hello)
+	request.Transport = RuntimeTransportLongPoll
+	request.ReportedTransportReason = reportedReason
+	request.TransportPolicy = h.currentRuntimeTransportPolicy()
+	if !runtimeTransportAllowed(request.TransportPolicy, request.Transport) {
+		return writeRuntimeError(c, runtimeTransportForbiddenError())
+	}
 	state, err := h.dependencies.Sessions.CreateOrAttachSession(c.Request().Context(), principal, request)
 	if err != nil {
 		return writeRuntimeError(c, mapRuntimeHTTPError(err))
@@ -202,12 +291,13 @@ func (h *RuntimeHTTPController) HeartbeatSession(c echo.Context) error {
 	if hello.RuntimeSessionID != sessionID {
 		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
-	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
+	attachmentID, err := h.runtimeAttachmentIDForSessionRequest(c, principal, sessionID)
 	if err != nil {
 		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	request := runtimeSessionRequestFromHello(hello)
 	request.AttachmentID = attachmentID
+	request.Transport = RuntimeTransportLongPoll
 	state, err := h.dependencies.Sessions.HeartbeatSession(
 		c.Request().Context(), principal, request,
 	)
@@ -240,6 +330,10 @@ func (h *RuntimeHTTPController) CloseSession(c echo.Context) error {
 	}
 	if request.RuntimeSessionID != sessionID {
 		return writeRuntimeError(c, runtimeTransportValidationError())
+	}
+	request.AttachmentID, err = h.runtimeAttachmentIDForSessionRequest(c, principal, sessionID)
+	if err != nil {
+		return writeRuntimeError(c, mapRuntimeHTTPError(err))
 	}
 	state, err := h.dependencies.Sessions.CloseSession(c.Request().Context(), principal, request)
 	if err != nil {
@@ -621,10 +715,6 @@ func (h *RuntimeHTTPController) resolveSession(
 	authenticated AuthenticatedRuntimePrincipal,
 	sessionID uuid.UUID,
 ) (RuntimeSessionPrincipal, error) {
-	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
-	if err != nil {
-		return RuntimeSessionPrincipal{}, err
-	}
 	principal, err := h.dependencies.Sessions.ResolveSessionPrincipal(c.Request().Context(), authenticated, sessionID)
 	if err != nil {
 		return RuntimeSessionPrincipal{}, err
@@ -632,8 +722,8 @@ func (h *RuntimeHTTPController) resolveSession(
 	if err = validateRuntimeResolvedSession(authenticated, principal); err != nil {
 		return RuntimeSessionPrincipal{}, err
 	}
-	if principal.AttachmentID != attachmentID {
-		return RuntimeSessionPrincipal{}, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+	if _, err = runtimeAttachmentIDForResolvedPrincipal(c.Request(), principal); err != nil {
+		return RuntimeSessionPrincipal{}, err
 	}
 	return principal, nil
 }
@@ -643,10 +733,6 @@ func (h *RuntimeHTTPController) resolveEventResultSession(
 	authenticated AuthenticatedRuntimePrincipal,
 	workerID string,
 ) (RuntimeSessionPrincipal, error) {
-	attachmentID, err := runtimeAttachmentIDFromRequest(c.Request())
-	if err != nil {
-		return RuntimeSessionPrincipal{}, err
-	}
 	principal, err := h.dependencies.Sessions.ResolveWorkerSessionPrincipal(
 		c.Request().Context(), authenticated, workerID,
 	)
@@ -658,8 +744,8 @@ func (h *RuntimeHTTPController) resolveEventResultSession(
 	if err = validateRuntimeResolvedSession(authenticated, principal); err != nil {
 		return RuntimeSessionPrincipal{}, err
 	}
-	if principal.AttachmentID != attachmentID {
-		return RuntimeSessionPrincipal{}, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+	if _, err = runtimeAttachmentIDForResolvedPrincipal(c.Request(), principal); err != nil {
+		return RuntimeSessionPrincipal{}, err
 	}
 	return principal, nil
 }
@@ -740,10 +826,44 @@ func runtimeSessionRequestFromHello(hello RuntimeHelloPayload) RuntimeSessionReq
 	}
 }
 
-func runtimeReadyFromSessionState(state RuntimeSessionState) (RuntimeReadyPayload, error) {
+func runtimeFallbackReasonFromRequest(request *http.Request) (RuntimeTransportReason, *RuntimeTransportError) {
+	if request == nil {
+		return "", runtimeTransportValidationError()
+	}
+	values := request.Header.Values(RuntimeFallbackReasonHeader)
+	if len(values) == 0 {
+		return "", nil
+	}
+	if len(values) != 1 || values[0] == "" || values[0] != strings.TrimSpace(values[0]) {
+		return "", runtimeTransportValidationError()
+	}
+	reason := RuntimeTransportReason(values[0])
+	if !reason.IsValid() {
+		return "", runtimeTransportValidationError()
+	}
+	return reason, nil
+}
+
+func runtimeReadyFromSessionState(state RuntimeSessionState) (any, error) {
 	if state.Session.AttachedCoreInstanceID == nil || *state.Session.AttachedCoreInstanceID == uuid.Nil ||
 		state.Attachment == nil || state.Attachment.ID == uuid.Nil || state.DatabaseTime.IsZero() {
-		return RuntimeReadyPayload{}, errors.New("invalid committed runtime session state")
+		return nil, errors.New("invalid committed runtime session state")
+	}
+	if !runtimeWireContractSupported(state.Session.RuntimeContractDigest) {
+		return nil, errors.New("unsupported committed runtime wire contract")
+	}
+	if runtimeWireContractAllowsMissingAttachment(state.Session.RuntimeContractDigest) {
+		ready := runtimePreviousReadyPayload{
+			CoreInstanceID:  state.Session.AttachedCoreInstanceID.String(),
+			Features:        RuntimeRequiredFeatures(),
+			OfferTTLSeconds: RuntimeOfferTTLSeconds,
+			LeaseTTLSeconds: RuntimeLeaseTTLSeconds,
+			DatabaseTime:    state.DatabaseTime,
+		}
+		if err := ValidateRuntimePayload(ready); err != nil {
+			return nil, err
+		}
+		return ready, nil
 	}
 	ready := RuntimeReadyPayload{
 		CoreInstanceID:  state.Session.AttachedCoreInstanceID.String(),
@@ -754,7 +874,7 @@ func runtimeReadyFromSessionState(state RuntimeSessionState) (RuntimeReadyPayloa
 		DatabaseTime:    state.DatabaseTime,
 	}
 	if err := ValidateRuntimePayload(ready); err != nil {
-		return RuntimeReadyPayload{}, err
+		return nil, err
 	}
 	return ready, nil
 }
@@ -773,10 +893,6 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 	if req == nil {
 		return RuntimeSessionCloseRequest{}, runtimeTransportValidationError()
 	}
-	attachmentID, err := runtimeAttachmentIDFromRequest(req)
-	if err != nil {
-		return RuntimeSessionCloseRequest{}, err
-	}
 	raw, err := readRuntimeJSON(req.Body)
 	if err != nil {
 		return RuntimeSessionCloseRequest{}, err
@@ -793,9 +909,8 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 			WorkerID:         payload.WorkerID,
 			SessionEpoch:     payload.SessionEpoch,
 		},
-		Status:       payload.Status,
-		Reason:       payload.Reason,
-		AttachmentID: attachmentID,
+		Status: payload.Status,
+		Reason: payload.Reason,
 	}
 	if err = validateRuntimeSessionIdentity(principal, request.RuntimeSessionIdentity); err != nil {
 		return RuntimeSessionCloseRequest{}, err
@@ -807,10 +922,55 @@ func decodeRuntimeSessionClose(req *http.Request, principal AuthenticatedRuntime
 	return request, nil
 }
 
+func (h *RuntimeHTTPController) runtimeAttachmentIDForSessionRequest(
+	c echo.Context,
+	authenticated AuthenticatedRuntimePrincipal,
+	sessionID uuid.UUID,
+) (uuid.UUID, error) {
+	attachmentID, present, err := runtimeOptionalAttachmentIDFromRequest(c.Request())
+	if err != nil || present {
+		return attachmentID, err
+	}
+	principal, err := h.dependencies.Sessions.ResolveSessionPrincipal(
+		c.Request().Context(), authenticated, sessionID,
+	)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if err = validateRuntimeResolvedSession(authenticated, principal); err != nil {
+		return uuid.Nil, err
+	}
+	if !runtimeWireContractAllowsMissingAttachment(principal.RuntimeContractDigest) {
+		return uuid.Nil, runtimeTransportValidationError()
+	}
+	return principal.AttachmentID, nil
+}
+
+func runtimeAttachmentIDForResolvedPrincipal(
+	req *http.Request,
+	principal RuntimeSessionPrincipal,
+) (uuid.UUID, error) {
+	attachmentID, present, err := runtimeOptionalAttachmentIDFromRequest(req)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	if !present {
+		if runtimeWireContractAllowsMissingAttachment(principal.RuntimeContractDigest) {
+			return principal.AttachmentID, nil
+		}
+		return uuid.Nil, runtimeTransportValidationError()
+	}
+	if attachmentID != principal.AttachmentID {
+		return uuid.Nil, newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+	}
+	return attachmentID, nil
+}
+
 func validateRuntimeResolvedSession(authenticated AuthenticatedRuntimePrincipal, principal RuntimeSessionPrincipal) error {
 	if principal.RuntimeSessionID == uuid.Nil || principal.NodeID != authenticated.Device.NodeID ||
 		principal.AgentID != authenticated.AgentID || principal.CredentialID != authenticated.CredentialID ||
 		principal.WorkerID == "" || principal.SessionEpoch < 1 || principal.CoreInstanceID == uuid.Nil || principal.AttachmentID == uuid.Nil ||
+		!runtimeWireContractSupported(principal.RuntimeContractDigest) ||
 		(principal.Status != "active" && principal.Status != "draining") || principal.DatabaseTime.IsZero() ||
 		!constantTimeStringEqual(principal.DeviceCertificateSerial, authenticated.Device.CertificateSerial) ||
 		!constantTimeStringEqual(principal.DevicePublicKeyThumbprintSHA256, authenticated.Device.PublicKeyThumbprintSHA256) {
@@ -820,22 +980,33 @@ func validateRuntimeResolvedSession(authenticated AuthenticatedRuntimePrincipal,
 }
 
 func runtimeAttachmentIDFromRequest(req *http.Request) (uuid.UUID, error) {
-	if req == nil {
-		return uuid.Nil, runtimeTransportValidationError()
-	}
-	values := req.Header.Values(RuntimeAttachmentIDHeader)
-	if len(values) != 1 {
-		return uuid.Nil, runtimeTransportValidationError()
-	}
-	raw := values[0]
-	if raw == "" || strings.TrimSpace(raw) != raw {
-		return uuid.Nil, runtimeTransportValidationError()
-	}
-	attachmentID, err := uuid.Parse(raw)
-	if err != nil || attachmentID == uuid.Nil || attachmentID.String() != raw {
+	attachmentID, present, err := runtimeOptionalAttachmentIDFromRequest(req)
+	if err != nil || !present {
 		return uuid.Nil, runtimeTransportValidationError()
 	}
 	return attachmentID, nil
+}
+
+func runtimeOptionalAttachmentIDFromRequest(req *http.Request) (uuid.UUID, bool, error) {
+	if req == nil {
+		return uuid.Nil, false, runtimeTransportValidationError()
+	}
+	values := req.Header.Values(RuntimeAttachmentIDHeader)
+	if len(values) == 0 {
+		return uuid.Nil, false, nil
+	}
+	if len(values) != 1 {
+		return uuid.Nil, true, runtimeTransportValidationError()
+	}
+	raw := values[0]
+	if raw == "" || strings.TrimSpace(raw) != raw {
+		return uuid.Nil, true, runtimeTransportValidationError()
+	}
+	attachmentID, err := uuid.Parse(raw)
+	if err != nil || attachmentID == uuid.Nil || attachmentID.String() != raw {
+		return uuid.Nil, true, runtimeTransportValidationError()
+	}
+	return attachmentID, true, nil
 }
 
 func parseRuntimePathUUID(raw string) (uuid.UUID, error) {
@@ -903,6 +1074,26 @@ func runtimeTransportValidationError() *RuntimeTransportError {
 
 func runtimeUnauthorizedError(cause error) *RuntimeTransportError {
 	return newRuntimeTransportError(RuntimeErrorUnauthorized, runtimeErrorDefaultMessage(RuntimeErrorUnauthorized), cause)
+}
+
+func runtimeTransportForbiddenError() *RuntimeTransportError {
+	return NewRuntimeTransportError(RuntimeErrorForbidden, RuntimeTransportForbiddenSignal)
+}
+
+func runtimePolicyChangedError() *RuntimeTransportError {
+	return NewRuntimeTransportError(RuntimeErrorForbidden, RuntimePolicyChangedSignal)
+}
+
+func runtimePolicySignal(err *RuntimeTransportError) (string, bool) {
+	if err == nil || err.Body.Code != RuntimeErrorForbidden {
+		return "", false
+	}
+	switch err.Body.Message {
+	case RuntimeTransportForbiddenSignal, RuntimePolicyChangedSignal:
+		return err.Body.Message, true
+	default:
+		return "", false
+	}
 }
 
 func runtimeUnavailableError() *RuntimeTransportError {

@@ -840,7 +840,8 @@ func (q *Queries) LockRuntimeCredentialForPrincipalValidation(ctx context.Contex
 
 const lockRuntimeSessionAttachmentForPrincipalValidation = `-- name: LockRuntimeSessionAttachmentForPrincipalValidation :one
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE id = $1
   AND runtime_session_id = $2
@@ -865,6 +866,9 @@ func (q *Queries) LockRuntimeSessionAttachmentForPrincipalValidation(ctx context
 		&attachment.AttachedAt,
 		&attachment.DetachedAt,
 		&attachment.DisconnectReason,
+		&attachment.Transport,
+		&attachment.TransportReason,
+		&attachment.TransportChangedAt,
 	)
 	return attachment, err
 }
@@ -971,7 +975,8 @@ func (q *Queries) LockRuntimeSessionForOfferRelease(ctx context.Context, arg Loc
 
 const lockRuntimeSessionAttachmentForOfferRelease = `-- name: LockRuntimeSessionAttachmentForOfferRelease :one
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE id = $1
   AND runtime_session_id = $2
@@ -1000,6 +1005,9 @@ func (q *Queries) LockRuntimeSessionAttachmentForOfferRelease(ctx context.Contex
 		&attachment.AttachedAt,
 		&attachment.DetachedAt,
 		&attachment.DisconnectReason,
+		&attachment.Transport,
+		&attachment.TransportReason,
+		&attachment.TransportChangedAt,
 	)
 	return attachment, err
 }
@@ -1019,6 +1027,12 @@ WHERE n.node_id = $1
   AND n.protocol_version = 2
   AND n.runtime_contract_id = 'openlinker.runtime.v2'
   AND n.revoked_at IS NULL
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = n.runtime_contract_id
+        AND wire.runtime_contract_digest = n.runtime_contract_digest
+        AND wire.support_tier IN ('current', 'previous')
+  )
 FOR UPDATE OF n
 `
 
@@ -1096,6 +1110,12 @@ WHERE s.runtime_session_id = $1
   AND s.status IN ('active', 'draining')
   AND s.protocol_version = 2
   AND s.runtime_contract_id = 'openlinker.runtime.v2'
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = s.runtime_contract_id
+        AND wire.runtime_contract_digest = s.runtime_contract_digest
+        AND wire.support_tier IN ('current', 'previous')
+  )
 FOR UPDATE OF s
 `
 

@@ -358,6 +358,7 @@ func newRuntimeLeaseFixture(t *testing.T) *runtimeLeaseFixture {
 		CredentialID:                    uuid.New(),
 		WorkerID:                        "worker-a",
 		SessionEpoch:                    7,
+		RuntimeContractDigest:           RuntimeContractDigest,
 		CoreInstanceID:                  coreID,
 		AttachmentID:                    uuid.New(),
 		DeviceCertificateSerial:         "abc123",
@@ -517,6 +518,7 @@ func (f *runtimeLeaseTransactionFake) LockRuntimeSessionForPrincipalValidation(_
 	return db.LockRuntimeSessionForPrincipalValidationRow{
 		RuntimeSessionID: f.principal.RuntimeSessionID, NodeID: f.principal.NodeID, AgentID: f.principal.AgentID,
 		CredentialID: f.principal.CredentialID, WorkerID: f.principal.WorkerID, SessionEpoch: f.principal.SessionEpoch,
+		RuntimeContractDigest:   f.principal.RuntimeContractDigest,
 		DeviceCertificateSerial: f.principal.DeviceCertificateSerial, Status: "active", AttachedCoreInstanceID: &coreID,
 		HeartbeatAt: f.databaseNow, DatabaseNow: f.databaseNow,
 	}, nil
@@ -564,7 +566,8 @@ func (f *runtimeLeaseTransactionFake) LockRuntimeNodeForPrincipalValidation(_ co
 	f.call("lock_node")
 	return db.LockRuntimeNodeForPrincipalValidationRow{
 		NodeID: f.principal.NodeID, DeviceCertificateSerial: f.principal.DeviceCertificateSerial,
-		DevicePublicKeyThumbprint: f.principal.DevicePublicKeyThumbprintSHA256, Status: "active", DatabaseNow: f.databaseNow,
+		DevicePublicKeyThumbprint: f.principal.DevicePublicKeyThumbprintSHA256,
+		RuntimeContractDigest:     f.principal.RuntimeContractDigest, Status: "active", DatabaseNow: f.databaseNow,
 	}, nil
 }
 

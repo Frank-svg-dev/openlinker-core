@@ -188,18 +188,18 @@ LEFT JOIN LATERAL (
     JOIN agent_tokens credential
       ON credential.id = session.credential_id
      AND credential.agent_id = session.agent_id
-    JOIN runtime_schema_contracts contract
-      ON contract.runtime_contract_id = session.runtime_contract_id
-     AND contract.runtime_contract_digest = session.runtime_contract_digest
-     AND contract.is_current
+    JOIN runtime_wire_contracts wire
+      ON wire.runtime_contract_id = session.runtime_contract_id
+     AND wire.runtime_contract_digest = session.runtime_contract_digest
+     AND wire.support_tier IN ('current', 'previous')
     WHERE session.agent_id = a.id
       AND session.status = 'active'
       AND session.attached_core_instance_id IS NOT NULL
       AND session.disconnected_at IS NULL
-      AND session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND session.heartbeat_at >= clock_timestamp()
+          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND session.protocol_version = 2
       AND session.runtime_contract_id = 'openlinker.runtime.v2'
-      AND session.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND session.features @> ARRAY[
           'lease_fence', 'assignment_confirm', 'renew', 'resume',
           'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -214,7 +214,8 @@ LEFT JOIN LATERAL (
       AND node.features @> session.features
       AND session.features @> node.features
       AND node.last_seen_at IS NOT NULL
-      AND node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND node.last_seen_at >= clock_timestamp()
+          - (sqlc.arg(runtime_stale_after_ms)::bigint * INTERVAL '1 millisecond')
       AND credential.status = 'active_runtime'
       AND credential.revoked_at IS NULL
       AND credential.scopes @> ARRAY['agent:pull']::text[]

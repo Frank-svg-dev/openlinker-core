@@ -31,25 +31,29 @@ type RuntimeWorkbenchAgent struct {
 }
 
 type RuntimeWorkbenchRuntime struct {
-	RuntimeContractID     string  `json:"runtime_contract_id"`
-	RuntimeContractDigest string  `json:"runtime_contract_digest"`
-	TransportPolicy       string  `json:"transport_policy"`
-	PrimaryTransport      string  `json:"primary_transport"`
-	FallbackTransport     string  `json:"fallback_transport"`
-	ConnectionStatus      string  `json:"connection_status"`
-	ActiveNodeCount       int32   `json:"active_node_count"`
-	ActiveSessionCount    int32   `json:"active_session_count"`
-	ReadySessionCount     int32   `json:"ready_session_count"`
-	DrainingSessionCount  int32   `json:"draining_session_count"`
-	TotalCapacity         int32   `json:"total_capacity"`
-	TotalInflight         int32   `json:"total_inflight"`
-	PendingRunCount       int32   `json:"pending_run_count"`
-	RetryWaitRunCount     int32   `json:"retry_wait_run_count"`
-	OfferedRunCount       int32   `json:"offered_run_count"`
-	ExecutingRunCount     int32   `json:"executing_run_count"`
-	LastSessionActivityAt *string `json:"last_session_activity_at,omitempty"`
-	LastAssignmentAt      *string `json:"last_assignment_at,omitempty"`
-	LastResultAt          *string `json:"last_result_at,omitempty"`
+	RuntimeContractID     string           `json:"runtime_contract_id"`
+	RuntimeContractDigest string           `json:"runtime_contract_digest"`
+	TransportPolicy       string           `json:"transport_policy"`
+	PrimaryTransport      string           `json:"primary_transport"`
+	FallbackTransport     string           `json:"fallback_transport"`
+	CurrentTransport      string           `json:"current_transport"`
+	TransportCounts       map[string]int32 `json:"transport_counts"`
+	TransportChangedAt    *string          `json:"transport_changed_at,omitempty"`
+	FallbackReason        *string          `json:"fallback_reason,omitempty"`
+	ConnectionStatus      string           `json:"connection_status"`
+	ActiveNodeCount       int32            `json:"active_node_count"`
+	ActiveSessionCount    int32            `json:"active_session_count"`
+	ReadySessionCount     int32            `json:"ready_session_count"`
+	DrainingSessionCount  int32            `json:"draining_session_count"`
+	TotalCapacity         int32            `json:"total_capacity"`
+	TotalInflight         int32            `json:"total_inflight"`
+	PendingRunCount       int32            `json:"pending_run_count"`
+	RetryWaitRunCount     int32            `json:"retry_wait_run_count"`
+	OfferedRunCount       int32            `json:"offered_run_count"`
+	ExecutingRunCount     int32            `json:"executing_run_count"`
+	LastSessionActivityAt *string          `json:"last_session_activity_at,omitempty"`
+	LastAssignmentAt      *string          `json:"last_assignment_at,omitempty"`
+	LastResultAt          *string          `json:"last_result_at,omitempty"`
 }
 
 type RuntimeWorkbenchRun struct {

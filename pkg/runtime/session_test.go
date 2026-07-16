@@ -132,7 +132,7 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	}
 	wantOrder := []string{
 		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
-		"lock_attachments", "get_session_for_update", "cluster_gate", "get_node", "list_active", "create_session", "create_attachment",
+		"lock_attachments", "get_session_for_update", "cluster_gate", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
 		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
@@ -146,12 +146,111 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	if !sortStringsEqual(tx.createParams.Features, RuntimeRequiredFeatures()) {
 		t.Fatalf("created features = %#v", tx.createParams.Features)
 	}
+	if tx.heartbeatNodeParams.NodeID != fixture.principal.Device.NodeID {
+		t.Fatalf("attach did not immediately refresh Node liveness: %#v", tx.heartbeatNodeParams)
+	}
+	if tx.createAttachmentParams.Transport != string(RuntimeTransportWebSocket) ||
+		tx.createAttachmentParams.TransportReason != string(RuntimeTransportReasonExplicit) {
+		t.Fatalf("created transport evidence = %#v", tx.createAttachmentParams)
+	}
 	if state.Replayed || state.Resumed || state.Attachment == nil ||
 		state.DatabaseTime != tx.attachment.AttachedAt {
 		t.Fatalf("state = %#v", state)
 	}
 	if tx.clusterGateOperation != RuntimeClusterNewSession {
 		t.Fatalf("cluster gate operation = %q", tx.clusterGateOperation)
+	}
+}
+
+func TestRuntimeSessionServiceRejectsUnprovableTransportReasonBeforeMutableWrites(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	fixture.request.ReportedTransportReason = RuntimeTransportReasonRecovery
+	tx := newSessionTransactionFake(fixture)
+	tx.getErr = pgx.ErrNoRows
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	_, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if !IsRuntimeSessionError(err, RuntimeSessionErrorValidationFailed) {
+		t.Fatalf("CreateOrAttachSession() error = %v", err)
+	}
+	if tx.createCalls != 0 || tx.heartbeatNodeParams.NodeID != uuid.Nil {
+		t.Fatalf("invalid transport evidence mutated state: create=%d heartbeat=%#v", tx.createCalls, tx.heartbeatNodeParams)
+	}
+}
+
+func TestRuntimeSessionServicePersistsValidatedRecoveryAcrossOfflineHistory(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	fixture.request.ReportedTransportReason = RuntimeTransportReasonRecovery
+	tx := newSessionTransactionFake(fixture)
+	tx.session.Status = "offline"
+	tx.session.AttachedCoreInstanceID = nil
+	tx.attachment.Transport = string(RuntimeTransportLongPoll)
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if err != nil {
+		t.Fatalf("CreateOrAttachSession() error = %v", err)
+	}
+	if tx.createAttachmentParams.Transport != string(RuntimeTransportWebSocket) ||
+		tx.createAttachmentParams.TransportReason != string(RuntimeTransportReasonRecovery) {
+		t.Fatalf("recovery evidence = %#v", tx.createAttachmentParams)
+	}
+	if state.Attachment == nil || state.Attachment.TransportReason == nil ||
+		*state.Attachment.TransportReason != string(RuntimeTransportReasonRecovery) {
+		t.Fatalf("recovery state = %#v", state)
+	}
+}
+
+func TestRuntimeSessionServiceNegotiatesSupportedNodeGenerationWithoutLiveConflict(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	fixture.request.RuntimeContractDigest = runtimePreviousContractDigest
+	tx := newSessionTransactionFake(fixture)
+	tx.getErr = pgx.ErrNoRows
+	// Provisioning records the current Server contract. The authenticated
+	// previous client selects its adapter generation only during Session create.
+	tx.node.RuntimeContractDigest = RuntimeContractDigest
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if err != nil {
+		t.Fatalf("CreateOrAttachSession(previous) error = %v", err)
+	}
+	if tx.heartbeatNodeParams.RuntimeContractDigest != runtimePreviousContractDigest ||
+		tx.createParams.RuntimeContractDigest != runtimePreviousContractDigest ||
+		state.Session.RuntimeContractDigest != runtimePreviousContractDigest {
+		t.Fatalf("previous generation was not negotiated: heartbeat=%q create=%q state=%q",
+			tx.heartbeatNodeParams.RuntimeContractDigest,
+			tx.createParams.RuntimeContractDigest,
+			state.Session.RuntimeContractDigest,
+		)
+	}
+}
+
+func TestRuntimeSessionServiceRejectsNodeGenerationSwitchWithLiveSession(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	fixture.request.RuntimeContractDigest = runtimePreviousContractDigest
+	tx := newSessionTransactionFake(fixture)
+	tx.getErr = pgx.ErrNoRows
+	tx.node.RuntimeContractDigest = RuntimeContractDigest
+	live := tx.session
+	live.RuntimeContractDigest = RuntimeContractDigest
+	tx.active = []db.RuntimeSession{live}
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	_, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if !IsRuntimeSessionError(err, RuntimeSessionErrorSessionConflict) {
+		t.Fatalf("generation conflict error = %v", err)
+	}
+	if tx.heartbeatNodeParams.RuntimeContractDigest != "" || tx.createCalls != 0 {
+		t.Fatalf("conflicting generation mutated state: heartbeat=%#v creates=%d", tx.heartbeatNodeParams, tx.createCalls)
 	}
 }
 
@@ -186,19 +285,30 @@ func TestRuntimeSessionServiceReconnectRotatesAttachmentGeneration(t *testing.T)
 	t.Parallel()
 
 	for _, test := range []struct {
-		name           string
-		status         string
-		attached       bool
-		wantResumed    bool
-		wantAttachKind string
+		name              string
+		status            string
+		attached          bool
+		requestTransport  RuntimeTransport
+		previousTransport RuntimeTransport
+		wantResumed       bool
+		wantAttachKind    string
+		wantReason        RuntimeTransportReason
 	}{
-		{name: "same active session gets a new attachment", status: "active", attached: true, wantResumed: true, wantAttachKind: "resumed"},
-		{name: "offline reconnect", status: "offline", wantResumed: true, wantAttachKind: "resumed"},
+		{name: "same active session gets a new attachment", status: "active", attached: true, wantResumed: true, wantAttachKind: "resumed", wantReason: RuntimeTransportReasonExplicit},
+		{name: "offline reconnect", status: "offline", wantResumed: true, wantAttachKind: "resumed", wantReason: RuntimeTransportReasonExplicit},
+		{name: "websocket falls back to long poll", status: "active", attached: true, requestTransport: RuntimeTransportLongPoll, previousTransport: RuntimeTransportWebSocket, wantResumed: true, wantAttachKind: "resumed", wantReason: RuntimeTransportReasonWebSocketUnavailable},
+		{name: "long poll recovers websocket", status: "active", attached: true, requestTransport: RuntimeTransportWebSocket, previousTransport: RuntimeTransportLongPoll, wantResumed: true, wantAttachKind: "resumed", wantReason: RuntimeTransportReasonRecovery},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			fixture := newSessionFixture()
 			tx := newSessionTransactionFake(fixture)
+			if test.requestTransport != "" {
+				fixture.request.Transport = test.requestTransport
+			}
+			if test.previousTransport != "" {
+				tx.attachment.Transport = string(test.previousTransport)
+			}
 			tx.session.Status = test.status
 			if !test.attached {
 				tx.session.AttachedCoreInstanceID = nil
@@ -219,6 +329,10 @@ func TestRuntimeSessionServiceReconnectRotatesAttachmentGeneration(t *testing.T)
 			}
 			if test.wantAttachKind != "" && tx.createAttachmentParams.AttachmentKind != test.wantAttachKind {
 				t.Fatalf("attachment kind = %q", tx.createAttachmentParams.AttachmentKind)
+			}
+			if tx.createAttachmentParams.Transport != string(fixture.request.Transport) ||
+				tx.createAttachmentParams.TransportReason != string(test.wantReason) {
+				t.Fatalf("transport evidence = %#v", tx.createAttachmentParams)
 			}
 			if tx.heartbeatParams.Capacity != fixture.request.Capacity {
 				t.Fatalf("heartbeat capacity = %d", tx.heartbeatParams.Capacity)
@@ -278,6 +392,7 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 			CredentialID:                    fixture.principal.CredentialID,
 			WorkerID:                        fixture.request.WorkerID,
 			SessionEpoch:                    fixture.request.SessionEpoch,
+			RuntimeContractDigest:           fixture.request.RuntimeContractDigest,
 			CoreInstanceID:                  fixture.coreID,
 			AttachmentID:                    tx.attachment.ID,
 			DeviceCertificateSerial:         fixture.principal.Device.CertificateSerial,
@@ -330,6 +445,11 @@ func TestRuntimeSessionServiceResolveHeartbeatAndCloseFailClosed(t *testing.T) {
 		}
 		if tx.heartbeatNodeParams.DevicePublicKeyThumbprint != fixture.principal.Device.PublicKeyThumbprintSHA256 {
 			t.Fatalf("node heartbeat did not preserve authenticated device: %#v", tx.heartbeatNodeParams)
+		}
+		wrongTransport := heartbeat
+		wrongTransport.Transport = RuntimeTransportLongPoll
+		if _, err = service.HeartbeatSession(context.Background(), fixture.principal, wrongTransport); !IsRuntimeSessionError(err, RuntimeSessionErrorNotAttached) {
+			t.Fatalf("cross-transport heartbeat error = %v", err)
 		}
 		tx.heartbeatErr = pgx.ErrNoRows
 		if _, err = service.HeartbeatSession(context.Background(), fixture.principal, heartbeat); !IsRuntimeSessionError(err, RuntimeSessionErrorPrincipalInactive) {
@@ -406,6 +526,11 @@ func TestRuntimeSessionValidationRejectsBodyPrincipalAndContractDowngrade(t *tes
 	if _, err := service.CreateOrAttachSession(context.Background(), fixture.principal, missingFeature); !IsRuntimeSessionError(err, RuntimeSessionErrorRequiredFeatureMissing) {
 		t.Fatalf("missing feature error = %v", err)
 	}
+	missingTransport := fixture.request
+	missingTransport.Transport = ""
+	if _, err := service.CreateOrAttachSession(context.Background(), fixture.principal, missingTransport); !IsRuntimeSessionError(err, RuntimeSessionErrorValidationFailed) {
+		t.Fatalf("missing transport error = %v", err)
+	}
 }
 
 type sessionFixture struct {
@@ -445,6 +570,7 @@ func newSessionFixture() sessionFixture {
 			RuntimeContractDigest: RuntimeContractDigest,
 			Features:              RuntimeRequiredFeatures(),
 			Capacity:              4,
+			Transport:             RuntimeTransportWebSocket,
 		},
 	}
 }
@@ -548,13 +674,19 @@ func newSessionTransactionFake(fixture sessionFixture) *sessionTransactionFake {
 			Features:                  fixture.request.Features,
 			Status:                    "active",
 		},
-		attachment: db.RuntimeSessionAttachment{
-			ID:               uuid.New(),
-			RuntimeSessionID: fixture.request.RuntimeSessionID,
-			CoreInstanceID:   fixture.coreID,
-			AttachmentKind:   "connected",
-			AttachedAt:       fixture.databaseNow.Add(time.Second),
-		},
+		attachment: func() db.RuntimeSessionAttachment {
+			reason := string(RuntimeTransportReasonExplicit)
+			return db.RuntimeSessionAttachment{
+				ID:                 uuid.New(),
+				RuntimeSessionID:   fixture.request.RuntimeSessionID,
+				CoreInstanceID:     fixture.coreID,
+				AttachmentKind:     "connected",
+				AttachedAt:         fixture.databaseNow.Add(time.Second),
+				Transport:          string(fixture.request.Transport),
+				TransportReason:    &reason,
+				TransportChangedAt: fixture.databaseNow.Add(time.Second),
+			}
+		}(),
 	}
 }
 
@@ -607,7 +739,14 @@ func (f *sessionTransactionFake) HeartbeatRuntimeNode(_ context.Context, params 
 	if f.heartbeatErr != nil {
 		return db.RuntimeNode{}, f.heartbeatErr
 	}
-	return f.node, nil
+	node := f.node
+	node.NodeVersion = params.NodeVersion
+	node.ProtocolVersion = params.ProtocolVersion
+	node.RuntimeContractID = params.RuntimeContractID
+	node.RuntimeContractDigest = params.RuntimeContractDigest
+	node.Features = append([]string(nil), params.Features...)
+	node.Capacity = params.Capacity
+	return node, nil
 }
 
 func (f *sessionTransactionFake) ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error) {
@@ -624,6 +763,7 @@ func (f *sessionTransactionFake) CreateRuntimeSession(_ context.Context, params 
 	}
 	created := f.session
 	created.RuntimeSessionID = params.RuntimeSessionID
+	created.RuntimeContractDigest = params.RuntimeContractDigest
 	created.Features = params.Features
 	return created, nil
 }
@@ -656,6 +796,11 @@ func (f *sessionTransactionFake) GetActiveRuntimeSessionAttachment(context.Conte
 	return f.attachment, nil
 }
 
+func (f *sessionTransactionFake) ListRuntimeSessionAttachments(context.Context, db.ListRuntimeSessionAttachmentsParams) ([]db.RuntimeSessionAttachment, error) {
+	f.op("list_attachments")
+	return []db.RuntimeSessionAttachment{f.attachment}, nil
+}
+
 func (f *sessionTransactionFake) CreateRuntimeSessionAttachment(_ context.Context, params db.CreateRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error) {
 	f.op("create_attachment")
 	f.createAttachmentParams = params
@@ -663,6 +808,9 @@ func (f *sessionTransactionFake) CreateRuntimeSessionAttachment(_ context.Contex
 	attachment.ID = uuid.New()
 	attachment.AttachmentKind = params.AttachmentKind
 	attachment.AttachedAt = attachment.AttachedAt.Add(time.Second)
+	attachment.Transport = params.Transport
+	attachment.TransportReason = &params.TransportReason
+	attachment.TransportChangedAt = attachment.AttachedAt
 	f.attachment = attachment
 	return attachment, nil
 }

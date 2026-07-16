@@ -722,6 +722,7 @@ func TestRun_AgentNodeReadySessionClaimsDurableOffer(t *testing.T) {
 		CredentialID:                    tokenID,
 		WorkerID:                        workerID,
 		SessionEpoch:                    1,
+		RuntimeContractDigest:           runtime.RuntimeContractDigest,
 		CoreInstanceID:                  coreID,
 		AttachmentID:                    attachmentID,
 		DeviceCertificateSerial:         certificateSerial,

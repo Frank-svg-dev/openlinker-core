@@ -21,7 +21,7 @@ const (
 	runtimeWSPongWait          = 75 * time.Second
 	runtimeWSPingInterval      = 30 * time.Second
 	runtimeWSClaimInterval     = 500 * time.Millisecond
-	runtimeWSHeartbeatInterval = 20 * time.Second
+	runtimeWSHeartbeatInterval = RuntimeHeartbeatInterval
 	runtimeWSCleanupTimeout    = 5 * time.Second
 	runtimeWSWriteQueue        = 32
 )
@@ -159,6 +159,13 @@ func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 	if transportErr != nil {
 		return writeRuntimeError(c, transportErr)
 	}
+	reportedReason, reasonErr := runtimeFallbackReasonFromRequest(c.Request())
+	if reasonErr != nil {
+		return writeRuntimeError(c, reasonErr)
+	}
+	if admissionErr := h.runtimeTransportAdmission(RuntimeTransportWebSocket, false); admissionErr != nil {
+		return writeRuntimeError(c, admissionErr)
+	}
 	if h == nil || h.dependencies.Sessions == nil || h.dependencies.Leases == nil ||
 		h.dependencies.EventProjector == nil || h.dependencies.Finalizer == nil ||
 		h.dependencies.Cancellations == nil {
@@ -185,7 +192,7 @@ func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 		// The upgrader has already written the handshake failure.
 		return nil
 	}
-	connection := newRuntimeWSConnection(c.Request().Context(), h, socket, authenticated)
+	connection := newRuntimeWSConnection(c.Request().Context(), h, socket, authenticated, reportedReason)
 	tracked = connection
 	if !h.webSockets.register(connection) {
 		return nil
@@ -212,6 +219,7 @@ type runtimeWSConnection struct {
 	attached           bool
 	maintenanceStarted bool
 	connectionID       string
+	reportedReason     RuntimeTransportReason
 
 	operationMu   sync.Mutex
 	correlationMu sync.Mutex
@@ -241,6 +249,7 @@ func newRuntimeWSConnection(
 	controller *RuntimeHTTPController,
 	socket *websocket.Conn,
 	authenticated AuthenticatedRuntimePrincipal,
+	reportedReason RuntimeTransportReason,
 ) *runtimeWSConnection {
 	ctx, cancel := context.WithCancel(parent)
 	return &runtimeWSConnection{
@@ -255,6 +264,7 @@ func newRuntimeWSConnection(
 		assignments:     make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
 		cancellations:   make(map[uuid.UUID]runtimeWSCancellationCorrelation),
 		connectionID:    "ws:" + uuid.NewString(),
+		reportedReason:  reportedReason,
 	}
 }
 
@@ -297,8 +307,17 @@ func (c *runtimeWSConnection) run() {
 		c.replyErrorAndMaybeClose(helloEnvelope, err, true)
 		return
 	}
+	// Re-check after Upgrade so a policy change racing the HTTP admission can
+	// never attach a newly forbidden transport.
+	if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, false); admissionErr != nil {
+		c.replyErrorAndMaybeClose(helloEnvelope, admissionErr, true)
+		return
+	}
 
 	c.sessionRequest = runtimeSessionRequestFromHello(hello)
+	c.sessionRequest.Transport = RuntimeTransportWebSocket
+	c.sessionRequest.ReportedTransportReason = c.reportedReason
+	c.sessionRequest.TransportPolicy = c.controller.currentRuntimeTransportPolicy()
 	state, err := c.controller.dependencies.Sessions.CreateOrAttachSession(
 		c.ctx, c.authenticated, c.sessionRequest,
 	)
@@ -321,7 +340,8 @@ func (c *runtimeWSConnection) run() {
 	if err == nil {
 		err = validateRuntimeResolvedSession(c.authenticated, principal)
 	}
-	if err == nil && principal.AttachmentID != c.attachmentID {
+	if err == nil && (principal.AttachmentID != c.attachmentID ||
+		principal.RuntimeContractDigest != state.Session.RuntimeContractDigest) {
 		err = newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 	}
 	if err != nil {
@@ -390,6 +410,9 @@ func (c *runtimeWSConnection) readEnvelope() (RuntimeEnvelope, error) {
 }
 
 func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
+	if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
+		return c.replyErrorAndMaybeClose(envelope, admissionErr, true)
+	}
 	if envelope.Type == RuntimeMessageHello {
 		c.replyErrorAndMaybeClose(envelope, NewRuntimeTransportError(
 			RuntimeErrorSessionConflict, runtimeErrorDefaultMessage(RuntimeErrorSessionConflict),
@@ -428,6 +451,9 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 }
 
 func (c *runtimeWSConnection) refreshSession() error {
+	if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
+		return admissionErr
+	}
 	principal, err := c.controller.dependencies.Sessions.ResolveSessionPrincipal(
 		c.ctx, c.authenticated, c.sessionPrincipal.RuntimeSessionID,
 	)
@@ -876,11 +902,15 @@ func (c *runtimeWSConnection) replyErrorAndMaybeClose(
 		}
 	}
 	closeCode, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code)
+	closeReason := string(mapped.Body.Code)
+	if signal, policySignal := runtimePolicySignal(mapped); policySignal {
+		closeCode, closeReason, fatal = websocket.ClosePolicyViolation, signal, true
+	}
 	if forceClose && !fatal {
 		closeCode, fatal = RuntimeWSCloseProtocolError, true
 	}
 	if fatal {
-		_ = c.writeClose(closeCode, string(mapped.Body.Code))
+		_ = c.writeClose(closeCode, closeReason)
 		c.cancel()
 		return true
 	}
@@ -892,10 +922,14 @@ func (c *runtimeWSConnection) closeForError(mapped *RuntimeTransportError) {
 		mapped = NewRuntimeTransportError(RuntimeErrorInternal, runtimeErrorDefaultMessage(RuntimeErrorInternal))
 	}
 	closeCode, fatal := RuntimeWebSocketCloseCode(mapped.Body.Code)
+	closeReason := string(mapped.Body.Code)
+	if signal, policySignal := runtimePolicySignal(mapped); policySignal {
+		closeCode, closeReason, fatal = websocket.ClosePolicyViolation, signal, true
+	}
 	if !fatal {
 		closeCode = RuntimeWSCloseInternalError
 	}
-	_ = c.writeClose(closeCode, string(mapped.Body.Code))
+	_ = c.writeClose(closeCode, closeReason)
 	c.cancel()
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kelseyhightower/envconfig"
 )
@@ -48,6 +49,18 @@ type Config struct {
 	// InternalToken 保护 /internal/user-tokens/introspect，并可复用于 Core
 	// 与受信任私有服务（如 LLM 代理）的内部鉴权。不使用内部接口可留空。
 	InternalToken string `envconfig:"OPENLINKER_INTERNAL_TOKEN"`
+
+	// External Execution uses a dedicated asymmetric service identity. It is
+	// intentionally independent from JWT_SECRET and OPENLINKER_INTERNAL_TOKEN.
+	// When the public key is empty the optional internal API is not mounted.
+	ExternalExecutionJWTCurrentKeyID     string `envconfig:"EXTERNAL_EXECUTION_JWT_CURRENT_KEY_ID" default:"current"`
+	ExternalExecutionJWTCurrentPublicKey string `envconfig:"EXTERNAL_EXECUTION_JWT_CURRENT_PUBLIC_KEY"`
+	ExternalExecutionJWTNextKeyID        string `envconfig:"EXTERNAL_EXECUTION_JWT_NEXT_KEY_ID"`
+	ExternalExecutionJWTNextPublicKey    string `envconfig:"EXTERNAL_EXECUTION_JWT_NEXT_PUBLIC_KEY"`
+	ExternalExecutionJWTIssuer           string `envconfig:"EXTERNAL_EXECUTION_JWT_ISSUER" default:"openlinker-cloud"`
+	ExternalExecutionJWTAudience         string `envconfig:"EXTERNAL_EXECUTION_JWT_AUDIENCE" default:"openlinker-core.external-execution"`
+	// Fixed to the migration-074 legacy namespace until an explicit rekey migration exists.
+	ExternalExecutionCallerServiceID string `envconfig:"EXTERNAL_EXECUTION_CALLER_SERVICE_ID" default:"openlinker-cloud"`
 
 	// A2A gRPC binding. Disabled by default so existing HTTP deployments do not
 	// need to expose an additional HTTP/2 port.
@@ -127,4 +140,8 @@ func Load() (*Config, error) {
 // IsProduction 是否生产环境。
 func (c *Config) IsProduction() bool {
 	return c.Env == "production"
+}
+
+func (c *Config) ExternalExecutionEnabled() bool {
+	return c != nil && strings.TrimSpace(c.ExternalExecutionJWTCurrentPublicKey) != ""
 }

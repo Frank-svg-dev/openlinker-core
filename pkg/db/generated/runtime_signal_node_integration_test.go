@@ -95,7 +95,7 @@ func TestHasActiveRuntimeSessionForAgentAgainstPostgres(t *testing.T) {
 	}
 
 	queries := New(tx)
-	active, err := queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
+	active, err := queries.HasActiveRuntimeSessionForAgent(ctx, HasActiveRuntimeSessionForAgentParams{AgentID: agentID, RuntimeStaleAfterMs: 45_000})
 	if err != nil || active {
 		t.Fatalf("stale v2 session active = %v, %v", active, err)
 	}
@@ -105,7 +105,7 @@ func TestHasActiveRuntimeSessionForAgentAgainstPostgres(t *testing.T) {
 		WHERE runtime_session_id = $1`, sessionID); err != nil {
 		t.Fatalf("refresh session heartbeat: %v", err)
 	}
-	active, err = queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
+	active, err = queries.HasActiveRuntimeSessionForAgent(ctx, HasActiveRuntimeSessionForAgentParams{AgentID: agentID, RuntimeStaleAfterMs: 45_000})
 	if err != nil || active {
 		t.Fatalf("stale Node with fresh Session active = %v, %v", active, err)
 	}
@@ -115,11 +115,11 @@ func TestHasActiveRuntimeSessionForAgentAgainstPostgres(t *testing.T) {
 		WHERE node_id = $1`, nodeID); err != nil {
 		t.Fatalf("refresh Node heartbeat: %v", err)
 	}
-	active, err = queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
+	active, err = queries.HasActiveRuntimeSessionForAgent(ctx, HasActiveRuntimeSessionForAgentParams{AgentID: agentID, RuntimeStaleAfterMs: 45_000})
 	if err != nil || !active {
 		t.Fatalf("fresh v2 session active = %v, %v", active, err)
 	}
-	active, err = queries.HasActiveRuntimeSessionForAgent(ctx, uuid.New())
+	active, err = queries.HasActiveRuntimeSessionForAgent(ctx, HasActiveRuntimeSessionForAgentParams{AgentID: uuid.New(), RuntimeStaleAfterMs: 45_000})
 	if err != nil || active {
 		t.Fatalf("unknown Agent active = %v, %v", active, err)
 	}

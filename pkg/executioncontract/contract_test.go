@@ -1,4 +1,4 @@
-package hostedcontract
+package executioncontract
 
 import "testing"
 

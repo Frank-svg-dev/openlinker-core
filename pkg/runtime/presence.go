@@ -27,15 +27,18 @@ const (
 // RuntimePresence is an expiring routing/display hint. PostgreSQL Node,
 // Session, attachment, certificate and credential state always wins.
 type RuntimePresence struct {
-	CoreInstanceID   uuid.UUID `json:"core_instance_id"`
-	NodeID           uuid.UUID `json:"node_id"`
-	AgentID          uuid.UUID `json:"agent_id"`
-	RuntimeSessionID uuid.UUID `json:"runtime_session_id"`
-	ConnectionID     string    `json:"connection_id"`
-	WorkerID         string    `json:"worker_id"`
-	Capacity         int32     `json:"capacity"`
-	Inflight         int32     `json:"inflight"`
-	NodeVersion      string    `json:"version"`
+	CoreInstanceID     uuid.UUID              `json:"core_instance_id"`
+	NodeID             uuid.UUID              `json:"node_id"`
+	AgentID            uuid.UUID              `json:"agent_id"`
+	RuntimeSessionID   uuid.UUID              `json:"runtime_session_id"`
+	ConnectionID       string                 `json:"connection_id"`
+	WorkerID           string                 `json:"worker_id"`
+	Capacity           int32                  `json:"capacity"`
+	Inflight           int32                  `json:"inflight"`
+	NodeVersion        string                 `json:"version"`
+	Transport          RuntimeTransport       `json:"transport"`
+	TransportReason    RuntimeTransportReason `json:"transport_reason"`
+	TransportChangedAt time.Time              `json:"transport_changed_at"`
 }
 
 type RuntimePresenceStore interface {
@@ -216,6 +219,9 @@ func validateRuntimePresence(presence RuntimePresence) error {
 	if presence.Capacity < 0 || presence.Capacity > RuntimeMaximumNodeCapacity ||
 		presence.Inflight < 0 || presence.Inflight > RuntimeMaximumNodeCapacity {
 		return errors.New("runtime presence capacity is invalid")
+	}
+	if !presence.Transport.IsLive() || !presence.TransportReason.IsValid() || presence.TransportChangedAt.IsZero() {
+		return errors.New("runtime presence transport evidence is invalid")
 	}
 	return nil
 }

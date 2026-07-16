@@ -34,6 +34,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/coreapi"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/db"
 	dbgen "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/externalexecution"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	openlinkerlog "github.com/OpenLinker-ai/openlinker-core/pkg/log"
@@ -87,7 +88,7 @@ func main() {
 
 	var rateLimiterStore emw.RateLimiterStore
 	var redisClient *redis.Client
-	if cfg.RuntimeHAMode {
+	if cfg.RuntimeHAMode || cfg.ExternalExecutionEnabled() {
 		redisClient, err = newRedisClient(cfg.RedisURL)
 		if err != nil {
 			log.Fatal().Err(err).Msg("configure redis failed")
@@ -137,14 +138,19 @@ func main() {
 		log.Fatal().Err(err).Msg("configure runtime cluster failed")
 	}
 	cluster.Start(rootCtx)
+	externalExecutionAuthorizer, err := buildExternalExecutionAuthorizer(cfg, redisClient)
+	if err != nil {
+		log.Fatal().Err(err).Msg("configure external execution authentication failed")
+	}
 
 	e := newEcho(cfg, rateLimiterStore)
-	registerHealthRoutes(e, cfg, pool, cluster)
+	registerHealthRoutes(e, cfg, pool, applicationReadiness(cfg, cluster, redisClient))
 	opts := coreapi.Options{
-		AdminMiddleware:  auth.AdminMiddleware(dbgen.New(pool)),
-		LLMClient:        buildLLMClient(cfg),
-		CoreInstanceID:   coreInstanceID,
-		RuntimeSignalBus: runtimeSignalBus,
+		AdminMiddleware:             auth.AdminMiddleware(dbgen.New(pool)),
+		LLMClient:                   buildLLMClient(cfg),
+		CoreInstanceID:              coreInstanceID,
+		RuntimeSignalBus:            runtimeSignalBus,
+		ExternalExecutionAuthorizer: externalExecutionAuthorizer,
 	}
 	log.Info().Msg("runtime billing is not part of core; run cost metadata is not settled")
 	if opts.LLMClient == nil {
@@ -240,6 +246,51 @@ type dbPinger interface {
 
 type clusterReadinessChecker interface {
 	Readiness(context.Context) runtime.RuntimeClusterReadiness
+}
+
+type readinessDependencyPinger interface {
+	Ping(context.Context) error
+}
+
+type redisReadinessPinger struct {
+	client *redis.Client
+}
+
+func (p redisReadinessPinger) Ping(ctx context.Context) error {
+	if p.client == nil {
+		return errors.New("redis client is unavailable")
+	}
+	return p.client.Ping(ctx).Err()
+}
+
+type externalExecutionReadiness struct {
+	base   clusterReadinessChecker
+	replay readinessDependencyPinger
+}
+
+func applicationReadiness(cfg *config.Config, base clusterReadinessChecker, redisClient *redis.Client) clusterReadinessChecker {
+	if cfg == nil || !cfg.ExternalExecutionEnabled() {
+		return base
+	}
+	return externalExecutionReadiness{base: base, replay: redisReadinessPinger{client: redisClient}}
+}
+
+func (r externalExecutionReadiness) Readiness(ctx context.Context) runtime.RuntimeClusterReadiness {
+	result := runtime.RuntimeClusterReadiness{Status: "not_ready", Reasons: []string{"cluster_unavailable"}}
+	if r.base != nil {
+		result = r.base.Readiness(ctx)
+	}
+	if r.replay == nil || r.replay.Ping(ctx) != nil {
+		result.Ready = false
+		result.Status = "not_ready"
+		for _, reason := range result.Reasons {
+			if reason == "external_execution_replay_dependency_unavailable" {
+				return result
+			}
+		}
+		result.Reasons = append(result.Reasons, "external_execution_replay_dependency_unavailable")
+	}
+	return result
 }
 
 func newEcho(cfg *config.Config, stores ...emw.RateLimiterStore) *echo.Echo {
@@ -366,6 +417,9 @@ func validateProductionConfig(cfg *config.Config) error {
 	if err := validateRuntimeMTLSConfig(cfg); err != nil {
 		return err
 	}
+	if err := validateExternalExecutionCallerServiceID(cfg); err != nil {
+		return err
+	}
 	if !cfg.IsProduction() {
 		return nil
 	}
@@ -381,7 +435,76 @@ func validateProductionConfig(cfg *config.Config) error {
 	if cfg.RuntimeHAMode && strings.TrimSpace(cfg.RedisURL) == "" {
 		return fmt.Errorf("REDIS_URL is required for production runtime HA")
 	}
+	if cfg.ExternalExecutionEnabled() {
+		if strings.TrimSpace(cfg.RedisURL) == "" {
+			return fmt.Errorf("REDIS_URL is required for external execution replay protection")
+		}
+		if strings.TrimSpace(cfg.ExternalExecutionJWTCurrentKeyID) == "" ||
+			strings.TrimSpace(cfg.ExternalExecutionJWTIssuer) == "" ||
+			strings.TrimSpace(cfg.ExternalExecutionJWTAudience) == "" ||
+			strings.TrimSpace(cfg.ExternalExecutionCallerServiceID) == "" {
+			return fmt.Errorf("external execution JWT current key id, issuer, audience, and caller service id are required")
+		}
+		nextKeyID := strings.TrimSpace(cfg.ExternalExecutionJWTNextKeyID)
+		nextPublicKey := strings.TrimSpace(cfg.ExternalExecutionJWTNextPublicKey)
+		if (nextKeyID == "") != (nextPublicKey == "") {
+			return fmt.Errorf("external execution JWT next key id and public key must be configured together")
+		}
+		if nextKeyID != "" && nextKeyID == strings.TrimSpace(cfg.ExternalExecutionJWTCurrentKeyID) {
+			return fmt.Errorf("external execution JWT current and next key ids must differ")
+		}
+	}
 	return nil
+}
+
+func validateExternalExecutionCallerServiceID(cfg *config.Config) error {
+	if cfg == nil {
+		return nil
+	}
+	callerServiceID := strings.TrimSpace(cfg.ExternalExecutionCallerServiceID)
+	if callerServiceID == "" && !cfg.ExternalExecutionEnabled() {
+		return nil
+	}
+	if callerServiceID != externalexecution.LegacyCutoverCallerServiceID {
+		return fmt.Errorf(
+			"external execution caller service id (EXTERNAL_EXECUTION_CALLER_SERVICE_ID) must be %q while migration 074 legacy rows are supported",
+			externalexecution.LegacyCutoverCallerServiceID,
+		)
+	}
+	return nil
+}
+
+func buildExternalExecutionAuthorizer(cfg *config.Config, redisClient *redis.Client) (*externalexecution.Authorizer, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	if err := validateExternalExecutionCallerServiceID(cfg); err != nil {
+		return nil, err
+	}
+	if !cfg.ExternalExecutionEnabled() {
+		if strings.TrimSpace(cfg.ExternalExecutionJWTNextKeyID) != "" || strings.TrimSpace(cfg.ExternalExecutionJWTNextPublicKey) != "" {
+			return nil, errors.New("external execution current verification key is required before a next key")
+		}
+		return nil, nil
+	}
+	if redisClient == nil {
+		return nil, errors.New("external execution replay protection requires Redis")
+	}
+	keys := []externalexecution.VerificationKey{{
+		KeyID: cfg.ExternalExecutionJWTCurrentKeyID, PublicKey: cfg.ExternalExecutionJWTCurrentPublicKey,
+	}}
+	if strings.TrimSpace(cfg.ExternalExecutionJWTNextKeyID) != "" || strings.TrimSpace(cfg.ExternalExecutionJWTNextPublicKey) != "" {
+		keys = append(keys, externalexecution.VerificationKey{
+			KeyID: cfg.ExternalExecutionJWTNextKeyID, PublicKey: cfg.ExternalExecutionJWTNextPublicKey,
+		})
+	}
+	return externalexecution.NewAuthorizer(
+		keys,
+		cfg.ExternalExecutionJWTIssuer,
+		cfg.ExternalExecutionJWTAudience,
+		cfg.ExternalExecutionCallerServiceID,
+		externalexecution.NewRedisReplayStore(redisClient),
+	)
 }
 
 func rateLimiterConfig(stores ...emw.RateLimiterStore) emw.RateLimiterConfig {

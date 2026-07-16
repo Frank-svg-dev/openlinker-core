@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -598,9 +599,14 @@ func TestRuntimeNodeSessionAndClusterQueries(t *testing.T) {
 	}
 
 	attachmentID := uuid.New()
-	dbtx.row = fakeRow{values: []any{attachmentID, sessionID, coreID, "connected", now, (*time.Time)(nil), (*string)(nil)}}
+	reason := "explicit"
+	dbtx.row = fakeRow{values: []any{
+		attachmentID, sessionID, coreID, "connected", now, (*time.Time)(nil), (*string)(nil),
+		"websocket", &reason, now,
+	}}
 	attachment, err := q.CreateRuntimeSessionAttachment(context.Background(), CreateRuntimeSessionAttachmentParams{
 		RuntimeSessionID: sessionID, CoreInstanceID: coreID, AttachmentKind: "connected",
+		Transport: "websocket", TransportReason: reason,
 	})
 	if err != nil || attachment.ID != attachmentID {
 		t.Fatalf("CreateRuntimeSessionAttachment = %#v, %v", attachment, err)
@@ -686,6 +692,158 @@ func TestRuntimePrincipalRevocationLockOrderQueries(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dbtx.queryArgs, []any{sessionScope}) {
 		t.Fatalf("LockActiveRuntimeSessionAttachmentsForPrincipalRevocation args = %#v", dbtx.queryArgs)
+	}
+}
+
+func TestRuntimeTransportObservabilityMigrationShape(t *testing.T) {
+	t.Parallel()
+
+	up, err := os.ReadFile("../../../migrations/073_runtime_transport_observability.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down, err := os.ReadFile("../../../migrations/073_runtime_transport_observability.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verify, err := os.ReadFile("../../../migrations/073_runtime_transport_observability_verify.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fragment := range []string{
+		"ADD COLUMN transport TEXT",
+		"runtime_session_attachments_transport_time_order",
+		"CREATE TABLE runtime_wire_contracts",
+		"REFERENCES runtime_wire_contracts",
+		"DROP CONSTRAINT runtime_schema_contracts_runtime_pair_unique",
+		"73,\n    '073_runtime_transport_observability'",
+		"schema_version = 71",
+		"runtime_sessions_contract_current",
+		"runtime_nodes_contract_current",
+	} {
+		if !strings.Contains(string(up), fragment) {
+			t.Fatalf("up migration missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"DROP COLUMN transport_changed_at",
+		"DELETE FROM runtime_schema_contracts",
+		"schema_version = 71",
+		"ADD CONSTRAINT runtime_schema_contracts_runtime_pair_unique",
+		"REFERENCES runtime_schema_contracts",
+		"DROP TABLE runtime_wire_contracts",
+		"runtime transport observability rollback",
+	} {
+		if !strings.Contains(string(down), fragment) {
+			t.Fatalf("down migration missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"runtime schema contract 73 is missing or mismatched",
+		"database schema generations do not share the unchanged current wire digest",
+		"legacy schema-to-wire pair uniqueness constraint remains installed",
+		"Runtime wire registry and schema history are inconsistent",
+		"Runtime principals are not bound to the independent wire registry",
+		"Runtime Attachment history guard does not protect transport evidence",
+		"Runtime current-contract checks do not preserve wire-contract history",
+	} {
+		if !strings.Contains(string(verify), fragment) {
+			t.Fatalf("verify migration missing %q", fragment)
+		}
+	}
+}
+
+func TestRuntimeWireCompatibilityMigrationShape(t *testing.T) {
+	t.Parallel()
+
+	up, err := os.ReadFile("../../../migrations/075_runtime_wire_compatibility.up.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	down, err := os.ReadFile("../../../migrations/075_runtime_wire_compatibility.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	verify, err := os.ReadFile("../../../migrations/075_runtime_wire_compatibility_verify.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fragment := range []string{
+		"ADD COLUMN support_tier TEXT",
+		"support_tier IN ('current', 'previous', 'historical')",
+		"idx_runtime_wire_contracts_current",
+		"idx_runtime_wire_contracts_previous",
+		"75,\n    '075_runtime_wire_compatibility'",
+		"status IN ('active', 'draining')",
+		"fb92bb6ddbc65bd3353b5d7c63ad148dd510e4d0ac0a6ca6110461d91e2dec53",
+		"3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9",
+	} {
+		if !strings.Contains(string(up), fragment) {
+			t.Fatalf("up migration missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"rollback refuses live previous-generation principals",
+		"DELETE FROM runtime_schema_contracts",
+		"schema_version = 73",
+		"DROP COLUMN support_tier",
+		"runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'",
+	} {
+		if !strings.Contains(string(down), fragment) {
+			t.Fatalf("down migration missing %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"Runtime wire compatibility ring is not bounded to two generations",
+		"active Runtime constraints do not permit exact N/N-1",
+		"active Runtime Node and Session generations disagree",
+		"support_tier = 'current'",
+		"support_tier = 'previous'",
+	} {
+		if !strings.Contains(string(verify), fragment) {
+			t.Fatalf("verify migration missing %q", fragment)
+		}
+	}
+}
+
+func TestRuntimeAvailabilityQueriesContainNoEmbeddedFreshnessSeconds(t *testing.T) {
+	t.Parallel()
+
+	paths := []string{
+		"../queries/runtime_nodes.sql",
+		"../queries/agents.sql",
+		"../queries/benchmark.sql",
+		"runtime_nodes.sql.go",
+		"agents.sql.go",
+		"agents_market.sql.go",
+		"benchmark.sql.go",
+		"../../runtime/admin_nodes.go",
+		"../../a2a/runtime_workbench.go",
+	}
+	for _, path := range paths {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		normalized := strings.ToLower(string(contents))
+		for _, seconds := range []string{"15", "45", "60", "120"} {
+			literal := "interval '" + seconds + " seconds'"
+			if strings.Contains(normalized, literal) {
+				t.Fatalf("%s embeds Runtime freshness literal %q; pass the server policy explicitly", path, literal)
+			}
+		}
+	}
+
+	for _, path := range []string{"../queries/runtime_nodes.sql", "../queries/agents.sql", "../queries/benchmark.sql"} {
+		contents, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(contents), "runtime_stale_after_ms") {
+			t.Fatalf("%s does not accept the server-owned Runtime stale threshold", path)
+		}
 	}
 }
 

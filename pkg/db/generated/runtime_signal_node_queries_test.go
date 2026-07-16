@@ -12,29 +12,32 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func TestHasActiveRuntimeSessionForAgentUsesDurableCurrentTruth(t *testing.T) {
+func TestHasActiveRuntimeSessionForAgentUsesDurableSupportedTruth(t *testing.T) {
 	agentID := uuid.New()
 	dbtx := &signalQueryDBTX{row: signalQueryRow{values: []any{true}}}
-	active, err := New(dbtx).HasActiveRuntimeSessionForAgent(context.Background(), agentID)
+	active, err := New(dbtx).HasActiveRuntimeSessionForAgent(context.Background(), HasActiveRuntimeSessionForAgentParams{
+		AgentID:             agentID,
+		RuntimeStaleAfterMs: 45_000,
+	})
 	if err != nil || !active {
 		t.Fatalf("HasActiveRuntimeSessionForAgent = %v, %v", active, err)
 	}
 	requireSignalQueryName(t, dbtx.queryRowSQL, "HasActiveRuntimeSessionForAgent")
-	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID}) {
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{agentID, int64(45_000)}) {
 		t.Fatalf("HasActiveRuntimeSessionForAgent args = %#v", dbtx.queryRowArgs)
 	}
 	for _, guard := range []string{
 		"s.status IN ('active', 'draining')",
 		"n.status IN ('active', 'draining')",
 		"n.revoked_at IS NULL",
-		"s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'",
-		"n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'",
+		"s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')",
+		"n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')",
 		"t.status = 'active_runtime'",
 		"t.revoked_at IS NULL",
 		"t.scopes @> ARRAY['agent:pull']::text[]",
 		"t.expires_at > clock_timestamp()",
-		"contract.is_current",
-		"runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'",
+		"wire.support_tier IN ('current', 'previous')",
+		"n.runtime_contract_digest = s.runtime_contract_digest",
 		"'persistent_spool'",
 		"attachment.detached_at IS NULL",
 	} {

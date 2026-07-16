@@ -204,7 +204,7 @@ func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 	agentID := insertAgent(t, pool, ownerID, "https://example.com/runtime")
 	makeRuntimePullAgent(t, pool, agentID)
 	runID := insertParentRun(t, pool, ownerID, agentID)
-	insertRuntimeWorkbenchSession(t, pool, ownerID, agentID)
+	insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 30*time.Second)
 
 	workbench, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
 	require.NoError(t, err)
@@ -214,6 +214,11 @@ func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 	assert.Equal(t, "ws_primary_long_poll_fallback", workbench.Runtime.TransportPolicy)
 	assert.Equal(t, "websocket", workbench.Runtime.PrimaryTransport)
 	assert.Equal(t, "long_poll", workbench.Runtime.FallbackTransport)
+	assert.Equal(t, "long_poll", workbench.Runtime.CurrentTransport)
+	assert.Equal(t, map[string]int32{"websocket": 0, "long_poll": 1}, workbench.Runtime.TransportCounts)
+	require.NotNil(t, workbench.Runtime.TransportChangedAt)
+	require.NotNil(t, workbench.Runtime.FallbackReason)
+	assert.Equal(t, "websocket_unavailable", *workbench.Runtime.FallbackReason)
 	assert.Equal(t, "online", workbench.Runtime.ConnectionStatus)
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveNodeCount)
 	assert.Equal(t, int32(1), workbench.Runtime.ActiveSessionCount)
@@ -234,6 +239,30 @@ func TestRuntimeWorkbenchShowsSessionAndBacklog(t *testing.T) {
 		codes = append(codes, item.Code)
 	}
 	assert.Equal(t, []string{"runtime_ready"}, codes)
+
+	err = pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(context.Background(), `
+UPDATE runtime_session_attachments attachment
+SET detached_at = clock_timestamp(), disconnect_reason = 'workbench liveness boundary'
+FROM runtime_sessions session
+WHERE session.runtime_session_id = attachment.runtime_session_id
+  AND session.agent_id = $1
+  AND attachment.detached_at IS NULL`, agentID); err != nil {
+			return err
+		}
+		_, err := tx.Exec(context.Background(), `
+UPDATE runtime_sessions
+SET status = 'offline', attached_core_instance_id = NULL,
+    disconnected_at = clock_timestamp(), updated_at = clock_timestamp()
+WHERE agent_id = $1 AND status IN ('active', 'draining')`, agentID)
+		return err
+	})
+	require.NoError(t, err)
+	insertRuntimeWorkbenchSession(t, pool, ownerID, agentID, 46*time.Second)
+	stale, err := svc.GetRuntimeWorkbench(context.Background(), ownerID, agentID)
+	require.NoError(t, err)
+	assert.Equal(t, "offline", stale.Runtime.ConnectionStatus)
+	assert.Equal(t, "unknown", stale.Runtime.CurrentTransport)
 }
 
 func TestRuntimeWorkbenchShowsOfflineBacklogWithoutClaimLanguage(t *testing.T) {
@@ -285,6 +314,7 @@ func insertRuntimeWorkbenchSession(
 	t *testing.T,
 	pool *pgxpool.Pool,
 	ownerID, agentID uuid.UUID,
+	age time.Duration,
 ) {
 	t.Helper()
 	nodeID := uuid.New()
@@ -293,7 +323,7 @@ func insertRuntimeWorkbenchSession(
 	coreID := uuid.New()
 	prefix := "ol_agent_" + credentialID.String()[:8]
 	serial := strings.ReplaceAll(nodeID.String(), "-", "")
-	thumbprint := strings.Repeat("a", 64)
+	thumbprint := serial + serial
 	err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(context.Background(), `
 INSERT INTO agent_tokens (
@@ -311,9 +341,10 @@ INSERT INTO runtime_nodes (
     runtime_contract_id, runtime_contract_digest, features,
     capacity, inflight, status, last_seen_at
 ) VALUES ($1, 'Workbench Node', $2, $3, 'workbench-v2', 2,
-          $4, $5, $6, 4, 0, 'active', clock_timestamp())`,
+          $4, $5, $6, 4, 0, 'active',
+          clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond'))`,
 			nodeID, serial, thumbprint, runtime.RuntimeContractID,
-			runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures()); err != nil {
+			runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(), age.Milliseconds()); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(context.Background(), `
@@ -324,16 +355,18 @@ INSERT INTO runtime_sessions (
     features, capacity, inflight, status, attached_core_instance_id,
     heartbeat_at
 ) VALUES ($1, $2, $3, $4, 'workbench-worker', 1, $5, 'workbench-v2',
-          2, $6, $7, $8, 2, 0, 'active', $9, clock_timestamp())`,
+          2, $6, $7, $8, 2, 0, 'active', $9,
+          clock_timestamp() - ($10::bigint * INTERVAL '1 millisecond'))`,
 			sessionID, nodeID, agentID, credentialID, serial,
 			runtime.RuntimeContractID, runtime.RuntimeContractDigest,
-			runtime.RuntimeRequiredFeatures(), coreID); err != nil {
+			runtime.RuntimeRequiredFeatures(), coreID, age.Milliseconds()); err != nil {
 			return err
 		}
 		_, err := tx.Exec(context.Background(), `
 INSERT INTO runtime_session_attachments (
-    runtime_session_id, core_instance_id, attachment_kind
-) VALUES ($1, $2, 'connected')`, sessionID, coreID)
+    runtime_session_id, core_instance_id, attachment_kind,
+    transport, transport_reason
+) VALUES ($1, $2, 'connected', 'long_poll', 'websocket_unavailable')`, sessionID, coreID)
 		return err
 	})
 	require.NoError(t, err)

@@ -274,7 +274,7 @@ func (q *Queries) CreatePendingWorkflowRun(ctx context.Context, arg CreatePendin
 	return r, err
 }
 
-const createPendingHostedWorkflowRun = `-- name: CreatePendingHostedWorkflowRun :one
+const createPendingExternalExecutionWorkflowRun = `-- name: CreatePendingExternalExecutionWorkflowRun :one
 	INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
 	VALUES ($1, $2, $3, 'pending', $4, $5)
 	ON CONFLICT (id) DO NOTHING
@@ -282,7 +282,7 @@ const createPendingHostedWorkflowRun = `-- name: CreatePendingHostedWorkflowRun 
 	          started_at, finished_at, created_at, updated_at,
 	          attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error`
 
-type CreatePendingHostedWorkflowRunParams struct {
+type CreatePendingExternalExecutionWorkflowRunParams struct {
 	ID          uuid.UUID `db:"id" json:"id"`
 	WorkflowID  uuid.UUID `db:"workflow_id" json:"workflow_id"`
 	UserID      uuid.UUID `db:"user_id" json:"user_id"`
@@ -290,8 +290,8 @@ type CreatePendingHostedWorkflowRunParams struct {
 	MaxAttempts int32     `db:"max_attempts" json:"max_attempts"`
 }
 
-func (q *Queries) CreatePendingHostedWorkflowRun(ctx context.Context, arg CreatePendingHostedWorkflowRunParams) (WorkflowRun, error) {
-	row := q.db.QueryRow(ctx, createPendingHostedWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
+func (q *Queries) CreatePendingExternalExecutionWorkflowRun(ctx context.Context, arg CreatePendingExternalExecutionWorkflowRunParams) (WorkflowRun, error) {
+	row := q.db.QueryRow(ctx, createPendingExternalExecutionWorkflowRun, arg.ID, arg.WorkflowID, arg.UserID, arg.Input, arg.MaxAttempts)
 	var r WorkflowRun
 	err := scanWorkflowRun(row, &r)
 	return r, err

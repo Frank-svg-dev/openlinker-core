@@ -56,9 +56,10 @@ not a public task-bidding marketplace.
 ## Open-source Architecture
 
 The open-source repositories use Core as the shared registry and run control
-plane. A hosted deployment can use a protected, idempotent execution bridge to
-start a Core Agent or Workflow Run and synchronize its terminal result. Hosted
-account, listing, order, and commercial modules remain outside this repository.
+plane. Core exposes a product-neutral, protected External Execution boundary for
+starting an Agent or Workflow Run and synchronizing its terminal result. Cloud
+maps hosted orders onto that boundary; account, listing, order, seller, and all
+commercial semantics remain outside this repository.
 
 ```mermaid
 flowchart LR
@@ -66,7 +67,7 @@ flowchart LR
   SDKs["openlinker-go / openlinker-js / openlinker-python<br/>client and runtime SDKs"] -->|"REST / SSE / A2A / Runtime"| Core
   MCPCaller["MCP or A2A caller"] -->|"tool call / message/send"| Core
 
-  HostedBridge["Hosted execution bridge<br/>protected and idempotent"] -.->|"start Run / sync result"| Core
+  Cloud["openlinker-cloud<br/>Hosted product and order mapping"] -.->|"scoped External Execution JWT<br/>start / sync"| Core
 
   Core["openlinker-core<br/>auth / registry / runs / events"]
 
@@ -221,6 +222,10 @@ can introspect the same token through Core.
 | Variable | Purpose | Self-host |
 |----------|---------|----------|
 | `OPENLINKER_INTERNAL_TOKEN` | Protects `POST /internal/user-tokens/introspect`; it may also authenticate trusted private services such as an LLM proxy | Leave empty unless exposing an internal service integration |
+| `EXTERNAL_EXECUTION_JWT_CURRENT_PUBLIC_KEY` | Ed25519 public key used only to verify product-neutral External Execution service JWTs; replay protection fails closed through Redis | Leave empty unless a trusted server-side execution client is configured |
+| `EXTERNAL_EXECUTION_JWT_CURRENT_KEY_ID` / `ISSUER` / `AUDIENCE` | Pins the accepted signing key, token issuer, and audience; issuer also namespaces replay protection | Must exactly match the trusted client configuration |
+| `EXTERNAL_EXECUTION_CALLER_SERVICE_ID` | Stable business caller identity carried in the signed token, independent from issuer | Must remain exactly `openlinker-cloud` while migration 074 legacy rows are supported; changing it requires an explicit data rekey migration |
+| `EXTERNAL_EXECUTION_JWT_NEXT_PUBLIC_KEY` / `NEXT_KEY_ID` | Optional second verification key for staged rotation | Set both or neither; the next kid must differ from current |
 
 ## Common Commands
 

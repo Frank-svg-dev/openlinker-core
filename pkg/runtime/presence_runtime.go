@@ -2,13 +2,12 @@ package runtime
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/rs/zerolog/log"
 )
 
-const runtimePresenceTTL = 60 * time.Second
+const runtimePresenceTTL = RuntimePresenceTTL
 
 func (h *RuntimeHTTPController) refreshPresence(
 	ctx context.Context,
@@ -19,9 +18,11 @@ func (h *RuntimeHTTPController) refreshPresence(
 		return
 	}
 	session := state.Session
+	attachment := state.Attachment
 	if session.AttachedCoreInstanceID == nil ||
 		*session.AttachedCoreInstanceID != h.dependencies.CoreInstanceID ||
-		(session.Status != "active" && session.Status != "draining") {
+		(session.Status != "active" && session.Status != "draining") ||
+		attachment == nil || attachment.TransportReason == nil {
 		return
 	}
 	presence := RuntimePresence{
@@ -30,7 +31,10 @@ func (h *RuntimeHTTPController) refreshPresence(
 		RuntimeSessionID: session.RuntimeSessionID,
 		ConnectionID:     connectionID, WorkerID: session.WorkerID,
 		Capacity: session.Capacity, Inflight: session.Inflight,
-		NodeVersion: session.NodeVersion,
+		NodeVersion:        session.NodeVersion,
+		Transport:          RuntimeTransport(attachment.Transport),
+		TransportReason:    RuntimeTransportReason(*attachment.TransportReason),
+		TransportChangedAt: attachment.TransportChangedAt,
 	}
 	if err := h.dependencies.Presence.Refresh(ctx, presence, runtimePresenceTTL); err != nil {
 		log.Warn().Err(err).Str("runtime_session_id", session.RuntimeSessionID.String()).
@@ -47,13 +51,20 @@ func (h *RuntimeHTTPController) removePresence(
 		return
 	}
 	session := state.Session
+	attachment := state.Attachment
+	if attachment == nil || attachment.TransportReason == nil {
+		return
+	}
 	presence := RuntimePresence{
 		CoreInstanceID: h.dependencies.CoreInstanceID,
 		NodeID:         session.NodeID, AgentID: session.AgentID,
 		RuntimeSessionID: session.RuntimeSessionID,
 		ConnectionID:     connectionID, WorkerID: session.WorkerID,
 		Capacity: session.Capacity, Inflight: session.Inflight,
-		NodeVersion: session.NodeVersion,
+		NodeVersion:        session.NodeVersion,
+		Transport:          RuntimeTransport(attachment.Transport),
+		TransportReason:    RuntimeTransportReason(*attachment.TransportReason),
+		TransportChangedAt: attachment.TransportChangedAt,
 	}
 	if err := h.dependencies.Presence.Remove(ctx, presence); err != nil {
 		log.Warn().Err(err).Str("runtime_session_id", session.RuntimeSessionID.String()).

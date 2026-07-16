@@ -910,6 +910,26 @@ func TestA2ARuntimeWorkbenchAndPushHelpers(t *testing.T) {
 	if connection != "draining" || availability != "degraded" || callable {
 		t.Fatalf("draining workbench state = %q, %q, %t", connection, availability, callable)
 	}
+	if got := runtimeWorkbenchCurrentTransport(runtimeWorkbenchSnapshot{}); got != "unknown" {
+		t.Fatalf("empty current transport = %q", got)
+	}
+	if got := runtimeWorkbenchCurrentTransport(runtimeWorkbenchSnapshot{websocketCount: 2}); got != "websocket" {
+		t.Fatalf("websocket current transport = %q", got)
+	}
+	if got := runtimeWorkbenchCurrentTransport(runtimeWorkbenchSnapshot{longPollCount: 2}); got != "long_poll" {
+		t.Fatalf("long-poll current transport = %q", got)
+	}
+	if got := runtimeWorkbenchCurrentTransport(runtimeWorkbenchSnapshot{websocketCount: 1, longPollCount: 1}); got != "mixed" {
+		t.Fatalf("mixed current transport = %q", got)
+	}
+	websocketUnavailable := "websocket_unavailable"
+	if got := runtimeWorkbenchFallbackReason("long_poll", &websocketUnavailable); got == nil || *got != websocketUnavailable {
+		t.Fatalf("safe fallback reason = %#v", got)
+	}
+	explicit := "explicit"
+	if got := runtimeWorkbenchFallbackReason("long_poll", &explicit); got != nil {
+		t.Fatalf("explicit selection leaked as fallback reason = %#v", got)
+	}
 
 	diagnostics := runtimeWorkbenchDiagnostics(db.Agent{ConnectionMode: "direct_http"}, runtimeWorkbenchSnapshot{}, nil)
 	if len(diagnostics) != 1 || diagnostics[0].Code != "runtime_not_applicable" {

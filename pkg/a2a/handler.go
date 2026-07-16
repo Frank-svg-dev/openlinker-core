@@ -65,6 +65,27 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	publicProtocol := api.Group("/a2a/agents/:slug")
 	publicProtocol.GET("/.well-known/agent-card.json", h.GetPublicAgentCardHTTP)
 	protocol := api.Group("/a2a/agents/:slug", queryMiddleware, h.resolveA2ATargetAgent, a2aHTTPErrorMiddleware)
+	h.registerProtocolRoutes(protocol)
+	api.GET("/runs/:id/children", h.ListChildren, queryMiddleware)
+}
+
+// RegisterAgentRuntimeProxy mounts the legacy AgentNode A2A surface on the
+// dedicated Runtime mTLS listener. The supplied middleware must derive the
+// creator and target Agent from the authenticated Runtime principal.
+func (h *Handler) RegisterAgentRuntimeProxy(api *echo.Group, runtimeIdentity echo.MiddlewareFunc) {
+	if api == nil || runtimeIdentity == nil {
+		return
+	}
+	protocol := api.Group(
+		"/agent-runtime/a2a-proxy/agents/:slug",
+		runtimeIdentity,
+		h.resolveA2ATargetAgent,
+		a2aHTTPErrorMiddleware,
+	)
+	h.registerProtocolRoutes(protocol)
+}
+
+func (h *Handler) registerProtocolRoutes(protocol *echo.Group) {
 	protocol.POST("", h.JSONRPC)
 	protocol.GET("/extendedAgentCard", h.GetExtendedAgentCardHTTP)
 	protocol.POST("/message:action", h.MessageHTTP)
@@ -83,7 +104,6 @@ func (h *Handler) Register(api *echo.Group, jwtMiddleware, queryMiddleware echo.
 	protocol.POST("/tasks/:taskID/subscribe", h.SubscribeTaskHTTP)
 	protocol.GET("/tasks/*", h.TaskActionHTTP)
 	protocol.POST("/tasks/*", h.TaskActionHTTP)
-	api.GET("/runs/:id/children", h.ListChildren, queryMiddleware)
 }
 
 func (h *Handler) resolveA2ATargetAgent(next echo.HandlerFunc) echo.HandlerFunc {

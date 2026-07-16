@@ -3,10 +3,12 @@ package discovery
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 const manifestVersion = "v1"
@@ -36,10 +38,24 @@ type ManifestBaseURLs struct {
 }
 
 type ManifestRuntime struct {
-	Enabled          bool     `json:"enabled"`
-	MTLSRequired     bool     `json:"mtls_required"`
-	Transports       []string `json:"transports"`
-	DefaultTransport string   `json:"default_transport"`
+	Enabled                  bool                           `json:"enabled"`
+	MTLSRequired             bool                           `json:"mtls_required"`
+	Transports               []string                       `json:"transports"`
+	DefaultTransport         string                         `json:"default_transport"`
+	CurrentContractDigest    string                         `json:"current_contract_digest"`
+	SupportedContractDigests []string                       `json:"supported_contract_digests"`
+	PreviousSupportedUntil   string                         `json:"previous_supported_until"`
+	TransportPolicy          ManifestRuntimeTransportPolicy `json:"transport_policy"`
+}
+
+type ManifestRuntimeTransportPolicy struct {
+	Version                  int   `json:"version"`
+	HeartbeatIntervalSeconds int64 `json:"heartbeat_interval_seconds"`
+	SessionStaleAfterSeconds int64 `json:"session_stale_after_seconds"`
+	RetryMinimumMilliseconds int64 `json:"retry_minimum_ms"`
+	RetryMaximumMilliseconds int64 `json:"retry_maximum_ms"`
+	WebSocketProbeIntervalMS int64 `json:"websocket_probe_interval_ms"`
+	WebSocketProbeTimeoutMS  int64 `json:"websocket_probe_timeout_ms"`
 }
 
 type ManifestDocs struct {
@@ -106,6 +122,13 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 		webBase = "http://localhost:3000"
 	}
 	runtimeOrigin, runtimeEnabled := manifestRuntimeOrigin(cfg)
+	transportPolicy := coreruntime.CurrentRuntimeTransportPolicy()
+	livenessPolicy := coreruntime.CurrentRuntimeLivenessPolicy()
+	wireCompatibility := coreruntime.CurrentRuntimeWireCompatibility()
+	transports := make([]string, 0, len(transportPolicy.OrderedTransports))
+	for _, transport := range transportPolicy.OrderedTransports {
+		transports = append(transports, string(transport))
+	}
 
 	return OpenLinkerManifest{
 		Name:        "OpenLinker",
@@ -200,10 +223,22 @@ func NewManifest(cfg *config.Config) OpenLinkerManifest {
 			Builder:       "dag_async_agent_workflow_api",
 		},
 		Runtime: ManifestRuntime{
-			Enabled:          runtimeEnabled,
-			MTLSRequired:     true,
-			Transports:       []string{"websocket", "long_poll"},
-			DefaultTransport: "auto",
+			Enabled:                  runtimeEnabled,
+			MTLSRequired:             true,
+			Transports:               transports,
+			DefaultTransport:         transportPolicy.DefaultTransport,
+			CurrentContractDigest:    wireCompatibility.CurrentContractDigest,
+			SupportedContractDigests: wireCompatibility.SupportedContractDigests,
+			PreviousSupportedUntil:   wireCompatibility.PreviousSupportedUntilRFC,
+			TransportPolicy: ManifestRuntimeTransportPolicy{
+				Version:                  transportPolicy.Version,
+				HeartbeatIntervalSeconds: int64(livenessPolicy.HeartbeatInterval / time.Second),
+				SessionStaleAfterSeconds: int64(livenessPolicy.SessionStaleAfter / time.Second),
+				RetryMinimumMilliseconds: transportPolicy.RetryMinimum.Milliseconds(),
+				RetryMaximumMilliseconds: transportPolicy.RetryMaximum.Milliseconds(),
+				WebSocketProbeIntervalMS: transportPolicy.WebSocketProbeInterval.Milliseconds(),
+				WebSocketProbeTimeoutMS:  transportPolicy.WebSocketProbeTimeout.Milliseconds(),
+			},
 		},
 	}
 }

@@ -57,6 +57,11 @@ func TestValidateProductionConfig(t *testing.T) {
 	if err := validateProductionConfig(&config.Config{Env: "development"}); err != nil {
 		t.Fatalf("development config should pass: %v", err)
 	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "development", ExternalExecutionCallerServiceID: "custom-cloud",
+	}); err == nil || !strings.Contains(err.Error(), "must be \"openlinker-cloud\"") {
+		t.Fatalf("custom external execution caller must fail in every environment: %v", err)
+	}
 	if err := validateProductionConfig(&config.Config{Env: "production"}); err == nil || !strings.Contains(err.Error(), "FRONTEND_URL") {
 		t.Fatalf("missing frontend error = %v", err)
 	}
@@ -76,6 +81,49 @@ func TestValidateProductionConfig(t *testing.T) {
 		InternalToken:  "secret",
 	}); err != nil {
 		t.Fatalf("valid production config error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "production", FrontendURL: "https://app.example",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		ExternalExecutionJWTCurrentPublicKey: "public-key", ExternalExecutionCallerServiceID: "openlinker-cloud",
+	}); err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
+		t.Fatalf("missing external execution Redis error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "production", FrontendURL: "https://app.example",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
+	}); err == nil || !strings.Contains(err.Error(), "caller service id") {
+		t.Fatalf("missing external execution identity metadata error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "production", FrontendURL: "https://app.example",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
+		ExternalExecutionJWTCurrentKeyID: "current", ExternalExecutionJWTIssuer: "openlinker-cloud",
+		ExternalExecutionJWTAudience: "openlinker-core.external-execution", ExternalExecutionCallerServiceID: "openlinker-cloud",
+	}); err != nil {
+		t.Fatalf("valid external execution production config error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "production", FrontendURL: "https://app.example",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
+		ExternalExecutionJWTCurrentKeyID: "current", ExternalExecutionJWTIssuer: "openlinker-cloud",
+		ExternalExecutionJWTAudience: "openlinker-core.external-execution", ExternalExecutionCallerServiceID: "openlinker-cloud",
+		ExternalExecutionJWTNextPublicKey: "next-public-key",
+	}); err == nil || !strings.Contains(err.Error(), "configured together") {
+		t.Fatalf("half-configured next key error = %v", err)
+	}
+	if err := validateProductionConfig(&config.Config{
+		Env: "production", FrontendURL: "https://app.example",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
+		ExternalExecutionJWTCurrentKeyID: "current", ExternalExecutionJWTIssuer: "openlinker-cloud",
+		ExternalExecutionJWTAudience: "openlinker-core.external-execution", ExternalExecutionCallerServiceID: "openlinker-cloud",
+		ExternalExecutionJWTNextPublicKey: "next-public-key", ExternalExecutionJWTNextKeyID: "current",
+	}); err == nil || !strings.Contains(err.Error(), "must differ") {
+		t.Fatalf("duplicate next kid error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
@@ -330,6 +378,51 @@ func TestReadinessFailureReturnsServiceUnavailableForGetAndHead(t *testing.T) {
 	}
 }
 
+func TestExternalExecutionReadinessRequiresReplayDependency(t *testing.T) {
+	base := &fakeClusterReadiness{result: runtime.RuntimeClusterReadiness{Ready: true, Status: "ready", InstanceID: uuid.New()}}
+	replay := &fakeReadinessDependency{err: errors.New("redis endpoint and credential must stay private")}
+	checker := externalExecutionReadiness{base: base, replay: replay}
+	e := newEcho(&config.Config{Env: "development"})
+	registerHealthRoutes(e, &config.Config{Env: "development"}, &fakePinger{}, checker)
+
+	get := httptest.NewRecorder()
+	e.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if get.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz = %d: %s", get.Code, get.Body.String())
+	}
+	var result runtime.RuntimeClusterReadiness
+	if err := json.NewDecoder(get.Body).Decode(&result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Ready || result.Status != "not_ready" || len(result.Reasons) != 1 || result.Reasons[0] != "external_execution_replay_dependency_unavailable" {
+		t.Fatalf("external execution readiness = %#v", result)
+	}
+	if strings.Contains(get.Body.String(), "redis endpoint") || strings.Contains(get.Body.String(), "credential") {
+		t.Fatalf("readiness leaked dependency error: %s", get.Body.String())
+	}
+
+	head := httptest.NewRecorder()
+	e.ServeHTTP(head, httptest.NewRequest(http.MethodHead, "/readyz", nil))
+	if head.Code != http.StatusServiceUnavailable || head.Body.Len() != 0 || replay.calls != 2 {
+		t.Fatalf("HEAD /readyz status/body/replay calls = %d/%q/%d", head.Code, head.Body.String(), replay.calls)
+	}
+
+	replay.err = nil
+	ok := checker.Readiness(context.Background())
+	if !ok.Ready || ok.Status != "ready" {
+		t.Fatalf("recovered readiness = %#v", ok)
+	}
+}
+
+func TestApplicationReadinessSkipsRedisWhenExternalExecutionDisabled(t *testing.T) {
+	base := &fakeClusterReadiness{result: runtime.RuntimeClusterReadiness{Ready: true, Status: "ready"}}
+	checker := applicationReadiness(&config.Config{}, base, nil)
+	result := checker.Readiness(context.Background())
+	if !result.Ready || base.calls != 1 {
+		t.Fatalf("disabled external execution readiness = %#v, base calls=%d", result, base.calls)
+	}
+}
+
 func TestNewRedisClientDoesNotRequireReachableServer(t *testing.T) {
 	client, err := newRedisClient("redis://127.0.0.1:1/0")
 	if err != nil {
@@ -538,6 +631,16 @@ type fakeClusterReadiness struct {
 	result      runtime.RuntimeClusterReadiness
 	calls       int
 	sawDeadline bool
+}
+
+type fakeReadinessDependency struct {
+	err   error
+	calls int
+}
+
+func (f *fakeReadinessDependency) Ping(context.Context) error {
+	f.calls++
+	return f.err
 }
 
 func (f *fakeClusterReadiness) Readiness(ctx context.Context) runtime.RuntimeClusterReadiness {

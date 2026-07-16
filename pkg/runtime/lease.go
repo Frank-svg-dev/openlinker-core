@@ -604,7 +604,8 @@ func (s *RuntimeLeaseService) lockPrincipal(
 	if err != nil {
 		return lockedRuntimeLeasePrincipal{}, principalLockError(err)
 	}
-	if session.SessionEpoch != principal.SessionEpoch || session.DeviceCertificateSerial != principal.DeviceCertificateSerial {
+	if session.SessionEpoch != principal.SessionEpoch || session.DeviceCertificateSerial != principal.DeviceCertificateSerial ||
+		session.RuntimeContractDigest != principal.RuntimeContractDigest {
 		return lockedRuntimeLeasePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
 
@@ -623,7 +624,8 @@ func (s *RuntimeLeaseService) lockPrincipal(
 	if err != nil {
 		return lockedRuntimeLeasePrincipal{}, principalLockError(err)
 	}
-	if credential.AgentID == nil || *credential.AgentID != principal.AgentID || node.NodeID != principal.NodeID {
+	if credential.AgentID == nil || *credential.AgentID != principal.AgentID || node.NodeID != principal.NodeID ||
+		node.RuntimeContractDigest != principal.RuntimeContractDigest {
 		return lockedRuntimeLeasePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
 	attachment, err := tx.LockRuntimeSessionAttachmentForPrincipalValidation(ctx, db.LockRuntimeSessionAttachmentForPrincipalValidationParams{
@@ -648,6 +650,7 @@ func (s *RuntimeLeaseService) validateOperation(principal RuntimeSessionPrincipa
 	if s == nil || s.repository == nil || s.coreInstanceID == uuid.Nil ||
 		principal.RuntimeSessionID == uuid.Nil || principal.NodeID == uuid.Nil || principal.AgentID == uuid.Nil ||
 		principal.CredentialID == uuid.Nil || principal.AttachmentID == uuid.Nil ||
+		!runtimeWireContractSupported(principal.RuntimeContractDigest) ||
 		principal.SessionEpoch < 1 || principal.CoreInstanceID != s.coreInstanceID ||
 		!validRuntimeIdentityText(principal.WorkerID, 1, maxRuntimeSessionWorkerIDRunes) ||
 		!validCertificateSerial(principal.DeviceCertificateSerial) ||

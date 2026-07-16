@@ -16,6 +16,7 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // MaxSkillsPerAgent 单个 Agent 最多可声明的 skill 数量（PRD：5 个上限）。
@@ -356,7 +357,10 @@ func (s *Service) RecommendAgentsBySkills(ctx context.Context, skillIDs []string
 	if len(cleaned) == 0 {
 		return []AgentMatch{}, nil
 	}
-	rows, err := s.q.ListAgentsBySkillsWithVerified(ctx, cleaned)
+	rows, err := s.q.ListAgentsBySkillsWithVerified(ctx, db.ListAgentsBySkillsWithVerifiedParams{
+		SkillIDs:            cleaned,
+		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+	})
 	if err != nil {
 		log.Error().Err(err).Msg("skill.RecommendAgentsBySkills: ListAgentsBySkillsWithVerified")
 		return nil, httpx.Internal("查询推荐 Agent 失败")

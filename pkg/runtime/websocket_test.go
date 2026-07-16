@@ -37,6 +37,62 @@ func TestRuntimeWebSocketAuthenticatesBeforeUpgrade(t *testing.T) {
 	require.Equal(t, 0, fixture.sessions.createCalls())
 }
 
+func TestRuntimeWebSocketTransportPolicyRejectsForbiddenEndpointBeforeUpgrade(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	fixture.transportPolicy = func() RuntimeTransportPolicy {
+		policy := CurrentRuntimeTransportPolicy()
+		policy.OrderedTransports = []RuntimeTransport{RuntimeTransportLongPoll}
+		return policy
+	}
+	server, target := fixture.server(t)
+	defer server.Close()
+
+	conn, response, err := websocket.DefaultDialer.Dial(target, http.Header{
+		echo.HeaderAuthorization: []string{"Bearer runtime-secret"},
+	})
+	require.Error(t, err)
+	require.Nil(t, conn)
+	require.NotNil(t, response)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusForbidden, response.StatusCode)
+	var envelope RuntimeError
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&envelope))
+	require.Equal(t, RuntimeErrorForbidden, envelope.Error.Code)
+	require.Equal(t, RuntimeTransportForbiddenSignal, envelope.Error.Message)
+	require.Equal(t, 0, fixture.sessions.createCalls())
+}
+
+func TestRuntimeWebSocketPolicyChangeClosesEstablishedTransportWithCanonicalSignal(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	var policyMu sync.RWMutex
+	policy := CurrentRuntimeTransportPolicy()
+	fixture.transportPolicy = func() RuntimeTransportPolicy {
+		policyMu.RLock()
+		defer policyMu.RUnlock()
+		copy := policy
+		copy.OrderedTransports = append([]RuntimeTransport(nil), policy.OrderedTransports...)
+		return copy
+	}
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+
+	policyMu.Lock()
+	policy.OrderedTransports = []RuntimeTransport{RuntimeTransportLongPoll}
+	policyMu.Unlock()
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(3*time.Second)))
+	_, _, err := conn.ReadMessage()
+	require.Error(t, err)
+	var closeErr *websocket.CloseError
+	require.ErrorAs(t, err, &closeErr)
+	require.Equal(t, websocket.ClosePolicyViolation, closeErr.Code)
+	require.Equal(t, RuntimePolicyChangedSignal, closeErr.Text)
+}
+
 func TestRuntimeWebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
@@ -60,6 +116,7 @@ func TestRuntimeWebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	require.Equal(t, int32(RuntimeProtocolVersion), created.ProtocolVersion)
 	require.Equal(t, RuntimeContractID, created.RuntimeContractID)
 	require.Equal(t, RuntimeContractDigest, created.RuntimeContractDigest)
+	require.Equal(t, RuntimeTransportWebSocket, created.Transport)
 
 	require.NoError(t, conn.WriteControl(
 		websocket.CloseMessage,
@@ -72,6 +129,51 @@ func TestRuntimeWebSocketHelloReadyAndDisconnectOrder(t *testing.T) {
 	require.Equal(t, []string{"close_session", "release_unacked_offer"}, fixture.operations.snapshot()[:2])
 	require.Equal(t, "offline", fixture.sessions.closedStatus())
 	require.Equal(t, "SESSION_DISCONNECTED", fixture.leases.releaseReason())
+}
+
+func TestRuntimeWebSocketPassesBoundedRecoveryReasonIntoServerValidation(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	server, target := fixture.server(t)
+	defer server.Close()
+
+	conn, response, err := websocket.DefaultDialer.Dial(target, http.Header{
+		echo.HeaderAuthorization:    []string{"Bearer runtime-secret"},
+		RuntimeFallbackReasonHeader: []string{string(RuntimeTransportReasonRecovery)},
+	})
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	require.NoError(t, err)
+	defer conn.Close()
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+
+	created := fixture.sessions.createdRequest()
+	require.Equal(t, RuntimeTransportReasonRecovery, created.ReportedTransportReason)
+	require.Equal(t, CurrentRuntimeTransportPolicy(), created.TransportPolicy)
+}
+
+func TestRuntimePreviousGenerationUsesCanonicalWebSocketAndPreAttachmentReadyShape(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	fixture.hello.ContractDigest = runtimePreviousContractDigest
+	fixture.principal.RuntimeContractDigest = runtimePreviousContractDigest
+	fixture.sessions.principal.RuntimeContractDigest = runtimePreviousContractDigest
+	fixture.sessions.state.Session.RuntimeContractDigest = runtimePreviousContractDigest
+	server, target := fixture.server(t)
+	defer server.Close()
+	require.Contains(t, target, "/api/v1/agent-runtime/ws")
+	require.NotContains(t, target, runtimePreviousContractDigest)
+
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	readyEnvelope := readRuntimeWSEnvelope(t, conn)
+	require.Equal(t, RuntimeMessageReady, readyEnvelope.Type)
+	var ready map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(readyEnvelope.Payload, &ready))
+	require.NotContains(t, ready, "attachment_id")
+	require.ElementsMatch(t, []string{"core_instance_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time"}, mapKeys(ready))
+	require.Equal(t, runtimePreviousContractDigest, fixture.sessions.createdRequest().RuntimeContractDigest)
 }
 
 func TestRuntimeWebSocketControllerShutdownDrainsHijackedConnections(t *testing.T) {
@@ -669,20 +771,21 @@ func TestRuntimeWebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
 }
 
 type runtimeWSTestFixture struct {
-	now           time.Time
-	authenticated AuthenticatedRuntimePrincipal
-	hello         RuntimeHelloPayload
-	principal     RuntimeSessionPrincipal
-	operations    *runtimeWSOperations
-	tokens        *runtimeWSTokenValidatorFake
-	devices       *runtimeWSDeviceAuthenticatorFake
-	sessions      *runtimeWSSessionServiceFake
-	leases        *runtimeWSLeaseServiceFake
-	events        *runtimeWSEventStoreFake
-	finalizer     *runtimeWSFinalizerFake
-	resume        RuntimeResumeAPI
-	cancellations *runtimeWSCancellationServiceFake
-	wakeHub       *RuntimeWakeHub
+	now             time.Time
+	authenticated   AuthenticatedRuntimePrincipal
+	hello           RuntimeHelloPayload
+	principal       RuntimeSessionPrincipal
+	operations      *runtimeWSOperations
+	tokens          *runtimeWSTokenValidatorFake
+	devices         *runtimeWSDeviceAuthenticatorFake
+	sessions        *runtimeWSSessionServiceFake
+	leases          *runtimeWSLeaseServiceFake
+	events          *runtimeWSEventStoreFake
+	finalizer       *runtimeWSFinalizerFake
+	resume          RuntimeResumeAPI
+	cancellations   *runtimeWSCancellationServiceFake
+	wakeHub         *RuntimeWakeHub
+	transportPolicy RuntimeTransportPolicyProvider
 }
 
 func newRuntimeWSTestFixture() *runtimeWSTestFixture {
@@ -705,6 +808,7 @@ func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 		CredentialID:                    authenticated.CredentialID,
 		WorkerID:                        "worker-ws-1",
 		SessionEpoch:                    3,
+		RuntimeContractDigest:           RuntimeContractDigest,
 		CoreInstanceID:                  uuid.New(),
 		AttachmentID:                    attachmentID,
 		DeviceCertificateSerial:         authenticated.Device.CertificateSerial,
@@ -732,6 +836,7 @@ func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 			CredentialID:           principal.CredentialID,
 			WorkerID:               principal.WorkerID,
 			SessionEpoch:           principal.SessionEpoch,
+			RuntimeContractDigest:  principal.RuntimeContractDigest,
 			Status:                 "active",
 			AttachedCoreInstanceID: &coreID,
 			HeartbeatAt:            now,
@@ -771,6 +876,7 @@ func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
 	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
+		TransportPolicy:     f.transportPolicy,
 		Sessions:            f.sessions,
 		Leases:              f.leases,
 		EventProjector:      f.events,

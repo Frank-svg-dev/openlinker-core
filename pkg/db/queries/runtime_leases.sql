@@ -28,6 +28,12 @@ WHERE s.runtime_session_id = sqlc.arg(runtime_session_id)
   AND s.status IN ('active', 'draining')
   AND s.protocol_version = 2
   AND s.runtime_contract_id = 'openlinker.runtime.v2'
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = s.runtime_contract_id
+        AND wire.runtime_contract_digest = s.runtime_contract_digest
+        AND wire.support_tier IN ('current', 'previous')
+  )
 FOR UPDATE OF s;
 
 -- name: LockRuntimeNodeForPrincipalValidation :one
@@ -45,6 +51,12 @@ WHERE n.node_id = sqlc.arg(node_id)
   AND n.protocol_version = 2
   AND n.runtime_contract_id = 'openlinker.runtime.v2'
   AND n.revoked_at IS NULL
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = n.runtime_contract_id
+        AND wire.runtime_contract_digest = n.runtime_contract_digest
+        AND wire.support_tier IN ('current', 'previous')
+  )
 FOR UPDATE OF n;
 
 -- name: LockRuntimeCredentialForPrincipalValidation :one
@@ -62,7 +74,8 @@ FOR SHARE OF t;
 
 -- name: LockRuntimeSessionAttachmentForPrincipalValidation :one
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE id = sqlc.arg(attachment_id)
   AND runtime_session_id = sqlc.arg(runtime_session_id)
@@ -106,7 +119,8 @@ FOR UPDATE OF s;
 
 -- name: LockRuntimeSessionAttachmentForOfferRelease :one
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE id = sqlc.arg(attachment_id)
   AND runtime_session_id = sqlc.arg(runtime_session_id)

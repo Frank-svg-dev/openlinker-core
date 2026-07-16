@@ -1,4 +1,4 @@
-package servicebridge
+package externalexecution
 
 import (
 	"os"
@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestHostedServiceContractPinMigrationInvariants(t *testing.T) {
+func TestExternalServiceContractPinMigrationInvariants(t *testing.T) {
 	up, err := os.ReadFile("../../migrations/072_hosted_service_contract_pin.up.sql")
 	if err != nil {
 		t.Fatalf("read up migration: %v", err)

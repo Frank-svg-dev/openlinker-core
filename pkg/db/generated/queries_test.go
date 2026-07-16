@@ -2029,7 +2029,7 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			return err
 		}},
 		{name: "ListAgentsBySkillsWithVerified", run: func() error {
-			_, err := q.ListAgentsBySkillsWithVerified(ctx, []string{"data/sql-query"})
+			_, err := q.ListAgentsBySkillsWithVerified(ctx, ListAgentsBySkillsWithVerifiedParams{SkillIDs: []string{"data/sql-query"}, RuntimeStaleAfterMs: 45_000})
 			return err
 		}},
 		{name: "ListBenchmarkBatchSummariesByAgent", run: func() error {
@@ -2474,7 +2474,7 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 	}
 
 	dbtx.row = fakeRow{values: runValues}
-	hostedRun, err := q.CreatePendingHostedWorkflowRun(context.Background(), CreatePendingHostedWorkflowRunParams{
+	externalExecutionRun, err := q.CreatePendingExternalExecutionWorkflowRun(context.Background(), CreatePendingExternalExecutionWorkflowRunParams{
 		ID:          runID,
 		WorkflowID:  workflowID,
 		UserID:      userID,
@@ -2482,14 +2482,14 @@ func TestWorkflowQueriesScanRowsAndControlUpdates(t *testing.T) {
 		MaxAttempts: 3,
 	})
 	if err != nil {
-		t.Fatalf("CreatePendingHostedWorkflowRun error = %v", err)
+		t.Fatalf("CreatePendingExternalExecutionWorkflowRun error = %v", err)
 	}
-	requireSQLName(t, dbtx.queryRowSQL, "CreatePendingHostedWorkflowRun")
-	if hostedRun.ID != runID {
-		t.Fatalf("CreatePendingHostedWorkflowRun scan = %#v", hostedRun)
+	requireSQLName(t, dbtx.queryRowSQL, "CreatePendingExternalExecutionWorkflowRun")
+	if externalExecutionRun.ID != runID {
+		t.Fatalf("CreatePendingExternalExecutionWorkflowRun scan = %#v", externalExecutionRun)
 	}
 	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{runID, workflowID, userID, []byte(`{"prompt":"go"}`), int32(3)}) {
-		t.Fatalf("CreatePendingHostedWorkflowRun args = %#v", dbtx.queryRowArgs)
+		t.Fatalf("CreatePendingExternalExecutionWorkflowRun args = %#v", dbtx.queryRowArgs)
 	}
 
 	successRunValues := append([]any{}, runValues...)
@@ -3570,7 +3570,10 @@ func TestTaskAndBenchmarkQueriesScanRowsAndArgs(t *testing.T) {
 
 	matchRows := &fakeRows{rows: [][]any{{agentID, int32(2), int32(1), int32(34)}}}
 	dbtx.queryRows = matchRows
-	matches, err := q.ListAgentsBySkillsWithVerified(context.Background(), []string{"data/sql-query", "writing/summary"})
+	matches, err := q.ListAgentsBySkillsWithVerified(context.Background(), ListAgentsBySkillsWithVerifiedParams{
+		SkillIDs:            []string{"data/sql-query", "writing/summary"},
+		RuntimeStaleAfterMs: 45_000,
+	})
 	if err != nil {
 		t.Fatalf("ListAgentsBySkillsWithVerified error = %v", err)
 	}
@@ -4670,7 +4673,7 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 	queries := New(dbtx)
 	_, err := queries.ListPublicAgents(context.Background(), ListPublicAgentsParams{
 		Tags: []string{}, Keyword: "", Limit: 12, Offset: 0,
-		CallableOnly: true, SkillIDs: []string{},
+		CallableOnly: true, SkillIDs: []string{}, RuntimeStaleAfterMs: 45_000,
 	})
 	if err != nil {
 		t.Fatalf("ListPublicAgents: %v", err)
@@ -4679,7 +4682,7 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 
 	dbtx.row = fakeRow{values: []any{int32(0)}}
 	_, err = queries.CountPublicAgents(context.Background(), CountPublicAgentsParams{
-		Tags: []string{}, Keyword: "", CallableOnly: true, SkillIDs: []string{},
+		Tags: []string{}, Keyword: "", CallableOnly: true, SkillIDs: []string{}, RuntimeStaleAfterMs: 45_000,
 	})
 	if err != nil {
 		t.Fatalf("CountPublicAgents: %v", err)
@@ -4693,14 +4696,13 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 		for _, guard := range []string{
 			"WITH active_runtime_agents AS",
 			"t.agent_id = s.agent_id",
-			"contract.is_current",
+			"wire.support_tier IN ('current', 'previous')",
 			"s.status IN ('active', 'draining')",
 			"s.attached_core_instance_id IS NOT NULL",
 			"s.disconnected_at IS NULL",
-			"s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"s.heartbeat_at >= clock_timestamp() - (",
 			"s.protocol_version = 2",
 			"s.runtime_contract_id = 'openlinker.runtime.v2'",
-			"s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'",
 			"'persistent_spool'",
 			"n.status IN ('active', 'draining')",
 			"n.revoked_at IS NULL",
@@ -4710,7 +4712,8 @@ func TestPublicMarketCallableQueriesUseDurableRuntimeTruth(t *testing.T) {
 			"n.node_version = s.node_version",
 			"n.features @> s.features",
 			"s.features @> n.features",
-			"n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"n.last_seen_at >= clock_timestamp() - (",
+			"INTERVAL '1 millisecond'",
 			"t.status = 'active_runtime'",
 			"t.revoked_at IS NULL",
 			"t.scopes @> ARRAY['agent:pull']::text[]",
@@ -4741,13 +4744,14 @@ func TestCreatorAgentStatusQueriesUseDurableRuntimeSessionTruth(t *testing.T) {
 			"FROM runtime_sessions session",
 			"JOIN runtime_nodes node",
 			"JOIN agent_tokens credential",
-			"contract.is_current",
+			"wire.support_tier IN ('current', 'previous')",
 			"session.status IN ('active', 'draining')",
 			"session.attached_core_instance_id IS NOT NULL",
 			"session.disconnected_at IS NULL",
-			"session.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'",
-			"session.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'",
-			"node.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'",
+			"session.heartbeat_at >= clock_timestamp() - (",
+			"node.runtime_contract_digest = session.runtime_contract_digest",
+			"node.last_seen_at >= clock_timestamp() - (",
+			"INTERVAL '1 millisecond'",
 			"credential.scopes @> ARRAY['agent:pull']::text[]",
 			"attachment.detached_at IS NULL",
 		} {

@@ -49,6 +49,69 @@ func TestRuntimeControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	}
 }
 
+func TestRuntimeHTTPTransportPolicyAdmissionUsesWireCompatibleSignals(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	controller := fixture.controller()
+	controller.dependencies.TransportPolicy = func() RuntimeTransportPolicy {
+		policy := CurrentRuntimeTransportPolicy()
+		policy.OrderedTransports = []RuntimeTransport{RuntimeTransportWebSocket}
+		return policy
+	}
+
+	initial := serveRuntimeRaw(
+		t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", `{}`,
+	)
+	require.Equal(t, http.StatusForbidden, initial.Code)
+	var initialError RuntimeError
+	require.NoError(t, json.Unmarshal(initial.Body.Bytes(), &initialError))
+	require.Equal(t, RuntimeErrorForbidden, initialError.Error.Code)
+	require.Equal(t, RuntimeTransportForbiddenSignal, initialError.Error.Message)
+	require.Equal(t, 0, fixture.sessions.createCalls)
+
+	for _, endpoint := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/api/v1/agent-runtime/sessions/00000000-0000-4000-8000-000000000001/heartbeat"},
+		{http.MethodPost, "/api/v1/agent-runtime/sessions/00000000-0000-4000-8000-000000000001/close"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/claim"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/assignment-ack"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/assignment-reject"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/lease-renew"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/events"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/result"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/resume"},
+		{http.MethodPost, "/api/v1/agent-runtime/runs/00000000-0000-4000-8000-000000000001/cancel-ack"},
+		{http.MethodGet, "/api/v1/agent-runtime/commands"},
+	} {
+		t.Run(endpoint.method+" "+endpoint.path, func(t *testing.T) {
+			established := serveRuntimeRaw(t, controller, endpoint.method, endpoint.path, `{}`)
+			require.Equal(t, http.StatusForbidden, established.Code)
+			var establishedError RuntimeError
+			require.NoError(t, json.Unmarshal(established.Body.Bytes(), &establishedError))
+			require.Equal(t, RuntimeErrorForbidden, establishedError.Error.Code)
+			require.Equal(t, RuntimePolicyChangedSignal, establishedError.Error.Message)
+		})
+	}
+	require.Equal(t, 0, fixture.leases.claimCalls)
+}
+
+func TestRuntimeHTTPTransportPolicyAdmissionPreservesAuthenticationPrecedence(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.tokens.err = errors.New("invalid token")
+	controller := fixture.controller()
+	controller.dependencies.TransportPolicy = func() RuntimeTransportPolicy {
+		policy := CurrentRuntimeTransportPolicy()
+		policy.OrderedTransports = []RuntimeTransport{RuntimeTransportWebSocket}
+		return policy
+	}
+
+	response := serveRuntimeRaw(t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", `{}`)
+	require.Equal(t, http.StatusUnauthorized, response.Code)
+	requireRuntimeResponseCode(t, response, RuntimeErrorUnauthorized)
+	require.Equal(t, 0, fixture.sessions.createCalls)
+}
+
 func TestRuntimePullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 	agentID := uuid.New()
 	principal := RuntimeSessionPrincipal{AgentID: agentID}
@@ -114,6 +177,7 @@ func TestRuntimeCreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	require.Equal(t, RuntimeContractID, created.RuntimeContractID)
 	require.Equal(t, RuntimeContractDigest, created.RuntimeContractDigest)
 	require.Equal(t, hello.Features, created.Features)
+	require.Equal(t, RuntimeTransportLongPoll, created.Transport)
 
 	var ready RuntimeReadyPayload
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &ready))
@@ -123,6 +187,95 @@ func TestRuntimeCreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	require.Equal(t, int64(RuntimeOfferTTLSeconds), ready.OfferTTLSeconds)
 	require.Equal(t, int64(RuntimeLeaseTTLSeconds), ready.LeaseTTLSeconds)
 	require.Equal(t, fixture.now, ready.DatabaseTime)
+}
+
+func TestRuntimeCreateSessionAcceptsOnlyBoundedFallbackReasonHeader(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.sessions.create = func(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
+		require.Equal(t, RuntimeTransportReasonWebSocketUnavailable, request.ReportedTransportReason)
+		require.Equal(t, CurrentRuntimeTransportPolicy(), request.TransportPolicy)
+		return fixture.sessionState(), nil
+	}
+	controller := fixture.controller()
+	body, err := json.Marshal(fixture.hello())
+	require.NoError(t, err)
+
+	e := echo.New()
+	controller.Register(e.Group("/api/v1"))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", strings.NewReader(string(body)))
+	req.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	req.Header.Set(RuntimeFallbackReasonHeader, string(RuntimeTransportReasonWebSocketUnavailable))
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, req)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Equal(t, 1, fixture.sessions.createCalls)
+
+	tracked := &runtimeTrackedReader{reader: strings.NewReader(string(body))}
+	bad := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", tracked)
+	bad.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
+	bad.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	bad.Header.Set(RuntimeFallbackReasonHeader, "dial tcp 10.0.0.1:443")
+	badRecorder := httptest.NewRecorder()
+	e.ServeHTTP(badRecorder, bad)
+	require.Equal(t, http.StatusUnprocessableEntity, badRecorder.Code, badRecorder.Body.String())
+	require.Equal(t, 0, tracked.reads, "invalid header must fail before request body decoding")
+	require.Equal(t, 1, fixture.sessions.createCalls)
+	requireRuntimeResponseCode(t, badRecorder, RuntimeErrorValidationFailed)
+}
+
+func TestRuntimeFallbackReasonHeaderRejectsAmbiguousValues(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", nil)
+	request.Header.Add(RuntimeFallbackReasonHeader, string(RuntimeTransportReasonExplicit))
+	request.Header.Add(RuntimeFallbackReasonHeader, string(RuntimeTransportReasonRecovery))
+	reason, err := runtimeFallbackReasonFromRequest(request)
+	require.Empty(t, reason)
+	require.NotNil(t, err)
+	require.Equal(t, RuntimeErrorValidationFailed, err.Body.Code)
+
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/agent-runtime/sessions", nil)
+	request.Header.Set(RuntimeFallbackReasonHeader, " explicit")
+	reason, err = runtimeFallbackReasonFromRequest(request)
+	require.Empty(t, reason)
+	require.NotNil(t, err)
+}
+
+func TestRuntimePreviousGenerationUsesCanonicalHTTPAndPreAttachmentReadyShape(t *testing.T) {
+	fixture := newRuntimeHandlerFixture()
+	fixture.acting.RuntimeContractDigest = runtimePreviousContractDigest
+	fixture.sessions.resolveResponse = fixture.acting
+	fixture.sessions.workerResolveResponse = fixture.acting
+	fixture.sessions.create = func(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionRequest) (RuntimeSessionState, error) {
+		require.Equal(t, runtimePreviousContractDigest, request.RuntimeContractDigest)
+		return fixture.sessionState(), nil
+	}
+	fixture.sessions.heartbeat = func(_ context.Context, _ AuthenticatedRuntimePrincipal, request RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
+		require.Equal(t, fixture.acting.AttachmentID, request.AttachmentID, "Server must resolve the previous attachment from database truth")
+		return fixture.sessionState(), nil
+	}
+	hello := fixture.hello()
+	hello.ContractDigest = runtimePreviousContractDigest
+	controller := fixture.controller()
+
+	created := serveRuntime(t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", hello)
+	require.Equal(t, http.StatusOK, created.Code, created.Body.String())
+	var ready map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(created.Body.Bytes(), &ready))
+	require.NotContains(t, ready, "attachment_id")
+	require.ElementsMatch(t, []string{"core_instance_id", "features", "offer_ttl_seconds", "lease_ttl_seconds", "database_time"}, mapKeys(ready))
+
+	heartbeat := serveRuntimeWithoutAttachment(t, controller, http.MethodPost,
+		"/api/v1/agent-runtime/sessions/"+hello.RuntimeSessionID.String()+"/heartbeat", hello)
+	require.Equal(t, http.StatusOK, heartbeat.Code, heartbeat.Body.String())
+	require.Equal(t, hello.RuntimeSessionID, fixture.sessions.resolvedSessionID)
+
+	current := newRuntimeHandlerFixture()
+	current.sessions.heartbeat = func(context.Context, AuthenticatedRuntimePrincipal, RuntimeSessionHeartbeatRequest) (RuntimeSessionState, error) {
+		return current.sessionState(), nil
+	}
+	currentMissing := serveRuntimeWithoutAttachment(t, current.controller(), http.MethodPost,
+		"/api/v1/agent-runtime/sessions/"+current.acting.RuntimeSessionID.String()+"/heartbeat", current.hello())
+	require.Equal(t, http.StatusUnprocessableEntity, currentMissing.Code, currentMissing.Body.String())
 }
 
 func TestRuntimeAuthenticationRunsBeforeBodyDecode(t *testing.T) {
@@ -165,6 +318,7 @@ func TestRuntimeSessionHeartbeatAndClose(t *testing.T) {
 	require.Equal(t, http.StatusOK, heartbeatRecorder.Code, heartbeatRecorder.Body.String())
 	require.Equal(t, hello.RuntimeSessionID, heartbeat.RuntimeSessionID)
 	require.Equal(t, int32(RuntimeProtocolVersion), heartbeat.ProtocolVersion)
+	require.Equal(t, RuntimeTransportLongPoll, heartbeat.Transport)
 
 	closePayload := runtimeSessionClosePayload{
 		NodeID:           hello.NodeID,
@@ -638,6 +792,7 @@ func newRuntimeHandlerFixture() *runtimeHandlerFixture {
 		CredentialID:                    authenticated.CredentialID,
 		WorkerID:                        "worker-installation-1",
 		SessionEpoch:                    7,
+		RuntimeContractDigest:           RuntimeContractDigest,
 		CoreInstanceID:                  uuid.New(),
 		AttachmentID:                    uuid.MustParse(runtimeTestAttachmentID),
 		DeviceCertificateSerial:         authenticated.Device.CertificateSerial,
@@ -712,6 +867,7 @@ func (f *runtimeHandlerFixture) sessionState() RuntimeSessionState {
 			CredentialID:           f.acting.CredentialID,
 			WorkerID:               f.acting.WorkerID,
 			SessionEpoch:           f.acting.SessionEpoch,
+			RuntimeContractDigest:  f.acting.RuntimeContractDigest,
 			Features:               RuntimeRequiredFeatures(),
 			Status:                 "active",
 			AttachedCoreInstanceID: &coreID,
@@ -756,6 +912,28 @@ func serveRuntimeRaw(t *testing.T, controller *RuntimeHTTPController, method, ta
 	recorder := httptest.NewRecorder()
 	e.ServeHTTP(recorder, req)
 	return recorder
+}
+
+func serveRuntimeWithoutAttachment(t *testing.T, controller *RuntimeHTTPController, method, target string, payload any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+	e := echo.New()
+	controller.Register(e.Group("/api/v1"))
+	req := httptest.NewRequest(method, target, strings.NewReader(string(body)))
+	req.Header.Set(echo.HeaderAuthorization, "Bearer runtime-secret")
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	recorder := httptest.NewRecorder()
+	e.ServeHTTP(recorder, req)
+	return recorder
+}
+
+func mapKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 func requireRuntimeResponseCode(t *testing.T, recorder *httptest.ResponseRecorder, code RuntimeErrorCode) {

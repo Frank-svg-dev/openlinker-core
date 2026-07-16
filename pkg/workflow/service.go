@@ -18,7 +18,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/hostedcontract"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/executioncontract"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
@@ -321,13 +321,12 @@ func (s *Service) StartWorkflowRun(ctx context.Context, userID, workflowID uuid.
 	return &resp, nil
 }
 
-// ValidateHostedExecutionTarget verifies that a seller-owned workflow is safe
-// to expose as a service. Passing uuid.Nil to the existing Agent validator
-// intentionally requires every node to be public and callable, independent of
-// the eventual buyer.
-func (s *Service) ValidateHostedExecutionTarget(ctx context.Context, sellerID, workflowID uuid.UUID) (*HostedTargetValidation, error) {
-	result := &HostedTargetValidation{UnavailableReason: "not_found"}
-	w, nodes, err := s.getWorkflowForOwner(ctx, sellerID, workflowID)
+// ValidateExternalExecutionTarget verifies that an actor-owned workflow is safe
+// for external execution. Passing uuid.Nil to the existing Agent validator
+// intentionally requires every node to be public and callable.
+func (s *Service) ValidateExternalExecutionTarget(ctx context.Context, targetOwnerID, workflowID uuid.UUID) (*ExternalExecutionTargetValidation, error) {
+	result := &ExternalExecutionTargetValidation{UnavailableReason: "not_found"}
+	w, nodes, err := s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
 	if err != nil {
 		var he *httpx.HTTPError
 		if errors.As(err, &he) && he.Status < 500 {
@@ -360,7 +359,7 @@ func (s *Service) ValidateHostedExecutionTarget(ctx context.Context, sellerID, w
 		}
 		return nil, err
 	}
-	contractHash, err := s.hostedWorkflowContractHash(ctx, w, nodes)
+	contractHash, err := s.externalExecutionWorkflowContractHash(ctx, w, nodes)
 	if err != nil {
 		var he *httpx.HTTPError
 		if errors.As(err, &he) && he.Status < 500 {
@@ -375,7 +374,7 @@ func (s *Service) ValidateHostedExecutionTarget(ctx context.Context, sellerID, w
 	return result, nil
 }
 
-func (s *Service) hostedWorkflowContractHash(ctx context.Context, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
+func (s *Service) externalExecutionWorkflowContractHash(ctx context.Context, w db.Workflow, nodes []db.WorkflowNode) (string, error) {
 	rawEdges := []map[string]interface{}{}
 	if len(w.Edges) > 0 {
 		if err := json.Unmarshal(w.Edges, &rawEdges); err != nil {
@@ -391,14 +390,14 @@ func (s *Service) hostedWorkflowContractHash(ctx context.Context, w db.Workflow,
 		return "", err
 	}
 	agentHashes := map[uuid.UUID]string{}
-	contractNodes := make([]hostedcontract.WorkflowNode, 0, len(nodes))
+	contractNodes := make([]executioncontract.WorkflowNode, 0, len(nodes))
 	for _, node := range nodes {
 		agentHash, ok := agentHashes[node.AgentID]
 		if !ok {
 			agentRow, err := s.queries.GetAgentByID(ctx, node.AgentID)
 			if err != nil {
 				if errors.Is(err, pgx.ErrNoRows) {
-					return "", httpx.Conflict("workflow node Agent 当前不可用于 Hosted 执行")
+					return "", httpx.Conflict("workflow node Agent 当前不可用于外部执行")
 				}
 				return "", err
 			}
@@ -418,7 +417,7 @@ func (s *Service) hostedWorkflowContractHash(ctx context.Context, w db.Workflow,
 			if agentRow.MCPToolName != nil {
 				mcpToolName = *agentRow.MCPToolName
 			}
-			agentHash, err = hostedcontract.AgentHash(hostedcontract.Agent{
+			agentHash, err = executioncontract.AgentHash(executioncontract.Agent{
 				ID: node.AgentID.String(), ConnectionMode: agentRow.ConnectionMode,
 				EndpointURL: agentRow.EndpointURL, MCPToolName: mcpToolName,
 				CapabilityVersion: capability.Version, InputSchema: inputSchema, OutputSchema: outputSchema,
@@ -432,34 +431,51 @@ func (s *Service) hostedWorkflowContractHash(ctx context.Context, w db.Workflow,
 		if len(node.Config) > 0 && json.Unmarshal(node.Config, &config) != nil {
 			return "", httpx.BadRequest("workflow node config 不是合法 JSON")
 		}
-		contractNodes = append(contractNodes, hostedcontract.WorkflowNode{
+		contractNodes = append(contractNodes, executioncontract.WorkflowNode{
 			ID: node.ID.String(), Key: node.NodeKey, Type: node.NodeType, AgentID: node.AgentID.String(),
 			Config: config, Position: node.Position, AgentContractHash: agentHash,
 		})
 	}
-	hash, err := hostedcontract.WorkflowHash(hostedcontract.Workflow{ID: w.ID.String(), Edges: edges, Nodes: contractNodes})
+	hash, err := executioncontract.WorkflowHash(executioncontract.Workflow{ID: w.ID.String(), Edges: edges, Nodes: contractNodes})
 	if err != nil {
-		return "", httpx.Conflict("workflow Hosted contract 无效")
+		return "", httpx.Conflict("workflow execution contract 无效")
 	}
 	return hash, nil
 }
 
-// StartHostedWorkflowRun keeps definition ownership and result ownership
-// separate: the seller owns the workflow, while the buyer owns the durable
-// workflow run and all child Runtime runs. externalOrderID is also the run ID,
-// making a retry after a process crash idempotent at the database boundary.
-func (s *Service) StartHostedWorkflowRun(
+// StartExternalExecutionWorkflowRun keeps target ownership and result ownership
+// separate. The run ID is derived from the verified caller plus its request ID,
+// so retries remain idempotent without allowing cross-service collisions.
+func (s *Service) StartExternalExecutionWorkflowRun(
 	ctx context.Context,
-	sellerID, buyerID, workflowID, externalOrderID uuid.UUID,
+	callerServiceID string,
+	targetOwnerID, actorUserID, workflowID, externalRequestID uuid.UUID,
 	input map[string]interface{},
 ) (*WorkflowRunResponse, error) {
+	callerServiceID = strings.TrimSpace(callerServiceID)
+	if callerServiceID == "" || targetOwnerID == uuid.Nil || actorUserID == uuid.Nil || workflowID == uuid.Nil || externalRequestID == uuid.Nil {
+		return nil, httpx.BadRequest("external workflow 执行参数无效")
+	}
+	input, inputJSON, err := normalizeExternalExecutionWorkflowInput(input)
+	if err != nil {
+		return nil, httpx.BadRequest("input 不是合法 JSON")
+	}
+	if replay, found, err := s.lookupExternalExecutionWorkflowRun(
+		ctx,
+		callerServiceID,
+		actorUserID,
+		workflowID,
+		externalRequestID,
+		input,
+		defaultWorkflowRunMaxAttempts,
+	); err != nil || found {
+		return replay, err
+	}
+
 	if s.runtime == nil {
 		return nil, httpx.Internal("workflow runtime 未配置")
 	}
-	if sellerID == uuid.Nil || buyerID == uuid.Nil || workflowID == uuid.Nil || externalOrderID == uuid.Nil {
-		return nil, httpx.BadRequest("Hosted workflow 执行参数无效")
-	}
-	w, nodes, err := s.getWorkflowForOwner(ctx, sellerID, workflowID)
+	w, nodes, err := s.getWorkflowForOwner(ctx, targetOwnerID, workflowID)
 	if err != nil {
 		return nil, err
 	}
@@ -475,48 +491,125 @@ func (s *Service) StartHostedWorkflowRun(
 	if err := s.validateWorkflowStoredAgentsAvailable(ctx, uuid.Nil, nodes, true); err != nil {
 		return nil, err
 	}
-	if input == nil {
-		input = map[string]interface{}{}
-	}
-	inputJSON, err := json.Marshal(input)
-	if err != nil {
-		return nil, httpx.BadRequest("input 不是合法 JSON")
-	}
-	run, err := s.queries.CreatePendingHostedWorkflowRun(ctx, db.CreatePendingHostedWorkflowRunParams{
-		ID:          externalOrderID,
+	runID := externalExecutionWorkflowRunID(callerServiceID, externalRequestID)
+	run, err := s.queries.CreatePendingExternalExecutionWorkflowRun(ctx, db.CreatePendingExternalExecutionWorkflowRunParams{
+		ID:          runID,
 		WorkflowID:  workflowID,
-		UserID:      buyerID,
+		UserID:      actorUserID,
 		Input:       inputJSON,
 		MaxAttempts: defaultWorkflowRunMaxAttempts,
 	})
 	if errors.Is(err, pgx.ErrNoRows) {
-		run, err = s.queries.GetWorkflowRunByID(ctx, externalOrderID)
-		if err == nil && !hostedWorkflowRunMatches(run, workflowID, buyerID, input, defaultWorkflowRunMaxAttempts) {
-			return nil, httpx.Conflict("external_order_id 已用于其他 workflow 执行")
+		replay, found, lookupErr := s.lookupExternalExecutionWorkflowRun(
+			ctx,
+			callerServiceID,
+			actorUserID,
+			workflowID,
+			externalRequestID,
+			input,
+			defaultWorkflowRunMaxAttempts,
+		)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if found {
+			return replay, nil
 		}
 	}
 	if err != nil {
-		log.Error().Err(err).Str("workflow_id", workflowID.String()).Str("external_order_id", externalOrderID.String()).Msg("workflow.StartHostedWorkflowRun")
-		return nil, httpx.Internal("创建 Hosted workflow_run 失败")
+		log.Error().Err(err).Str("workflow_id", workflowID.String()).Str("external_request_id", externalRequestID.String()).Msg("workflow.StartExternalExecutionWorkflowRun")
+		return nil, httpx.Internal("创建 external workflow_run 失败")
 	}
 	resp := workflowRunToResponse(run, nil)
 	return &resp, nil
 }
 
-func hostedWorkflowRunMatches(run db.WorkflowRun, workflowID, buyerID uuid.UUID, input map[string]interface{}, maxAttempts int32) bool {
-	if run.WorkflowID != workflowID || run.UserID != buyerID || run.MaxAttempts != maxAttempts {
+func externalExecutionWorkflowRunID(callerServiceID string, externalRequestID uuid.UUID) uuid.UUID {
+	return uuid.NewHash(sha256.New(), uuid.NameSpaceOID, []byte(callerServiceID+"\x00"+externalRequestID.String()), 5)
+}
+
+// LookupExternalExecutionWorkflowRun performs the read-only half of external
+// workflow execution idempotency. The deterministic caller/request identity is
+// resolved without consulting the mutable Workflow definition. A committed
+// row must still match every execution semantic; a missing row is returned as
+// a clean miss and never creates a workflow run.
+func (s *Service) LookupExternalExecutionWorkflowRun(
+	ctx context.Context,
+	callerServiceID string,
+	actorUserID, workflowID, externalRequestID uuid.UUID,
+	input map[string]interface{},
+) (*WorkflowRunResponse, bool, error) {
+	callerServiceID = strings.TrimSpace(callerServiceID)
+	if callerServiceID == "" || actorUserID == uuid.Nil || workflowID == uuid.Nil || externalRequestID == uuid.Nil {
+		return nil, false, httpx.BadRequest("external workflow 执行参数无效")
+	}
+	normalizedInput, _, err := normalizeExternalExecutionWorkflowInput(input)
+	if err != nil {
+		return nil, false, httpx.BadRequest("input 不是合法 JSON")
+	}
+	return s.lookupExternalExecutionWorkflowRun(
+		ctx,
+		callerServiceID,
+		actorUserID,
+		workflowID,
+		externalRequestID,
+		normalizedInput,
+		defaultWorkflowRunMaxAttempts,
+	)
+}
+
+func (s *Service) lookupExternalExecutionWorkflowRun(
+	ctx context.Context,
+	callerServiceID string,
+	actorUserID, workflowID, externalRequestID uuid.UUID,
+	input map[string]interface{},
+	maxAttempts int32,
+) (*WorkflowRunResponse, bool, error) {
+	runID := externalExecutionWorkflowRunID(callerServiceID, externalRequestID)
+	run, err := s.queries.GetWorkflowRunByID(ctx, runID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, nil
+		}
+		log.Error().Err(err).
+			Str("workflow_id", workflowID.String()).
+			Str("external_request_id", externalRequestID.String()).
+			Msg("workflow.LookupExternalExecutionWorkflowRun")
+		return nil, false, httpx.Internal("查询 external workflow_run 失败")
+	}
+	if !externalExecutionWorkflowRunMatches(run, workflowID, actorUserID, input, maxAttempts) {
+		return nil, false, httpx.Conflict("external_request_id 已用于其他 workflow 执行")
+	}
+
+	resp := workflowRunToResponse(run, nil)
+	return &resp, true, nil
+}
+
+func normalizeExternalExecutionWorkflowInput(input map[string]interface{}) (map[string]interface{}, []byte, error) {
+	if input == nil {
+		input = map[string]interface{}{}
+	}
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return nil, nil, err
+	}
+	normalized := map[string]interface{}{}
+	if err := json.Unmarshal(encoded, &normalized); err != nil {
+		return nil, nil, err
+	}
+	return normalized, encoded, nil
+}
+
+func externalExecutionWorkflowRunMatches(run db.WorkflowRun, workflowID, actorUserID uuid.UUID, input map[string]interface{}, maxAttempts int32) bool {
+	if run.WorkflowID != workflowID || run.UserID != actorUserID || run.MaxAttempts != maxAttempts {
 		return false
 	}
 	existing := map[string]interface{}{}
 	if len(run.Input) > 0 && json.Unmarshal(run.Input, &existing) != nil {
 		return false
 	}
-	if input == nil {
-		input = map[string]interface{}{}
-	}
-	normalizedInput := map[string]interface{}{}
-	encoded, err := json.Marshal(input)
-	if err != nil || json.Unmarshal(encoded, &normalizedInput) != nil {
+	normalizedInput, _, err := normalizeExternalExecutionWorkflowInput(input)
+	if err != nil {
 		return false
 	}
 	return reflect.DeepEqual(existing, normalizedInput)
@@ -1424,7 +1517,10 @@ func hasReservedWorkflowAgentTag(tags []string) bool {
 
 func (s *Service) workflowAgentCallable(ctx context.Context, agentRow db.Agent, requireRuntimeOnline bool) (bool, error) {
 	if agentRow.ConnectionMode == "runtime" {
-		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentRow.ID)
+		hasActiveSession, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, db.HasActiveRuntimeSessionForAgentParams{
+			AgentID:             agentRow.ID,
+			RuntimeStaleAfterMs: runtime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+		})
 		if err != nil {
 			log.Error().Err(err).Str("agent_id", agentRow.ID.String()).Msg("workflow.workflowAgentCallable: HasActiveRuntimeSessionForAgent")
 			return false, httpx.Internal("校验 Workflow 的 Runtime Worker 连接状态失败")

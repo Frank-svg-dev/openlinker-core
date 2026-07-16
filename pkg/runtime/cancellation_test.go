@@ -240,7 +240,7 @@ func newRuntimeCancellationFixture(t *testing.T) *runtimeCancellationFixture {
 	workerID := "worker-cancel"
 	principal := RuntimeSessionPrincipal{
 		RuntimeSessionID: sessionID, NodeID: nodeID, AgentID: agentID, CredentialID: credentialID,
-		WorkerID: workerID, SessionEpoch: 5, CoreInstanceID: coreID,
+		WorkerID: workerID, SessionEpoch: 5, RuntimeContractDigest: RuntimeContractDigest, CoreInstanceID: coreID,
 		AttachmentID:            uuid.New(),
 		DeviceCertificateSerial: "abc123", DevicePublicKeyThumbprintSHA256: runtimeCancellationSHA256Fixture(),
 		Status: "active", DatabaseTime: databaseNow,
@@ -372,6 +372,7 @@ func (f *runtimeCancellationTransactionFake) LockRuntimeSessionForPrincipalValid
 	return db.LockRuntimeSessionForPrincipalValidationRow{
 		RuntimeSessionID: f.principal.RuntimeSessionID, NodeID: f.principal.NodeID, AgentID: f.principal.AgentID,
 		CredentialID: f.principal.CredentialID, WorkerID: f.principal.WorkerID, SessionEpoch: f.principal.SessionEpoch,
+		RuntimeContractDigest:   f.principal.RuntimeContractDigest,
 		DeviceCertificateSerial: f.principal.DeviceCertificateSerial, AttachedCoreInstanceID: &coreID,
 		Status: "active", DatabaseNow: f.databaseNow,
 	}, nil
@@ -382,6 +383,7 @@ func (f *runtimeCancellationTransactionFake) LockRuntimeNodeForPrincipalValidati
 	return db.LockRuntimeNodeForPrincipalValidationRow{
 		NodeID: f.principal.NodeID, DeviceCertificateSerial: f.principal.DeviceCertificateSerial,
 		DevicePublicKeyThumbprint: f.principal.DevicePublicKeyThumbprintSHA256,
+		RuntimeContractDigest:     f.principal.RuntimeContractDigest,
 	}, nil
 }
 

@@ -16,6 +16,7 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // slugPattern 与 schema CHECK 约束一致：以小写字母/数字开头结尾，中间允许连字符。
@@ -346,6 +347,7 @@ func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opt
 		Limit:               opts.Limit,
 		Offset:              opts.Offset,
 		SkillIds:            opts.SkillIDs,
+		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
 	}
 	rows, err := s.queries.ListAgentsByCreatorPage(ctx, params)
 	if err != nil {
@@ -359,12 +361,16 @@ func (s *Service) ListMyAgentsPage(ctx context.Context, creatorID uuid.UUID, opt
 		Visibility:          opts.Visibility,
 		CertificationStatus: opts.CertificationStatus,
 		SkillIds:            opts.SkillIDs,
+		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
 	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.ListMyAgentsPage: count")
 		return nil, httpx.Internal("查询 Agent 总数失败")
 	}
-	buckets, err := s.queries.CountAgentBucketsByCreator(ctx, creatorID)
+	buckets, err := s.queries.CountAgentBucketsByCreator(ctx, db.CountAgentBucketsByCreatorParams{
+		CreatorID:           creatorID,
+		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+	})
 	if err != nil {
 		log.Error().Err(err).Str("user_id", creatorID.String()).Msg("agent.ListMyAgentsPage: buckets")
 		return nil, httpx.Internal("查询 Agent 统计失败")
@@ -1096,7 +1102,10 @@ func (s *Service) runtimeAwareAvailability(ctx context.Context, agentID uuid.UUI
 	if !isQueuedRuntimeConnectionMode(connectionMode) {
 		return availability
 	}
-	hasRuntime, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, agentID)
+	hasRuntime, err := s.queries.HasActiveRuntimeSessionForAgent(ctx, db.HasActiveRuntimeSessionForAgentParams{
+		AgentID:             agentID,
+		RuntimeStaleAfterMs: coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+	})
 	if err != nil {
 		log.Warn().Err(err).Str("agent_id", agentID.String()).Msg("agent.runtimeAwareAvailability")
 		return availability

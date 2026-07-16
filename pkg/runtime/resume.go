@@ -586,6 +586,7 @@ func (s *RuntimeResumeService) lockTargetPrincipal(
 		session.AgentID != target.AgentID || session.CredentialID != target.CredentialID ||
 		session.WorkerID != target.WorkerID || session.SessionEpoch != target.SessionEpoch ||
 		session.DeviceCertificateSerial != target.DeviceCertificateSerial ||
+		session.RuntimeContractDigest != target.RuntimeContractDigest ||
 		session.AttachedCoreInstanceID == nil || *session.AttachedCoreInstanceID != coreInstanceID {
 		return lockedRuntimeResumePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
@@ -608,6 +609,7 @@ func (s *RuntimeResumeService) lockTargetPrincipal(
 	}
 	if node.NodeID != target.NodeID || node.DeviceCertificateSerial != target.DeviceCertificateSerial ||
 		node.DevicePublicKeyThumbprint != target.DevicePublicKeyThumbprintSHA256 ||
+		node.RuntimeContractDigest != target.RuntimeContractDigest ||
 		credential.ID != target.CredentialID || credential.AgentID == nil ||
 		*credential.AgentID != target.AgentID {
 		return lockedRuntimeResumePrincipal{}, newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
@@ -641,6 +643,7 @@ func (s *RuntimeResumeService) validateResume(
 		target.RuntimeSessionID == uuid.Nil || target.NodeID == uuid.Nil ||
 		target.AgentID == uuid.Nil || target.CredentialID == uuid.Nil ||
 		target.AttachmentID == uuid.Nil || target.SessionEpoch < 1 || target.CoreInstanceID != s.coreInstanceID ||
+		!runtimeWireContractSupported(target.RuntimeContractDigest) ||
 		!validRuntimeIdentityText(target.WorkerID, 1, maxRuntimeSessionWorkerIDRunes) ||
 		!validCertificateSerial(target.DeviceCertificateSerial) ||
 		!validSHA256Hex(target.DevicePublicKeyThumbprintSHA256) ||

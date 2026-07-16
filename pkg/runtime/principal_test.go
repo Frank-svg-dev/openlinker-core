@@ -23,12 +23,14 @@ func TestLockRuntimePrincipalUsesFixedOrderAndDatabaseExpiry(t *testing.T) {
 			AgentID:                principal.AgentID,
 			CredentialID:           *principal.CredentialID,
 			WorkerID:               *principal.WorkerID,
+			RuntimeContractDigest:  principal.RuntimeContractDigest,
 			AttachedCoreInstanceID: principal.CoreInstanceID,
 		},
 		node: db.LockRuntimeNodeForPrincipalValidationRow{
 			NodeID:                    *principal.NodeID,
 			DeviceCertificateSerial:   *principal.DeviceCertificateSerial,
 			DevicePublicKeyThumbprint: *principal.DevicePublicKeyThumbprintSHA256,
+			RuntimeContractDigest:     principal.RuntimeContractDigest,
 		},
 		credential: db.LockRuntimeCredentialForPrincipalValidationRow{
 			ID:        *principal.CredentialID,
@@ -76,6 +78,7 @@ func runtimeNodePrincipalFixture() RuntimeEventPrincipal {
 	thumbprint := repeatedHex("a")
 	return RuntimeEventPrincipal{
 		AgentID:                         agentID,
+		RuntimeContractDigest:           RuntimeContractDigest,
 		CredentialID:                    &credentialID,
 		NodeID:                          &nodeID,
 		WorkerID:                        &workerID,

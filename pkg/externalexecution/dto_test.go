@@ -1,4 +1,4 @@
-package servicebridge
+package externalexecution
 
 import (
 	"encoding/json"
@@ -9,15 +9,15 @@ import (
 
 func TestExecutionStatusResponseUsesCloudFlatContract(t *testing.T) {
 	payload, err := json.Marshal(ExecutionStatusResponse{
-		ExternalOrderID: "order-id",
-		ExecutionID:     "execution-id",
-		TargetType:      TargetTypeAgent,
-		Status:          "failed",
-		Artifacts:       []runtime.RunArtifactResponse{},
-		ErrorCode:       "EXECUTION_FAILED",
-		ErrorMessage:    "Execution failed.",
-		StartedAt:       "2026-07-13T00:00:00Z",
-		FinishedAt:      "2026-07-13T00:01:00Z",
+		ExternalRequestID: "order-id",
+		ExecutionID:       "execution-id",
+		TargetType:        TargetTypeAgent,
+		Status:            "failed",
+		Artifacts:         []runtime.RunArtifactResponse{},
+		ErrorCode:         "EXECUTION_FAILED",
+		ErrorMessage:      "Execution failed.",
+		StartedAt:         "2026-07-13T00:00:00Z",
+		FinishedAt:        "2026-07-13T00:01:00Z",
 	})
 	if err != nil {
 		t.Fatalf("Marshal() error = %v", err)

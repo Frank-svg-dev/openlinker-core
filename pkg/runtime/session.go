@@ -212,13 +212,19 @@ type RuntimeSessionIdentity struct {
 // RuntimeSessionRequest is the transport-neutral hello/session request.
 type RuntimeSessionRequest struct {
 	RuntimeSessionIdentity
-	NodeVersion           string    `json:"node_version"`
-	ProtocolVersion       int32     `json:"protocol_version"`
-	RuntimeContractID     string    `json:"runtime_contract_id"`
-	RuntimeContractDigest string    `json:"runtime_contract_digest"`
-	Features              []string  `json:"features"`
-	Capacity              int32     `json:"capacity"`
-	AttachmentID          uuid.UUID `json:"-"`
+	NodeVersion           string           `json:"node_version"`
+	ProtocolVersion       int32            `json:"protocol_version"`
+	RuntimeContractID     string           `json:"runtime_contract_id"`
+	RuntimeContractDigest string           `json:"runtime_contract_digest"`
+	Features              []string         `json:"features"`
+	Capacity              int32            `json:"capacity"`
+	AttachmentID          uuid.UUID        `json:"-"`
+	Transport             RuntimeTransport `json:"-"`
+	// ReportedTransportReason is an untrusted, bounded SDK hint received only
+	// from the CreateSession request or WebSocket upgrade. Core validates it
+	// against Transport, the prior durable attachment and TransportPolicy.
+	ReportedTransportReason RuntimeTransportReason `json:"-"`
+	TransportPolicy         RuntimeTransportPolicy `json:"-"`
 }
 
 // RuntimeSessionHeartbeatRequest repeats immutable contract identity so a
@@ -254,6 +260,7 @@ type RuntimeSessionPrincipal struct {
 	CredentialID                    uuid.UUID
 	WorkerID                        string
 	SessionEpoch                    int64
+	RuntimeContractDigest           string
 	CoreInstanceID                  uuid.UUID
 	AttachmentID                    uuid.UUID
 	DeviceCertificateSerial         string
@@ -277,6 +284,7 @@ func (p RuntimeSessionPrincipal) EventPrincipal() RuntimeEventPrincipal {
 		NodeID:                          &nodeID,
 		WorkerID:                        &workerID,
 		RuntimeSessionID:                &sessionID,
+		RuntimeContractDigest:           p.RuntimeContractDigest,
 		CoreInstanceID:                  &coreInstanceID,
 		AttachmentID:                    &attachmentID,
 		DeviceCertificateSerial:         &certificateSerial,
@@ -483,6 +491,12 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 		if gateErr := tx.RequireRuntimeClusterOperation(ctx, RuntimeClusterNewSession); gateErr != nil {
 			return gateErr
 		}
+		transportReason, validReason := resolveRuntimeTransportReason(
+			normalized.Transport, "", normalized.ReportedTransportReason, normalized.TransportPolicy,
+		)
+		if !validReason {
+			return newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
+		}
 
 		node, nodeErr := tx.GetRuntimeNode(ctx, principal.Device.NodeID)
 		if nodeErr != nil {
@@ -491,16 +505,12 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 			}
 			return nodeErr
 		}
-		if nodeErr = validateRuntimeNodeForSession(node, principal.Device, normalized); nodeErr != nil {
-			return nodeErr
-		}
 		if node.Status != "active" {
 			return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, nil)
 		}
-
-		active, listErr := tx.ListActiveRuntimeSessionsByNode(ctx, principal.Device.NodeID)
-		if listErr != nil {
-			return listErr
+		active, nodeErr := negotiateRuntimeNodeForSession(ctx, tx, node, principal, normalized)
+		if nodeErr != nil {
+			return nodeErr
 		}
 		for _, candidate := range active {
 			if candidate.AgentID == principal.AgentID && candidate.WorkerID == normalized.WorkerID &&
@@ -508,7 +518,6 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 				return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 			}
 		}
-
 		created, createErr := tx.CreateRuntimeSession(ctx, db.CreateRuntimeSessionParams{
 			RuntimeSessionID:        normalized.RuntimeSessionID,
 			NodeID:                  principal.Device.NodeID,
@@ -536,6 +545,8 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 			RuntimeSessionID: created.RuntimeSessionID,
 			CoreInstanceID:   s.coreInstanceID,
 			AttachmentKind:   "connected",
+			Transport:        string(normalized.Transport),
+			TransportReason:  string(transportReason),
 		})
 		if attachmentErr != nil {
 			return attachmentErr
@@ -566,10 +577,6 @@ func (s *RuntimeSessionService) attachExistingSession(
 		}
 		return err
 	}
-	if err = validateRuntimeNodeForSession(node, principal.Device, request); err != nil {
-		return err
-	}
-
 	if existing.Status == "closed" || existing.Status == "revoked" {
 		return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 	}
@@ -577,8 +584,43 @@ func (s *RuntimeSessionService) attachExistingSession(
 		*existing.AttachedCoreInstanceID != s.coreInstanceID && existing.Status != "offline" {
 		return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 	}
-
 	wasOffline := existing.Status == "offline"
+	var previousAttachment *db.RuntimeSessionAttachment
+	if !wasOffline {
+		previous, attachmentErr := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
+		if attachmentErr != nil {
+			return attachmentErr
+		}
+		if previous.CoreInstanceID != s.coreInstanceID {
+			return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+		}
+		previousAttachment = &previous
+	} else {
+		history, historyErr := tx.ListRuntimeSessionAttachments(ctx, db.ListRuntimeSessionAttachmentsParams{
+			RuntimeSessionID: existing.RuntimeSessionID,
+			Limit:            1,
+		})
+		if historyErr != nil {
+			return historyErr
+		}
+		if len(history) == 1 {
+			previousAttachment = &history[0]
+		}
+	}
+	previousTransport := RuntimeTransport("")
+	if previousAttachment != nil {
+		previousTransport = RuntimeTransport(previousAttachment.Transport)
+	}
+	transportReason, validReason := resolveRuntimeTransportReason(
+		request.Transport, previousTransport, request.ReportedTransportReason, request.TransportPolicy,
+	)
+	if !validReason {
+		return newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
+	}
+	if _, err = negotiateRuntimeNodeForSession(ctx, tx, node, principal, request); err != nil {
+		return err
+	}
+
 	claimed, err := tx.ClaimRuntimeSessionForCore(ctx, db.ClaimRuntimeSessionForCoreParams{
 		RuntimeSessionID: existing.RuntimeSessionID,
 		NodeID:           existing.NodeID,
@@ -612,13 +654,8 @@ func (s *RuntimeSessionService) attachExistingSession(
 	}
 
 	if !wasOffline {
-		previous, attachmentErr := tx.GetActiveRuntimeSessionAttachment(ctx, existing.RuntimeSessionID)
-		if attachmentErr != nil {
-			return attachmentErr
-		}
-		if previous.CoreInstanceID != s.coreInstanceID {
-			return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
-		}
+		previous := *previousAttachment
+		var attachmentErr error
 		reason := "transport reattached"
 		if _, attachmentErr = tx.CloseRuntimeSessionAttachment(ctx, db.CloseRuntimeSessionAttachmentParams{
 			RuntimeSessionID: existing.RuntimeSessionID,
@@ -632,6 +669,8 @@ func (s *RuntimeSessionService) attachExistingSession(
 			RuntimeSessionID: claimed.RuntimeSessionID,
 			CoreInstanceID:   s.coreInstanceID,
 			AttachmentKind:   "resumed",
+			Transport:        string(request.Transport),
+			TransportReason:  string(transportReason),
 		})
 		if attachmentErr != nil {
 			return attachmentErr
@@ -644,6 +683,8 @@ func (s *RuntimeSessionService) attachExistingSession(
 		RuntimeSessionID: claimed.RuntimeSessionID,
 		CoreInstanceID:   s.coreInstanceID,
 		AttachmentKind:   "resumed",
+		Transport:        string(request.Transport),
+		TransportReason:  string(transportReason),
 	})
 	if err != nil {
 		return err
@@ -701,20 +742,10 @@ func (s *RuntimeSessionService) HeartbeatSession(
 		if attachment.CoreInstanceID != s.coreInstanceID || attachment.ID != normalized.AttachmentID {
 			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
 		}
-		if _, heartbeatErr := tx.HeartbeatRuntimeNode(ctx, db.HeartbeatRuntimeNodeParams{
-			NodeID:                    principal.Device.NodeID,
-			NodeVersion:               normalized.NodeVersion,
-			ProtocolVersion:           normalized.ProtocolVersion,
-			RuntimeContractID:         normalized.RuntimeContractID,
-			RuntimeContractDigest:     normalized.RuntimeContractDigest,
-			Features:                  normalized.Features,
-			Capacity:                  normalized.Capacity,
-			DeviceCertificateSerial:   principal.Device.CertificateSerial,
-			DevicePublicKeyThumbprint: principal.Device.PublicKeyThumbprintSHA256,
-		}); heartbeatErr != nil {
-			if errors.Is(heartbeatErr, pgx.ErrNoRows) {
-				return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, heartbeatErr)
-			}
+		if RuntimeTransport(attachment.Transport) != normalized.Transport {
+			return newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil)
+		}
+		if _, heartbeatErr := heartbeatRuntimeNodeForSession(ctx, tx, principal, normalized); heartbeatErr != nil {
 			return heartbeatErr
 		}
 		heartbeat, heartbeatErr := tx.HeartbeatRuntimeSession(ctx, db.HeartbeatRuntimeSessionParams{
@@ -841,14 +872,15 @@ func validateRuntimeSessionRequest(
 		return RuntimeSessionRequest{}, err
 	}
 	if !validRuntimeIdentityText(request.NodeVersion, 1, maxRuntimeSessionVersionRunes) ||
-		request.Capacity < 0 || request.Capacity > maxRuntimeSessionCapacity {
+		request.Capacity < 0 || request.Capacity > maxRuntimeSessionCapacity ||
+		!request.Transport.IsLive() {
 		return RuntimeSessionRequest{}, newRuntimeSessionError(RuntimeSessionErrorValidationFailed, nil)
 	}
 	if request.ProtocolVersion != RuntimeProtocolVersion {
 		return RuntimeSessionRequest{}, newRuntimeSessionError(RuntimeSessionErrorProtocolUnsupported, nil)
 	}
 	if request.RuntimeContractID != RuntimeContractID ||
-		request.RuntimeContractDigest != RuntimeContractDigest {
+		!runtimeWireContractSupported(request.RuntimeContractDigest) {
 		return RuntimeSessionRequest{}, newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
 	}
 
@@ -858,6 +890,85 @@ func validateRuntimeSessionRequest(
 	}
 	request.Features = features
 	return request, nil
+}
+
+func heartbeatRuntimeNodeForSession(
+	ctx context.Context,
+	tx runtimeSessionTransaction,
+	principal AuthenticatedRuntimePrincipal,
+	request RuntimeSessionRequest,
+) (db.RuntimeNode, error) {
+	node, err := tx.GetRuntimeNode(ctx, principal.Device.NodeID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return db.RuntimeNode{}, newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, err)
+		}
+		return db.RuntimeNode{}, err
+	}
+	if err = validateRuntimeNodeForSession(node, principal.Device, request); err != nil {
+		return db.RuntimeNode{}, err
+	}
+	return persistRuntimeNodeHeartbeat(ctx, tx, principal, request)
+}
+
+// negotiateRuntimeNodeForSession is the only generation-switch path. The
+// authenticated certificate fixes the Node identity; the supported Hello
+// digest selects a Server-owned adapter generation. All Session rows for the
+// Node are locked before this function is called. A Node may switch generation
+// only when every live Session already uses the requested digest (which means
+// there is no conflicting live generation during a real switch).
+func negotiateRuntimeNodeForSession(
+	ctx context.Context,
+	tx runtimeSessionTransaction,
+	node db.RuntimeNode,
+	principal AuthenticatedRuntimePrincipal,
+	request RuntimeSessionRequest,
+) ([]db.RuntimeSession, error) {
+	if err := validateRuntimeNodeForNegotiation(node, principal.Device, request); err != nil {
+		return nil, err
+	}
+	active, err := tx.ListActiveRuntimeSessionsByNode(ctx, principal.Device.NodeID)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range active {
+		if candidate.NodeID != principal.Device.NodeID ||
+			candidate.ProtocolVersion != request.ProtocolVersion ||
+			candidate.RuntimeContractID != request.RuntimeContractID ||
+			candidate.RuntimeContractDigest != request.RuntimeContractDigest {
+			return nil, newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+		}
+	}
+	if node.RuntimeContractDigest != request.RuntimeContractDigest && len(active) != 0 {
+		return nil, newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
+	}
+	if _, err = persistRuntimeNodeHeartbeat(ctx, tx, principal, request); err != nil {
+		return nil, err
+	}
+	return active, nil
+}
+
+func persistRuntimeNodeHeartbeat(
+	ctx context.Context,
+	tx runtimeSessionTransaction,
+	principal AuthenticatedRuntimePrincipal,
+	request RuntimeSessionRequest,
+) (db.RuntimeNode, error) {
+	node, err := tx.HeartbeatRuntimeNode(ctx, db.HeartbeatRuntimeNodeParams{
+		NodeID:                    principal.Device.NodeID,
+		NodeVersion:               request.NodeVersion,
+		ProtocolVersion:           request.ProtocolVersion,
+		RuntimeContractID:         request.RuntimeContractID,
+		RuntimeContractDigest:     request.RuntimeContractDigest,
+		Features:                  request.Features,
+		Capacity:                  request.Capacity,
+		DeviceCertificateSerial:   principal.Device.CertificateSerial,
+		DevicePublicKeyThumbprint: principal.Device.PublicKeyThumbprintSHA256,
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.RuntimeNode{}, newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, err)
+	}
+	return node, err
 }
 
 func validateRuntimeSessionIdentity(
@@ -932,6 +1043,29 @@ func validateRuntimeNodeForSession(
 	if node.NodeVersion != request.NodeVersion || node.ProtocolVersion != request.ProtocolVersion ||
 		node.RuntimeContractID != request.RuntimeContractID ||
 		node.RuntimeContractDigest != request.RuntimeContractDigest ||
+		!sameRuntimeFeatureSet(node.Features, request.Features) {
+		return newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
+	}
+	return nil
+}
+
+func validateRuntimeNodeForNegotiation(
+	node db.RuntimeNode,
+	device RuntimeDeviceIdentity,
+	request RuntimeSessionRequest,
+) error {
+	if node.Status != "active" && node.Status != "draining" {
+		return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, nil)
+	}
+	if node.NodeID != device.NodeID ||
+		!constantTimeStringEqual(node.DeviceCertificateSerial, device.CertificateSerial) ||
+		!constantTimeStringEqual(node.DevicePublicKeyThumbprint, device.PublicKeyThumbprintSHA256) {
+		return newRuntimeSessionError(RuntimeSessionErrorDeviceMismatch, nil)
+	}
+	if node.NodeVersion != request.NodeVersion || node.ProtocolVersion != request.ProtocolVersion ||
+		node.RuntimeContractID != request.RuntimeContractID ||
+		!runtimeWireContractSupported(node.RuntimeContractDigest) ||
+		!runtimeWireContractSupported(request.RuntimeContractDigest) ||
 		!sameRuntimeFeatureSet(node.Features, request.Features) {
 		return newRuntimeSessionError(RuntimeSessionErrorContractMismatch, nil)
 	}
@@ -1134,6 +1268,7 @@ type runtimeSessionTransaction interface {
 	ClaimRuntimeSessionForCore(context.Context, db.ClaimRuntimeSessionForCoreParams) (db.RuntimeSession, error)
 	HeartbeatRuntimeSession(context.Context, db.HeartbeatRuntimeSessionParams) (db.RuntimeSession, error)
 	GetActiveRuntimeSessionAttachment(context.Context, uuid.UUID) (db.RuntimeSessionAttachment, error)
+	ListRuntimeSessionAttachments(context.Context, db.ListRuntimeSessionAttachmentsParams) ([]db.RuntimeSessionAttachment, error)
 	CreateRuntimeSessionAttachment(context.Context, db.CreateRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error)
 	CloseRuntimeSessionAttachment(context.Context, db.CloseRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error)
 	CloseRuntimeSession(context.Context, db.CloseRuntimeSessionParams) (db.RuntimeSession, error)
@@ -1171,6 +1306,7 @@ SELECT s.runtime_session_id,
        s.credential_id,
        s.worker_id,
        s.session_epoch,
+       s.runtime_contract_digest,
        s.attached_core_instance_id,
 	   s.device_certificate_serial,
 	   n.device_public_key_thumbprint,
@@ -1187,6 +1323,10 @@ JOIN runtime_session_attachments a
   ON a.runtime_session_id = s.runtime_session_id
  AND a.core_instance_id = s.attached_core_instance_id
  AND a.detached_at IS NULL
+JOIN runtime_wire_contracts wire
+  ON wire.runtime_contract_id = s.runtime_contract_id
+ AND wire.runtime_contract_digest = s.runtime_contract_digest
+ AND wire.support_tier IN ('current', 'previous')
 WHERE s.runtime_session_id = $1
   AND s.node_id = $2
   AND s.agent_id = $3
@@ -1196,7 +1336,12 @@ WHERE s.runtime_session_id = $1
   AND n.device_public_key_thumbprint = $6
   AND s.attached_core_instance_id = $7
   AND s.status IN ('active', 'draining')
+  AND s.protocol_version = 2
+  AND s.runtime_contract_id = 'openlinker.runtime.v2'
   AND n.status IN ('active', 'draining')
+  AND n.protocol_version = s.protocol_version
+  AND n.runtime_contract_id = s.runtime_contract_id
+  AND n.runtime_contract_digest = s.runtime_contract_digest
   AND t.status = 'active_runtime'
   AND t.revoked_at IS NULL
   AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -1220,6 +1365,7 @@ WHERE s.runtime_session_id = $1
 		&principal.CredentialID,
 		&principal.WorkerID,
 		&principal.SessionEpoch,
+		&principal.RuntimeContractDigest,
 		&principal.CoreInstanceID,
 		&principal.DeviceCertificateSerial,
 		&principal.DevicePublicKeyThumbprintSHA256,
@@ -1253,6 +1399,7 @@ func (r *postgresRuntimeSessionRepository) ResolveRuntimeWorkerSessionPrincipal(
 		CredentialID:                    row.CredentialID,
 		WorkerID:                        row.WorkerID,
 		SessionEpoch:                    row.SessionEpoch,
+		RuntimeContractDigest:           row.RuntimeContractDigest,
 		CoreInstanceID:                  row.AttachedCoreInstanceID,
 		DeviceCertificateSerial:         row.DeviceCertificateSerial,
 		DevicePublicKeyThumbprintSHA256: row.DevicePublicKeyThumbprint,
@@ -1340,6 +1487,10 @@ func (t *postgresRuntimeSessionTransaction) HeartbeatRuntimeSession(ctx context.
 
 func (t *postgresRuntimeSessionTransaction) GetActiveRuntimeSessionAttachment(ctx context.Context, id uuid.UUID) (db.RuntimeSessionAttachment, error) {
 	return t.queries.GetActiveRuntimeSessionAttachment(ctx, id)
+}
+
+func (t *postgresRuntimeSessionTransaction) ListRuntimeSessionAttachments(ctx context.Context, params db.ListRuntimeSessionAttachmentsParams) ([]db.RuntimeSessionAttachment, error) {
+	return t.queries.ListRuntimeSessionAttachments(ctx, params)
 }
 
 func (t *postgresRuntimeSessionTransaction) CreateRuntimeSessionAttachment(ctx context.Context, params db.CreateRuntimeSessionAttachmentParams) (db.RuntimeSessionAttachment, error) {

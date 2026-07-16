@@ -136,5 +136,7 @@ func validTestRuntimePresence() RuntimePresence {
 		CoreInstanceID: uuid.New(), NodeID: uuid.New(), AgentID: uuid.New(),
 		RuntimeSessionID: uuid.New(), ConnectionID: "connection-1", WorkerID: "worker-1",
 		Capacity: 4, Inflight: 1, NodeVersion: "0.2.0",
+		Transport: RuntimeTransportWebSocket, TransportReason: RuntimeTransportReasonExplicit,
+		TransportChangedAt: time.Now().UTC(),
 	}
 }

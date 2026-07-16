@@ -104,7 +104,7 @@ RETURNING id, workflow_id, user_id, status, input, output, error_message,
           started_at, finished_at, created_at, updated_at,
           attempt_count, max_attempts, next_retry_at, claimed_at, last_worker_error;
 
--- name: CreatePendingHostedWorkflowRun :one
+-- name: CreatePendingExternalExecutionWorkflowRun :one
 INSERT INTO workflow_runs (id, workflow_id, user_id, status, input, max_attempts)
 VALUES ($1, $2, $3, 'pending', $4, $5)
 ON CONFLICT (id) DO NOTHING

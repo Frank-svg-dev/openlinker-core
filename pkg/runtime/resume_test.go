@@ -341,6 +341,7 @@ func newRuntimeResumeFixture(t *testing.T) *runtimeResumeFixture {
 		CredentialID:                    uuid.New(),
 		WorkerID:                        "worker-resume-a",
 		SessionEpoch:                    3,
+		RuntimeContractDigest:           RuntimeContractDigest,
 		CoreInstanceID:                  coreID,
 		AttachmentID:                    uuid.New(),
 		DeviceCertificateSerial:         "abc123",
@@ -487,6 +488,7 @@ func (f *runtimeResumeTransactionFake) LockRuntimeSessionForPrincipalValidation(
 		RuntimeSessionID: f.target.RuntimeSessionID, NodeID: f.target.NodeID,
 		AgentID: f.target.AgentID, CredentialID: f.target.CredentialID,
 		WorkerID: f.target.WorkerID, SessionEpoch: f.target.SessionEpoch,
+		RuntimeContractDigest:   f.target.RuntimeContractDigest,
 		DeviceCertificateSerial: f.target.DeviceCertificateSerial,
 		Status:                  f.target.Status, AttachedCoreInstanceID: &coreID, DatabaseNow: f.now,
 	}, nil
@@ -497,6 +499,7 @@ func (f *runtimeResumeTransactionFake) LockRuntimeNodeForPrincipalValidation(_ c
 	return db.LockRuntimeNodeForPrincipalValidationRow{
 		NodeID: f.target.NodeID, DeviceCertificateSerial: f.target.DeviceCertificateSerial,
 		DevicePublicKeyThumbprint: f.target.DevicePublicKeyThumbprintSHA256,
+		RuntimeContractDigest:     f.target.RuntimeContractDigest,
 		Status:                    "active", DatabaseNow: f.now,
 	}, nil
 }

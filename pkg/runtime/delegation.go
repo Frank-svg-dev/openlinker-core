@@ -370,9 +370,14 @@ func (s *RuntimeDelegationService) authorizeChildCreation(
 ) error {
 	capability := preliminary
 	var sessionEpoch int64
+	var sessionRuntimeContractDigest string
 	if err := tx.QueryRow(ctx, `
-SELECT s.session_epoch
+SELECT s.session_epoch, s.runtime_contract_digest
 FROM runtime_sessions s
+JOIN runtime_wire_contracts wire
+  ON wire.runtime_contract_id = s.runtime_contract_id
+ AND wire.runtime_contract_digest = s.runtime_contract_digest
+ AND wire.support_tier IN ('current', 'previous')
 WHERE s.runtime_session_id = $1
   AND s.node_id = $2
   AND s.agent_id = $3
@@ -382,7 +387,6 @@ WHERE s.runtime_session_id = $1
   AND s.status IN ('active', 'draining')
   AND s.protocol_version = 2
   AND s.runtime_contract_id = 'openlinker.runtime.v2'
-  AND s.runtime_contract_digest = $7
 FOR UPDATE OF s`,
 		capability.RuntimeSessionID,
 		capability.NodeID,
@@ -390,11 +394,10 @@ FOR UPDATE OF s`,
 		capability.CredentialID,
 		capability.WorkerID,
 		authorization.Device.CertificateSerial,
-		RuntimeContractDigest,
-	).Scan(&sessionEpoch); err != nil {
+	).Scan(&sessionEpoch, &sessionRuntimeContractDigest); err != nil {
 		return runtimeDelegationPrincipalLockError(err)
 	}
-	if sessionEpoch < 1 {
+	if sessionEpoch < 1 || !runtimeWireContractSupported(sessionRuntimeContractDigest) {
 		return newRuntimeLeaseError(RuntimeLeaseErrorIdentityMismatch, nil)
 	}
 
@@ -414,7 +417,7 @@ FOR UPDATE OF n`,
 		capability.NodeID,
 		authorization.Device.CertificateSerial,
 		authorization.Device.PublicKeyThumbprintSHA256,
-		RuntimeContractDigest,
+		sessionRuntimeContractDigest,
 	).Scan(&lockedNodeID); err != nil {
 		return runtimeDelegationPrincipalLockError(err)
 	}

@@ -406,13 +406,16 @@ type RuntimeSession struct {
 }
 
 type RuntimeSessionAttachment struct {
-	ID               uuid.UUID  `db:"id" json:"id"`
-	RuntimeSessionID uuid.UUID  `db:"runtime_session_id" json:"runtime_session_id"`
-	CoreInstanceID   uuid.UUID  `db:"core_instance_id" json:"core_instance_id"`
-	AttachmentKind   string     `db:"attachment_kind" json:"attachment_kind"`
-	AttachedAt       time.Time  `db:"attached_at" json:"attached_at"`
-	DetachedAt       *time.Time `db:"detached_at" json:"detached_at"`
-	DisconnectReason *string    `db:"disconnect_reason" json:"disconnect_reason"`
+	ID                 uuid.UUID  `db:"id" json:"id"`
+	RuntimeSessionID   uuid.UUID  `db:"runtime_session_id" json:"runtime_session_id"`
+	CoreInstanceID     uuid.UUID  `db:"core_instance_id" json:"core_instance_id"`
+	AttachmentKind     string     `db:"attachment_kind" json:"attachment_kind"`
+	AttachedAt         time.Time  `db:"attached_at" json:"attached_at"`
+	DetachedAt         *time.Time `db:"detached_at" json:"detached_at"`
+	DisconnectReason   *string    `db:"disconnect_reason" json:"disconnect_reason"`
+	Transport          string     `db:"transport" json:"transport"`
+	TransportReason    *string    `db:"transport_reason" json:"transport_reason"`
+	TransportChangedAt time.Time  `db:"transport_changed_at" json:"transport_changed_at"`
 }
 
 // RunArtifact 对应 run_artifacts 表。

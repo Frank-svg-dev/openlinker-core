@@ -278,6 +278,8 @@ func ValidateRuntimePayload(payload any) error {
 		return validateRuntimeHello(value)
 	case RuntimeReadyPayload:
 		return validateRuntimeReady(value)
+	case runtimePreviousReadyPayload:
+		return validateRuntimePreviousReady(value)
 	case RunAssignedPayload:
 		return validateRunAssigned(value)
 	case RunAssignmentAckPayload:
@@ -404,7 +406,7 @@ func validateRuntimeHello(value RuntimeHelloPayload) error {
 		!validRequiredString(value.NodeVersion, 100) || value.Capacity < 0 || value.Capacity > RuntimeMaximumNodeCapacity {
 		return runtimeValidationError("invalid runtime hello identity or capacity", nil)
 	}
-	if value.ContractDigest != RuntimeContractDigest {
+	if !runtimeWireContractSupported(value.ContractDigest) {
 		return newRuntimeTransportError(RuntimeErrorClientUpgradeRequired, runtimeErrorDefaultMessage(RuntimeErrorClientUpgradeRequired), nil)
 	}
 	seen := make(map[string]struct{}, len(value.Features))
@@ -421,6 +423,24 @@ func validateRuntimeHello(value RuntimeHelloPayload) error {
 		if _, ok := seen[required]; !ok {
 			return newRuntimeTransportError(RuntimeErrorRequiredFeatureMissing, runtimeErrorDefaultMessage(RuntimeErrorRequiredFeatureMissing), nil)
 		}
+	}
+	return nil
+}
+
+func validateRuntimePreviousReady(value runtimePreviousReadyPayload) error {
+	if !validRequiredString(value.CoreInstanceID, 200) ||
+		value.OfferTTLSeconds < 1 || value.LeaseTTLSeconds < 1 || value.DatabaseTime.IsZero() {
+		return runtimeValidationError("invalid previous runtime ready payload", nil)
+	}
+	seen := make(map[string]struct{}, len(value.Features))
+	for _, feature := range value.Features {
+		if feature == "" {
+			return runtimeValidationError("invalid previous runtime ready feature", nil)
+		}
+		if _, duplicate := seen[feature]; duplicate {
+			return runtimeValidationError("previous runtime ready features must be unique", nil)
+		}
+		seen[feature] = struct{}{}
 	}
 	return nil
 }

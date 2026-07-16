@@ -18,7 +18,7 @@ import (
 const (
 	defaultRuntimeNodeLimit    int32 = 50
 	maxRuntimeNodeLimit        int32 = 200
-	runtimeNodeLiveWindow            = 15 * time.Second
+	runtimeNodeLiveWindow            = RuntimeSessionStaleAfter
 	runtimeNodeMutationRetries       = 3
 )
 
@@ -51,7 +51,7 @@ type runtimeNodeRecord struct {
 }
 
 // ListRuntimeNodes returns a database-clock snapshot of enrolled Runtime
-// Nodes. Session counts intentionally use the same 15-second liveness window
+// Nodes. Session counts intentionally use the canonical Runtime liveness window
 // as runtime availability; an attached but stale Session is not presented as
 // online to an operator.
 func (s *Service) ListRuntimeNodes(
@@ -101,10 +101,22 @@ WITH live_sessions AS (
            COUNT(*)::int AS active_session_count,
            COUNT(DISTINCT s.agent_id)::int AS active_agent_count
     FROM runtime_sessions s
+    JOIN runtime_nodes live_node
+      ON live_node.node_id = s.node_id
+     AND live_node.status IN ('active', 'draining')
+     AND live_node.revoked_at IS NULL
+     AND live_node.protocol_version = s.protocol_version
+     AND live_node.runtime_contract_id = s.runtime_contract_id
+     AND live_node.runtime_contract_digest = s.runtime_contract_digest
+    JOIN runtime_wire_contracts wire
+      ON wire.runtime_contract_id = s.runtime_contract_id
+     AND wire.runtime_contract_digest = s.runtime_contract_digest
+     AND wire.support_tier IN ('current', 'previous')
     WHERE s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= $3::timestamptz - INTERVAL '15 seconds'
+      AND s.heartbeat_at >= $3::timestamptz - ($4::bigint * INTERVAL '1 millisecond')
+      AND live_node.last_seen_at >= $3::timestamptz - ($4::bigint * INTERVAL '1 millisecond')
       AND EXISTS (
           SELECT 1
           FROM runtime_session_attachments attachment
@@ -123,7 +135,7 @@ SELECT n.node_id, n.display_name, n.node_version, n.protocol_version,
 FROM runtime_nodes n
 LEFT JOIN live_sessions live ON live.node_id = n.node_id
 ORDER BY n.created_at DESC, n.node_id DESC
-LIMIT $1 OFFSET $2`, limit, offset, databaseTime)
+LIMIT $1 OFFSET $2`, limit, offset, databaseTime, runtimeNodeLiveWindow.Milliseconds())
 	if err != nil {
 		return nil, httpx.Internal("查询 Runtime Node 失败")
 	}
@@ -269,7 +281,7 @@ func (s *Service) mutateRuntimeNodeOnce(
 	if err != nil {
 		return nil, httpx.Internal("读取 Runtime Node 失败")
 	}
-	activeSessions, activeAgents, err := runtimeNodeLiveCounts(ctx, tx, nodeID)
+	activeSessions, activeAgents, err := runtimeNodeLiveCounts(ctx, tx, nodeID, runtimeNodeLiveWindow)
 	if err != nil {
 		return nil, httpx.Internal("读取 Runtime Session 失败")
 	}
@@ -517,22 +529,39 @@ VALUES ($1, $2, $3, clock_timestamp())`, eventType, target.agentID, payload); er
 	return nil
 }
 
-func runtimeNodeLiveCounts(ctx context.Context, tx pgx.Tx, nodeID uuid.UUID) (int32, int32, error) {
+func runtimeNodeLiveCounts(
+	ctx context.Context,
+	tx pgx.Tx,
+	nodeID uuid.UUID,
+	liveWindow time.Duration,
+) (int32, int32, error) {
 	var sessions, agents int32
 	err := tx.QueryRow(ctx, `
-SELECT COUNT(*)::int, COUNT(DISTINCT agent_id)::int
+SELECT COUNT(*)::int, COUNT(DISTINCT s.agent_id)::int
 FROM runtime_sessions s
-WHERE node_id = $1
-  AND status IN ('active', 'draining')
-  AND attached_core_instance_id IS NOT NULL
-  AND disconnected_at IS NULL
-  AND heartbeat_at >= clock_timestamp() - INTERVAL '15 seconds'
+JOIN runtime_nodes n
+  ON n.node_id = s.node_id
+ AND n.status IN ('active', 'draining')
+ AND n.revoked_at IS NULL
+ AND n.protocol_version = s.protocol_version
+ AND n.runtime_contract_id = s.runtime_contract_id
+ AND n.runtime_contract_digest = s.runtime_contract_digest
+JOIN runtime_wire_contracts wire
+  ON wire.runtime_contract_id = s.runtime_contract_id
+ AND wire.runtime_contract_digest = s.runtime_contract_digest
+ AND wire.support_tier IN ('current', 'previous')
+WHERE s.node_id = $1
+  AND s.status IN ('active', 'draining')
+  AND s.attached_core_instance_id IS NOT NULL
+  AND s.disconnected_at IS NULL
+  AND s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
+  AND n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
   AND EXISTS (
       SELECT 1 FROM runtime_session_attachments attachment
       WHERE attachment.runtime_session_id = s.runtime_session_id
         AND attachment.core_instance_id = s.attached_core_instance_id
         AND attachment.detached_at IS NULL
-  )`, nodeID).Scan(&sessions, &agents)
+  )`, nodeID, liveWindow.Milliseconds()).Scan(&sessions, &agents)
 	return sessions, agents, err
 }
 

@@ -116,6 +116,9 @@ func scanRuntimeSessionAttachment(row runtimeNodeScanner, a *RuntimeSessionAttac
 		&a.AttachedAt,
 		&a.DetachedAt,
 		&a.DisconnectReason,
+		&a.Transport,
+		&a.TransportReason,
+		&a.TransportChangedAt,
 	)
 }
 
@@ -125,18 +128,17 @@ SELECT EXISTS (
     FROM runtime_sessions s
     JOIN runtime_nodes n ON n.node_id = s.node_id
     JOIN agent_tokens t ON t.id = s.credential_id AND t.agent_id = s.agent_id
-    JOIN runtime_schema_contracts contract
-      ON contract.runtime_contract_id = s.runtime_contract_id
-     AND contract.runtime_contract_digest = s.runtime_contract_digest
-     AND contract.is_current
+    JOIN runtime_wire_contracts wire
+      ON wire.runtime_contract_id = s.runtime_contract_id
+     AND wire.runtime_contract_digest = s.runtime_contract_digest
+     AND wire.support_tier IN ('current', 'previous')
     WHERE s.agent_id = $1
       AND s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence', 'assignment_confirm', 'renew', 'resume',
           'event_ack', 'result_ack', 'cancel', 'persistent_spool'
@@ -151,10 +153,8 @@ SELECT EXISTS (
       AND n.features @> s.features
       AND s.features @> n.features
       AND n.last_seen_at IS NOT NULL
-      -- WS Session heartbeats run every 20 seconds. Keep the Node freshness
-      -- window aligned with the 45-second Session window to avoid a periodic
-      -- false-offline gap between otherwise healthy heartbeats.
-      AND n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      -- Use the same server-owned freshness window for Node and Session.
+      AND n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -168,9 +168,14 @@ SELECT EXISTS (
       )
 )`
 
-func (q *Queries) HasActiveRuntimeSessionForAgent(ctx context.Context, agentID uuid.UUID) (bool, error) {
+type HasActiveRuntimeSessionForAgentParams struct {
+	AgentID             uuid.UUID `db:"agent_id" json:"agent_id"`
+	RuntimeStaleAfterMs int64     `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
+}
+
+func (q *Queries) HasActiveRuntimeSessionForAgent(ctx context.Context, arg HasActiveRuntimeSessionForAgentParams) (bool, error) {
 	var active bool
-	err := q.db.QueryRow(ctx, hasActiveRuntimeSessionForAgent, agentID).Scan(&active)
+	err := q.db.QueryRow(ctx, hasActiveRuntimeSessionForAgent, arg.AgentID, arg.RuntimeStaleAfterMs).Scan(&active)
 	return active, err
 }
 
@@ -191,6 +196,10 @@ JOIN runtime_session_attachments attachment
   ON attachment.runtime_session_id = s.runtime_session_id
  AND attachment.core_instance_id = s.attached_core_instance_id
  AND attachment.detached_at IS NULL
+JOIN runtime_wire_contracts wire
+  ON wire.runtime_contract_id = s.runtime_contract_id
+ AND wire.runtime_contract_digest = s.runtime_contract_digest
+ AND wire.support_tier IN ('current', 'previous')
 WHERE s.node_id = $1
   AND s.agent_id = $2
   AND s.credential_id = $3
@@ -839,6 +848,12 @@ WHERE node_id = $1
   AND device_certificate_serial = $8
   AND device_public_key_thumbprint = $9
   AND status IN ('active', 'draining')
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = $4
+        AND wire.runtime_contract_digest = $5
+        AND wire.support_tier IN ('current', 'previous')
+  )
 RETURNING node_id, display_name, device_certificate_serial,
           device_public_key_thumbprint, node_version, protocol_version,
           runtime_contract_id, runtime_contract_digest, features, capacity,
@@ -1117,6 +1132,18 @@ JOIN agent_tokens t
 WHERE n.node_id = $2
   AND n.device_certificate_serial = $7
   AND n.status = 'active'
+  AND n.node_version = $8
+  AND n.protocol_version = $9
+  AND n.runtime_contract_id = $10
+  AND n.runtime_contract_digest = $11
+  AND n.features @> $12::text[]
+  AND $12::text[] @> n.features
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = $10
+        AND wire.runtime_contract_digest = $11
+        AND wire.support_tier IN ('current', 'previous')
+  )
   AND t.status = 'active_runtime'
   AND t.revoked_at IS NULL
   AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -1308,6 +1335,15 @@ WITH candidate AS (
       AND s.session_epoch = $6
       AND s.status IN ('active', 'draining', 'offline')
       AND n.status IN ('active', 'draining')
+      AND n.protocol_version = s.protocol_version
+      AND n.runtime_contract_id = s.runtime_contract_id
+      AND n.runtime_contract_digest = s.runtime_contract_digest
+      AND EXISTS (
+          SELECT 1 FROM runtime_wire_contracts wire
+          WHERE wire.runtime_contract_id = s.runtime_contract_id
+            AND wire.runtime_contract_digest = s.runtime_contract_digest
+            AND wire.support_tier IN ('current', 'previous')
+      )
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -1384,6 +1420,15 @@ WHERE runtime_session_id = $1
        AND t.agent_id = runtime_sessions.agent_id
       WHERE n.node_id = runtime_sessions.node_id
         AND n.status IN ('active', 'draining')
+        AND n.protocol_version = $4
+        AND n.runtime_contract_id = $5
+        AND n.runtime_contract_digest = $6
+        AND EXISTS (
+            SELECT 1 FROM runtime_wire_contracts wire
+            WHERE wire.runtime_contract_id = $5
+              AND wire.runtime_contract_digest = $6
+              AND wire.support_tier IN ('current', 'previous')
+        )
         AND t.status = 'active_runtime'
         AND t.revoked_at IS NULL
         AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -1437,6 +1482,15 @@ WITH candidate AS (
       AND s.heartbeat_at >= $4
       AND s.inflight < s.capacity
       AND n.status = 'active'
+      AND n.protocol_version = s.protocol_version
+      AND n.runtime_contract_id = s.runtime_contract_id
+      AND n.runtime_contract_digest = s.runtime_contract_digest
+      AND EXISTS (
+          SELECT 1 FROM runtime_wire_contracts wire
+          WHERE wire.runtime_contract_id = s.runtime_contract_id
+            AND wire.runtime_contract_digest = s.runtime_contract_digest
+            AND wire.support_tier IN ('current', 'previous')
+      )
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -1582,20 +1636,30 @@ const createRuntimeSessionAttachment = `-- name: CreateRuntimeSessionAttachment 
 INSERT INTO runtime_session_attachments (
     runtime_session_id,
     core_instance_id,
-    attachment_kind
+    attachment_kind,
+    transport,
+    transport_reason,
+    attached_at,
+    transport_changed_at
 )
-SELECT $1, $2, $3
+SELECT $1, $2, $3, $4, $5, observed_at, observed_at
 FROM runtime_sessions s
+CROSS JOIN LATERAL (SELECT statement_timestamp() AS observed_at) database_clock
 WHERE s.runtime_session_id = $1
   AND s.attached_core_instance_id = $2
   AND s.status IN ('active', 'draining')
+  AND $4 IN ('websocket', 'long_poll')
+  AND $5 IN ('explicit', 'websocket_unavailable', 'policy_forced', 'recovery')
 RETURNING id, runtime_session_id, core_instance_id, attachment_kind,
-          attached_at, detached_at, disconnect_reason`
+          attached_at, detached_at, disconnect_reason,
+          transport, transport_reason, transport_changed_at`
 
 type CreateRuntimeSessionAttachmentParams struct {
 	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
 	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
 	AttachmentKind   string    `db:"attachment_kind" json:"attachment_kind"`
+	Transport        string    `db:"transport" json:"transport"`
+	TransportReason  string    `db:"transport_reason" json:"transport_reason"`
 }
 
 func (q *Queries) CreateRuntimeSessionAttachment(ctx context.Context, arg CreateRuntimeSessionAttachmentParams) (RuntimeSessionAttachment, error) {
@@ -1603,6 +1667,8 @@ func (q *Queries) CreateRuntimeSessionAttachment(ctx context.Context, arg Create
 		arg.RuntimeSessionID,
 		arg.CoreInstanceID,
 		arg.AttachmentKind,
+		arg.Transport,
+		arg.TransportReason,
 	)
 	var attachment RuntimeSessionAttachment
 	err := scanRuntimeSessionAttachment(row, &attachment)
@@ -1611,7 +1677,8 @@ func (q *Queries) CreateRuntimeSessionAttachment(ctx context.Context, arg Create
 
 const getActiveRuntimeSessionAttachment = `-- name: GetActiveRuntimeSessionAttachment :one
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE runtime_session_id = $1
   AND detached_at IS NULL`
@@ -1625,7 +1692,8 @@ func (q *Queries) GetActiveRuntimeSessionAttachment(ctx context.Context, runtime
 
 const listRuntimeSessionAttachments = `-- name: ListRuntimeSessionAttachments :many
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE runtime_session_id = $1
 ORDER BY attached_at DESC, id DESC
@@ -1657,7 +1725,8 @@ func (q *Queries) ListRuntimeSessionAttachments(ctx context.Context, arg ListRun
 
 const listActiveRuntimeSessionAttachmentsByCore = `-- name: ListActiveRuntimeSessionAttachmentsByCore :many
 SELECT id, runtime_session_id, core_instance_id, attachment_kind,
-       attached_at, detached_at, disconnect_reason
+       attached_at, detached_at, disconnect_reason,
+       transport, transport_reason, transport_changed_at
 FROM runtime_session_attachments
 WHERE core_instance_id = $1
   AND detached_at IS NULL
@@ -1690,7 +1759,8 @@ WHERE runtime_session_id = $1
   AND id = $3
   AND detached_at IS NULL
 RETURNING id, runtime_session_id, core_instance_id, attachment_kind,
-          attached_at, detached_at, disconnect_reason`
+          attached_at, detached_at, disconnect_reason,
+          transport, transport_reason, transport_changed_at`
 
 type CloseRuntimeSessionAttachmentParams struct {
 	RuntimeSessionID uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`

@@ -57,13 +57,9 @@ func (s *Service) SendProtocolMessage(ctx context.Context, userID uuid.UUID, slu
 	if params == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
-	agent, err := s.queries.GetAgentBySlug(ctx, slug)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("Agent 不存在")
-	}
+	agent, err := s.resolveProtocolAgent(ctx, userID, slug)
 	if err != nil {
-		log.Error().Err(err).Str("slug", slug).Msg("a2a.SendProtocolMessage: GetAgentBySlug")
-		return nil, httpx.Internal("查询 Agent 失败")
+		return nil, err
 	}
 	normalizeProtocolMessageContext(params)
 	if err := validateA2AMessageSendParams(params); err != nil {
@@ -100,13 +96,9 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 	if params == nil {
 		return nil, httpx.BadRequest("请求体不能为空")
 	}
-	agent, err := s.queries.GetAgentBySlug(ctx, slug)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, httpx.NotFound("Agent 不存在")
-	}
+	agent, err := s.resolveProtocolAgent(ctx, userID, slug)
 	if err != nil {
-		log.Error().Err(err).Str("slug", slug).Msg("a2a.StartProtocolMessage: GetAgentBySlug")
-		return nil, httpx.Internal("查询 Agent 失败")
+		return nil, err
 	}
 	normalizeProtocolMessageContext(params)
 	if err := validateA2AMessageSendParams(params); err != nil {
@@ -130,6 +122,27 @@ func (s *Service) StartProtocolMessage(ctx context.Context, userID uuid.UUID, sl
 		return nil, err
 	}
 	return applyProtocolContinuation(taskFromRun(resp, params.Message.ContextID, nil, nil), continuation), nil
+}
+
+func (s *Service) resolveProtocolAgent(ctx context.Context, userID uuid.UUID, slug string) (db.Agent, error) {
+	if target, fromRuntimeProxy := agentRuntimeProxyTargetFromContext(ctx); fromRuntimeProxy {
+		if target.ID == uuid.Nil || target.CreatorID != userID || target.Slug != slug || target.LifecycleStatus != "active" {
+			return db.Agent{}, httpx.Internal("Runtime A2A 代理目标身份无效")
+		}
+		// The authenticated Runtime proxy represents this exact Agent and owner.
+		// Unlike the public A2A surface, it must preserve AgentNode compatibility
+		// for a private active Agent without making that Agent publicly discoverable.
+		return target, nil
+	}
+	agentRecord, err := s.queries.GetAgentBySlug(ctx, slug)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return db.Agent{}, httpx.NotFound("Agent 不存在")
+	}
+	if err != nil {
+		log.Error().Err(err).Str("slug", slug).Msg("a2a.resolveProtocolAgent: GetAgentBySlug")
+		return db.Agent{}, httpx.Internal("查询 Agent 失败")
+	}
+	return agentRecord.Agent, nil
 }
 
 func protocolRunRequest(agentID string, input, metadata map[string]interface{}, params *A2AMessageSendParams) *runtime.RunRequest {

@@ -117,7 +117,8 @@ INSERT INTO runtime_nodes (
     runtime_contract_id, runtime_contract_digest, features,
     capacity, inflight, status, last_seen_at
 ) VALUES ($1, 'Node admin fixture', $2, $3, 'node-admin-v2', 2,
-          $4, $5, $6, 4, 1, 'active', clock_timestamp())`,
+          $4, $5, $6, 4, 1, 'active',
+          clock_timestamp() - INTERVAL '30 seconds')`,
 			fixture.nodeID, serial, strings.Repeat("b", 64),
 			runtime.RuntimeContractID, runtime.RuntimeContractDigest,
 			runtime.RuntimeRequiredFeatures()); err != nil {
@@ -131,7 +132,8 @@ INSERT INTO runtime_sessions (
     features, capacity, inflight, status, attached_core_instance_id,
     heartbeat_at
 ) VALUES ($1, $2, $3, $4, 'admin-worker', 1, $5, 'node-admin-v2',
-          2, $6, $7, $8, 2, 1, 'active', $9, clock_timestamp())`,
+          2, $6, $7, $8, 2, 1, 'active', $9,
+          clock_timestamp() - INTERVAL '30 seconds')`,
 			fixture.sessionID, fixture.nodeID, fixture.agentID,
 			fixture.credentialID, serial, runtime.RuntimeContractID,
 			runtime.RuntimeContractDigest, runtime.RuntimeRequiredFeatures(),
@@ -140,8 +142,9 @@ INSERT INTO runtime_sessions (
 		}
 		_, err := tx.Exec(context.Background(), `
 INSERT INTO runtime_session_attachments (
-    runtime_session_id, core_instance_id, attachment_kind
-) VALUES ($1, $2, 'connected')`, fixture.sessionID, fixture.coreInstanceID)
+    runtime_session_id, core_instance_id, attachment_kind,
+    transport, transport_reason
+) VALUES ($1, $2, 'connected', 'websocket', 'explicit')`, fixture.sessionID, fixture.coreInstanceID)
 		return err
 	})
 	require.NoError(t, err)

@@ -1,10 +1,14 @@
 package coreapi
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/sessions"
 	"github.com/labstack/echo/v4"
@@ -12,6 +16,7 @@ import (
 	"github.com/markbates/goth/gothic"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/externalexecution"
 )
 
 func TestConfigureGothSetsSessionStoreAndProviders(t *testing.T) {
@@ -160,13 +165,14 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 				return next(c)
 			}
 		},
+		ExternalExecutionAuthorizer: testExternalExecutionAuthorizer(t),
 	})
 
 	if services == nil {
 		t.Fatalf("Register returned nil services")
 	}
 	if services.Auth == nil || services.Admin == nil || services.AgentMarket == nil || services.Agent == nil || services.Skill == nil ||
-		services.Runtime == nil || services.RuntimeController == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil || services.ServiceBridge == nil ||
+		services.Runtime == nil || services.RuntimeController == nil || services.Webhook == nil || services.A2A == nil || services.Workflow == nil || services.ExternalExecution == nil ||
 		services.Registry == nil || services.Benchmark == nil || services.Task == nil || services.MCP == nil ||
 		services.Delivery == nil || services.UserToken == nil {
 		t.Fatalf("Register returned incomplete services: %#v", services)
@@ -187,9 +193,9 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 		"PATCH /api/v1/user-tokens/:id",
 		"DELETE /api/v1/user-tokens/:id",
 		"POST /internal/user-tokens/introspect",
-		"POST /internal/hosted/service-targets/validate",
-		"POST /internal/hosted/service-executions",
-		"GET /internal/hosted/service-executions/:external_order_id",
+		"POST /internal/external-execution-targets/validate",
+		"POST /internal/external-executions",
+		"GET /internal/external-executions/:external_request_id",
 		"GET /api/v1/agents",
 		"POST /api/v1/creator/agents",
 		"GET /api/v1/admin/summary",
@@ -227,6 +233,35 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 			t.Fatalf("route %s not registered; routes=%v", key, sortedRouteKeys(routes))
 		}
 	}
+	for _, legacy := range []string{
+		"POST /internal/hosted/service-targets/validate",
+		"POST /internal/hosted/service-executions",
+		"GET /internal/hosted/service-executions/:external_order_id",
+	} {
+		if routes[legacy] {
+			t.Fatalf("legacy Hosted bridge route %s must not be registered", legacy)
+		}
+	}
+}
+
+func testExternalExecutionAuthorizer(t *testing.T) *externalexecution.Authorizer {
+	t.Helper()
+	seed := bytes.Repeat([]byte{3}, ed25519.SeedSize)
+	publicKey := ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey)
+	authorizer, err := externalexecution.NewAuthorizer(
+		[]externalexecution.VerificationKey{{KeyID: "test", PublicKey: base64.RawStdEncoding.EncodeToString(publicKey)}},
+		"openlinker-cloud", "openlinker-core.external-execution", "openlinker-cloud", acceptingReplayStore{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return authorizer
+}
+
+type acceptingReplayStore struct{}
+
+func (acceptingReplayStore) Consume(context.Context, string, string, time.Duration) (bool, error) {
+	return true, nil
 }
 
 func resetGothGlobals(t *testing.T) {

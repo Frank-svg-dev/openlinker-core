@@ -5,11 +5,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
@@ -28,6 +30,17 @@ func TestNewManifestUsesStablePublicEntrypoints(t *testing.T) {
 	require.True(t, manifest.Runtime.MTLSRequired)
 	require.Equal(t, []string{"websocket", "long_poll"}, manifest.Runtime.Transports)
 	require.Equal(t, "auto", manifest.Runtime.DefaultTransport)
+	require.Equal(t, coreruntime.RuntimeContractDigest, manifest.Runtime.CurrentContractDigest)
+	require.Len(t, manifest.Runtime.SupportedContractDigests, 2)
+	require.Equal(t, coreruntime.RuntimeContractDigest, manifest.Runtime.SupportedContractDigests[0])
+	require.NotContains(t, manifest.Runtime.SupportedContractDigests, "857598f6e8f07d87d1f7240e34d98f0911bf23e5204a865d282a6bcb7f52865f")
+	_, err := time.Parse(time.RFC3339, manifest.Runtime.PreviousSupportedUntil)
+	require.NoError(t, err)
+	require.Equal(t, ManifestRuntimeTransportPolicy{
+		Version: 1, HeartbeatIntervalSeconds: 20, SessionStaleAfterSeconds: 45,
+		RetryMinimumMilliseconds: 250, RetryMaximumMilliseconds: 15000,
+		WebSocketProbeIntervalMS: 15000, WebSocketProbeTimeoutMS: 10000,
+	}, manifest.Runtime.TransportPolicy)
 	require.Equal(t, "https://api.openlinker.test/skill/publish-agent", manifest.Docs.PublishAgent)
 	require.Equal(t, "https://api.openlinker.test/skill/consume-agent", manifest.Docs.ConsumeAgent)
 	require.Equal(t, "https://api.openlinker.test/api/v1/agents/{slug}/agent-card.json", manifest.Docs.AgentCard)
@@ -68,6 +81,7 @@ func TestNewManifestFallsBackToLocalPublicEntrypoints(t *testing.T) {
 	require.True(t, manifest.Runtime.MTLSRequired)
 	require.Equal(t, []string{"websocket", "long_poll"}, manifest.Runtime.Transports)
 	require.Equal(t, "auto", manifest.Runtime.DefaultTransport)
+	require.Equal(t, int64(45), manifest.Runtime.TransportPolicy.SessionStaleAfterSeconds)
 	require.Equal(t, "http://localhost:8080/api/v1/a2a/agents/{slug}", manifest.Protocols.A2A)
 	require.Equal(t, "http://localhost:3000/connect", manifest.Docs.Connect)
 }
@@ -125,6 +139,8 @@ func TestNewManifestPublishesNoRuntimeCredentialsOrEndpointPath(t *testing.T) {
 	require.NotContains(t, serialized, "never-publish")
 	require.NotContains(t, serialized, "private-key-id")
 	require.NotContains(t, serialized, "/api/v1/agent-runtime")
+	require.NotContains(t, serialized, coreruntime.RuntimeContractDigest+"/")
+	require.NotContains(t, manifest.BaseURLs.Runtime, "/v2")
 }
 
 func TestServeOpenLinkerManifest(t *testing.T) {

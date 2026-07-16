@@ -23,17 +23,16 @@ WITH active_runtime_agents AS (
     JOIN agent_tokens t
       ON t.id = s.credential_id
      AND t.agent_id = s.agent_id
-    JOIN runtime_schema_contracts contract
-      ON contract.runtime_contract_id = s.runtime_contract_id
-     AND contract.runtime_contract_digest = s.runtime_contract_digest
-     AND contract.is_current
+    JOIN runtime_wire_contracts wire
+      ON wire.runtime_contract_id = s.runtime_contract_id
+     AND wire.runtime_contract_digest = s.runtime_contract_digest
+     AND wire.support_tier IN ('current', 'previous')
     WHERE s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND s.heartbeat_at >= clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence',
           'assignment_confirm',
@@ -54,7 +53,7 @@ WITH active_runtime_agents AS (
       AND n.features @> s.features
       AND s.features @> n.features
       AND n.last_seen_at IS NOT NULL
-      AND n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND n.last_seen_at >= clock_timestamp() - ($7::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -205,12 +204,13 @@ END ASC,
 LIMIT $3 OFFSET $4`
 
 type ListPublicAgentsParams struct {
-	Tags         []string `db:"tags" json:"tags"`
-	Keyword      string   `db:"keyword" json:"keyword"`
-	Limit        int32    `db:"limit" json:"limit"`
-	Offset       int32    `db:"offset" json:"offset"`
-	CallableOnly bool     `db:"callable_only" json:"callable_only"`
-	SkillIDs     []string `db:"skill_ids" json:"skill_ids"`
+	Tags                []string `db:"tags" json:"tags"`
+	Keyword             string   `db:"keyword" json:"keyword"`
+	Limit               int32    `db:"limit" json:"limit"`
+	Offset              int32    `db:"offset" json:"offset"`
+	CallableOnly        bool     `db:"callable_only" json:"callable_only"`
+	SkillIDs            []string `db:"skill_ids" json:"skill_ids"`
+	RuntimeStaleAfterMs int64    `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
 }
 
 type ListPublicAgentsRow struct {
@@ -239,6 +239,7 @@ func (q *Queries) ListPublicAgents(ctx context.Context, arg ListPublicAgentsPara
 		arg.Offset,
 		arg.CallableOnly,
 		arg.SkillIDs,
+		arg.RuntimeStaleAfterMs,
 	)
 	if err != nil {
 		return nil, err
@@ -302,17 +303,16 @@ WITH active_runtime_agents AS (
     JOIN agent_tokens t
       ON t.id = s.credential_id
      AND t.agent_id = s.agent_id
-    JOIN runtime_schema_contracts contract
-      ON contract.runtime_contract_id = s.runtime_contract_id
-     AND contract.runtime_contract_digest = s.runtime_contract_digest
-     AND contract.is_current
+    JOIN runtime_wire_contracts wire
+      ON wire.runtime_contract_id = s.runtime_contract_id
+     AND wire.runtime_contract_digest = s.runtime_contract_digest
+     AND wire.support_tier IN ('current', 'previous')
     WHERE s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND s.heartbeat_at >= clock_timestamp() - ($5::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
-      AND s.runtime_contract_digest = '3f84df167bbe211efdc6362ad5ec876aeedf881cbfb9677606982af63c7423e9'
       AND s.features @> ARRAY[
           'lease_fence',
           'assignment_confirm',
@@ -333,7 +333,7 @@ WITH active_runtime_agents AS (
       AND n.features @> s.features
       AND s.features @> n.features
       AND n.last_seen_at IS NOT NULL
-      AND n.last_seen_at >= clock_timestamp() - INTERVAL '45 seconds'
+      AND n.last_seen_at >= clock_timestamp() - ($5::bigint * INTERVAL '1 millisecond')
       AND t.status = 'active_runtime'
       AND t.revoked_at IS NULL
       AND t.scopes @> ARRAY['agent:pull']::text[]
@@ -403,14 +403,15 @@ WHERE a.visibility = 'public'
   )`
 
 type CountPublicAgentsParams struct {
-	Tags         []string `db:"tags" json:"tags"`
-	Keyword      string   `db:"keyword" json:"keyword"`
-	CallableOnly bool     `db:"callable_only" json:"callable_only"`
-	SkillIDs     []string `db:"skill_ids" json:"skill_ids"`
+	Tags                []string `db:"tags" json:"tags"`
+	Keyword             string   `db:"keyword" json:"keyword"`
+	CallableOnly        bool     `db:"callable_only" json:"callable_only"`
+	SkillIDs            []string `db:"skill_ids" json:"skill_ids"`
+	RuntimeStaleAfterMs int64    `db:"runtime_stale_after_ms" json:"runtime_stale_after_ms"`
 }
 
 func (q *Queries) CountPublicAgents(ctx context.Context, arg CountPublicAgentsParams) (int32, error) {
-	row := q.db.QueryRow(ctx, countPublicAgents, arg.Tags, arg.Keyword, arg.CallableOnly, arg.SkillIDs)
+	row := q.db.QueryRow(ctx, countPublicAgents, arg.Tags, arg.Keyword, arg.CallableOnly, arg.SkillIDs, arg.RuntimeStaleAfterMs)
 	var total int32
 	err := row.Scan(&total)
 	return total, err

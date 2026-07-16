@@ -106,6 +106,7 @@ type RuntimeAttemptIdentity struct {
 // EventStore never accepts a token or transport assertion in place of it.
 type RuntimeEventPrincipal struct {
 	AgentID                         uuid.UUID
+	RuntimeContractDigest           string
 	CredentialID                    *uuid.UUID
 	NodeID                          *uuid.UUID
 	WorkerID                        *string
@@ -731,7 +732,8 @@ func runtimeEventPrincipalShapeValid(principal RuntimeEventPrincipal) bool {
 	none := principal.CredentialID == nil && principal.NodeID == nil && principal.WorkerID == nil &&
 		principal.RuntimeSessionID == nil && principal.CoreInstanceID == nil &&
 		principal.AttachmentID == nil &&
-		principal.DeviceCertificateSerial == nil && principal.DevicePublicKeyThumbprintSHA256 == nil
+		principal.DeviceCertificateSerial == nil && principal.DevicePublicKeyThumbprintSHA256 == nil &&
+		principal.RuntimeContractDigest == ""
 	if none {
 		return true
 	}
@@ -740,6 +742,7 @@ func runtimeEventPrincipalShapeValid(principal RuntimeEventPrincipal) bool {
 		principal.RuntimeSessionID != nil && *principal.RuntimeSessionID != uuid.Nil &&
 		principal.CoreInstanceID != nil && *principal.CoreInstanceID != uuid.Nil &&
 		principal.AttachmentID != nil && *principal.AttachmentID != uuid.Nil &&
+		runtimeWireContractSupported(principal.RuntimeContractDigest) &&
 		principal.WorkerID != nil && *principal.WorkerID != "" && utf8.ValidString(*principal.WorkerID) &&
 		utf8.RuneCountInString(*principal.WorkerID) <= 200 &&
 		principal.DeviceCertificateSerial != nil && validCertificateSerial(*principal.DeviceCertificateSerial) &&

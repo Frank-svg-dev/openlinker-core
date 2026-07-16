@@ -17,10 +17,15 @@ func TestRuntimeControllerPresenceFollowsAttachHeartbeatAndClose(t *testing.T) {
 	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		Presence: store, CoreInstanceID: coreID,
 	})
+	transportReason := string(RuntimeTransportReasonWebSocketUnavailable)
+	changedAt := time.Now().UTC()
 	state := RuntimeSessionState{Session: db.RuntimeSession{
 		RuntimeSessionID: uuid.New(), NodeID: uuid.New(), AgentID: uuid.New(),
 		WorkerID: "worker-1", Capacity: 4, Inflight: 1, NodeVersion: "2.0.0",
 		Status: "active", AttachedCoreInstanceID: &coreID,
+	}, Attachment: &db.RuntimeSessionAttachment{
+		Transport: string(RuntimeTransportLongPoll), TransportReason: &transportReason,
+		TransportChangedAt: changedAt,
 	}}
 
 	controller.refreshPresence(context.Background(), state, "pull:session")
@@ -33,6 +38,9 @@ func TestRuntimeControllerPresenceFollowsAttachHeartbeatAndClose(t *testing.T) {
 	require.Equal(t, runtimePresenceTTL, store.ttls[0])
 	require.Equal(t, int32(2), store.refreshes[1].Inflight)
 	require.Equal(t, "pull:session", store.removals[0].ConnectionID)
+	require.Equal(t, RuntimeTransportLongPoll, store.refreshes[0].Transport)
+	require.Equal(t, RuntimeTransportReasonWebSocketUnavailable, store.refreshes[0].TransportReason)
+	require.Equal(t, changedAt, store.refreshes[0].TransportChangedAt)
 
 	otherCore := uuid.New()
 	state.Session.AttachedCoreInstanceID = &otherCore

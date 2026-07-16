@@ -1,83 +1,17 @@
-package servicebridge
+package externalexecution
 
 import (
-	"regexp"
 	"strings"
-
-	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
 )
 
-var hostedFieldKeyPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]{0,63}$`)
-
-// controlledFieldsToJSONSchema accepts the marketplace's controlled field
-// array and turns it into the small JSON-Schema subset needed for capability
-// compatibility checks. Cloud remains responsible for full product-form
-// validation.
-func controlledFieldsToJSONSchema(fields []interface{}) (map[string]interface{}, error) {
-	properties := map[string]interface{}{}
-	required := make([]interface{}, 0)
-	for _, raw := range fields {
-		field, ok := raw.(map[string]interface{})
-		if !ok {
-			return nil, httpx.BadRequest("input_schema 字段必须是 JSON object")
-		}
-		key, _ := field["key"].(string)
-		key = strings.TrimSpace(key)
-		if !hostedFieldKeyPattern.MatchString(key) {
-			return nil, httpx.BadRequest("input_schema 字段 key 无效")
-		}
-		if _, exists := properties[key]; exists {
-			return nil, httpx.BadRequest("input_schema 字段 key 不能重复")
-		}
-		fieldType, _ := field["type"].(string)
-		fieldType = strings.TrimSpace(fieldType)
-		var jsonType string
-		switch fieldType {
-		case "text", "long_text":
-			jsonType = "string"
-		case "url":
-			jsonType = "string"
-		case "select":
-			jsonType = "string"
-		case "number":
-			jsonType = "number"
-		case "boolean":
-			jsonType = "boolean"
-		default:
-			return nil, httpx.BadRequest("input_schema 包含不支持的字段类型")
-		}
-		property := map[string]interface{}{"type": jsonType}
-		if fieldType == "url" {
-			property["format"] = "uri"
-		}
-		if fieldType == "select" {
-			options, ok := schemaStringEnum(field["options"])
-			if !ok || len(options) == 0 {
-				return nil, httpx.BadRequest("select 字段必须提供有效 options")
-			}
-			property["enum"] = stringSetValues(options)
-		}
-		properties[key] = property
-		if isRequired, _ := field["required"].(bool); isRequired {
-			required = append(required, key)
-		}
-	}
-	return map[string]interface{}{
-		"type":       "object",
-		"properties": properties,
-		"required":   required,
-	}, nil
-}
-
-// hostedInputSchemaCompatible proves compatibility for the controlled object
-// subset used by service listings. It fails closed when an Agent declares a
-// shape outside that subset instead of pretending a potentially rejected order
-// is executable.
-func hostedInputSchemaCompatible(listing, capability map[string]interface{}) bool {
-	if !schemaAllowsType(listing["type"], "object") || !schemaAllowsType(capability["type"], "object") {
+// externalInputSchemaCompatible proves that an external caller's generic
+// object schema is accepted by the target capability. It fails closed for
+// constraints this bounded compatibility checker cannot prove.
+func externalInputSchemaCompatible(external, capability map[string]interface{}) bool {
+	if !schemaAllowsType(external["type"], "object") || !schemaAllowsType(capability["type"], "object") {
 		return false
 	}
-	listingProps, ok := schemaProperties(listing)
+	externalProps, ok := schemaProperties(external)
 	if !ok {
 		return false
 	}
@@ -85,12 +19,12 @@ func hostedInputSchemaCompatible(listing, capability map[string]interface{}) boo
 	if !ok {
 		return false
 	}
-	listingRequired := schemaRequiredSet(listing)
+	externalRequired := schemaRequiredSet(external)
 	for key := range schemaRequiredSet(capability) {
-		if _, exists := listingProps[key]; !exists {
+		if _, exists := externalProps[key]; !exists {
 			return false
 		}
-		if _, required := listingRequired[key]; !required {
+		if _, required := externalRequired[key]; !required {
 			return false
 		}
 	}
@@ -105,7 +39,7 @@ func hostedInputSchemaCompatible(listing, capability map[string]interface{}) boo
 	if schemaHasUnsupportedConstraints(capability, "minProperties", "maxProperties", "propertyNames", "dependentRequired", "dependentSchemas", "allOf", "anyOf", "oneOf", "not", "if", "then", "else") {
 		return false
 	}
-	for key, listingProperty := range listingProps {
+	for key, externalProperty := range externalProps {
 		capabilityProperty, exists := capabilityProps[key]
 		if !exists {
 			if !additionalAllowed {
@@ -113,33 +47,33 @@ func hostedInputSchemaCompatible(listing, capability map[string]interface{}) boo
 			}
 			continue
 		}
-		listingSchema, listingOK := listingProperty.(map[string]interface{})
+		externalSchema, externalOK := externalProperty.(map[string]interface{})
 		capabilitySchema, capabilityOK := capabilityProperty.(map[string]interface{})
-		if !listingOK || !capabilityOK || !schemaTypeSubset(listingSchema["type"], capabilitySchema["type"]) || !schemaConstraintsCompatible(listingSchema, capabilitySchema) {
+		if !externalOK || !capabilityOK || !schemaTypeSubset(externalSchema["type"], capabilitySchema["type"]) || !schemaConstraintsCompatible(externalSchema, capabilitySchema) {
 			return false
 		}
 	}
 	return true
 }
 
-func schemaConstraintsCompatible(listing, capability map[string]interface{}) bool {
+func schemaConstraintsCompatible(external, capability map[string]interface{}) bool {
 	if schemaHasUnsupportedConstraints(capability, "const", "pattern", "minLength", "maxLength", "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf", "allOf", "anyOf", "oneOf", "not", "if", "then", "else") {
 		return false
 	}
 	if capabilityFormat, constrained := capability["format"]; constrained {
-		listingFormat, ok := listing["format"].(string)
+		externalFormat, ok := external["format"].(string)
 		expectedFormat, expectedOK := capabilityFormat.(string)
-		if !ok || !expectedOK || listingFormat != expectedFormat {
+		if !ok || !expectedOK || externalFormat != expectedFormat {
 			return false
 		}
 	}
 	if _, constrained := capability["enum"]; constrained {
-		listingEnum, listingOK := schemaStringEnum(listing["enum"])
+		externalEnum, externalOK := schemaStringEnum(external["enum"])
 		capabilityEnum, capabilityOK := schemaStringEnum(capability["enum"])
-		if !listingOK || !capabilityOK || len(listingEnum) == 0 || len(capabilityEnum) == 0 {
+		if !externalOK || !capabilityOK || len(externalEnum) == 0 || len(capabilityEnum) == 0 {
 			return false
 		}
-		for value := range listingEnum {
+		for value := range externalEnum {
 			if _, allowed := capabilityEnum[value]; !allowed {
 				return false
 			}
@@ -179,14 +113,6 @@ func schemaStringEnum(raw interface{}) (map[string]struct{}, bool) {
 		return nil, false
 	}
 	return values, true
-}
-
-func stringSetValues(values map[string]struct{}) []interface{} {
-	result := make([]interface{}, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-	return result
 }
 
 func schemaProperties(schema map[string]interface{}) (map[string]interface{}, bool) {

@@ -2,6 +2,7 @@ package a2a
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -9,6 +10,7 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 const runtimeWorkbenchRecentRunLimit = 10
@@ -26,6 +28,10 @@ type runtimeWorkbenchSnapshot struct {
 	retryWaitRunCount     int32
 	offeredRunCount       int32
 	executingRunCount     int32
+	websocketCount        int32
+	longPollCount         int32
+	transportChangedAt    *time.Time
+	latestLongPollReason  *string
 	lastSessionActivityAt *time.Time
 	lastAssignmentAt      *time.Time
 	lastResultAt          *time.Time
@@ -55,12 +61,20 @@ func (s *Service) GetRuntimeWorkbench(
 	}
 
 	connectionStatus, availability, callable := runtimeWorkbenchState(agent, snapshot)
+	currentTransport := runtimeWorkbenchCurrentTransport(snapshot)
 	runtimeState := RuntimeWorkbenchRuntime{
 		RuntimeContractID:     snapshot.runtimeContractID,
 		RuntimeContractDigest: snapshot.runtimeContractDigest,
 		TransportPolicy:       "ws_primary_long_poll_fallback",
 		PrimaryTransport:      "websocket",
 		FallbackTransport:     "long_poll",
+		CurrentTransport:      currentTransport,
+		TransportCounts: map[string]int32{
+			string(coreruntime.RuntimeTransportWebSocket): snapshot.websocketCount,
+			string(coreruntime.RuntimeTransportLongPoll):  snapshot.longPollCount,
+		},
+		TransportChangedAt:    formatOptionalRuntimeTime(snapshot.transportChangedAt),
+		FallbackReason:        runtimeWorkbenchFallbackReason(currentTransport, snapshot.latestLongPollReason),
 		ConnectionStatus:      connectionStatus,
 		ActiveNodeCount:       snapshot.activeNodeCount,
 		ActiveSessionCount:    snapshot.activeSessionCount,
@@ -107,6 +121,8 @@ WITH current_contract AS (
 ), live_sessions AS (
     SELECT s.runtime_session_id, s.node_id, s.agent_id, s.status,
            s.capacity, s.inflight, s.heartbeat_at,
+           attachment.transport, attachment.transport_reason,
+           attachment.transport_changed_at,
            n.status AS node_status, n.capacity AS node_capacity,
            n.inflight AS node_inflight
     FROM runtime_sessions s
@@ -114,14 +130,19 @@ WITH current_contract AS (
     JOIN agent_tokens token
       ON token.id = s.credential_id
      AND token.agent_id = s.agent_id
-    JOIN current_contract contract
-      ON contract.runtime_contract_id = s.runtime_contract_id
-     AND contract.runtime_contract_digest = s.runtime_contract_digest
+    JOIN runtime_wire_contracts wire
+      ON wire.runtime_contract_id = s.runtime_contract_id
+     AND wire.runtime_contract_digest = s.runtime_contract_digest
+     AND wire.support_tier IN ('current', 'previous')
+    JOIN runtime_session_attachments attachment
+      ON attachment.runtime_session_id = s.runtime_session_id
+     AND attachment.core_instance_id = s.attached_core_instance_id
+     AND attachment.detached_at IS NULL
     WHERE s.agent_id = $1
       AND s.status IN ('active', 'draining')
       AND s.attached_core_instance_id IS NOT NULL
       AND s.disconnected_at IS NULL
-      AND s.heartbeat_at >= clock_timestamp() - INTERVAL '15 seconds'
+      AND s.heartbeat_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND s.protocol_version = 2
       AND s.runtime_contract_id = 'openlinker.runtime.v2'
       AND n.status IN ('active', 'draining')
@@ -133,18 +154,11 @@ WITH current_contract AS (
       AND n.node_version = s.node_version
       AND n.features @> s.features
       AND s.features @> n.features
-      AND n.last_seen_at >= clock_timestamp() - INTERVAL '15 seconds'
+      AND n.last_seen_at >= clock_timestamp() - ($2::bigint * INTERVAL '1 millisecond')
       AND token.status = 'active_runtime'
       AND token.revoked_at IS NULL
       AND token.scopes @> ARRAY['agent:pull']::text[]
       AND (token.expires_at IS NULL OR token.expires_at > clock_timestamp())
-      AND EXISTS (
-          SELECT 1
-          FROM runtime_session_attachments attachment
-          WHERE attachment.runtime_session_id = s.runtime_session_id
-            AND attachment.core_instance_id = s.attached_core_instance_id
-            AND attachment.detached_at IS NULL
-      )
 ), live_nodes AS (
     SELECT node_id, MAX(node_capacity)::int AS capacity,
            MAX(node_inflight)::int AS inflight
@@ -169,6 +183,14 @@ SELECT contract.runtime_contract_id,
         WHERE agent_id = $1 AND status = 'running' AND dispatch_state = 'offered'),
        (SELECT COUNT(*)::int FROM runs
         WHERE agent_id = $1 AND status = 'running' AND dispatch_state = 'executing'),
+       (SELECT COUNT(*)::int FROM live_sessions WHERE transport = 'websocket'),
+       (SELECT COUNT(*)::int FROM live_sessions WHERE transport = 'long_poll'),
+       (SELECT MAX(transport_changed_at) FROM live_sessions),
+       (SELECT transport_reason
+        FROM live_sessions
+        WHERE transport = 'long_poll'
+        ORDER BY transport_changed_at DESC, runtime_session_id DESC
+        LIMIT 1),
        (SELECT MAX(heartbeat_at) FROM live_sessions),
        (SELECT MAX(attempt.accepted_at)
         FROM run_attempts attempt WHERE attempt.agent_id = $1),
@@ -177,7 +199,12 @@ SELECT contract.runtime_contract_id,
 FROM current_contract contract`
 
 	var snapshot runtimeWorkbenchSnapshot
-	err := s.pool.QueryRow(ctx, statement, agentID).Scan(
+	err := s.pool.QueryRow(
+		ctx,
+		statement,
+		agentID,
+		coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter.Milliseconds(),
+	).Scan(
 		&snapshot.runtimeContractID,
 		&snapshot.runtimeContractDigest,
 		&snapshot.activeNodeCount,
@@ -190,6 +217,10 @@ FROM current_contract contract`
 		&snapshot.retryWaitRunCount,
 		&snapshot.offeredRunCount,
 		&snapshot.executingRunCount,
+		&snapshot.websocketCount,
+		&snapshot.longPollCount,
+		&snapshot.transportChangedAt,
+		&snapshot.latestLongPollReason,
 		&snapshot.lastSessionActivityAt,
 		&snapshot.lastAssignmentAt,
 		&snapshot.lastResultAt,
@@ -320,11 +351,14 @@ func runtimeWorkbenchDiagnostics(
 	}
 	if snapshot.activeSessionCount == 0 {
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
-			Code:            "runtime_session_offline",
-			Severity:        "warning",
-			Summary:         "Runtime Worker 还没连上。启动 Runtime Worker 后会优先使用 WebSocket；网络不合适时会自动切到长轮询。",
-			TechnicalDetail: "No live current-contract Runtime Session in the 15-second database-clock window; transport_policy=ws_primary_long_poll_fallback.",
-			NextAction:      "start_runtime",
+			Code:     "runtime_session_offline",
+			Severity: "warning",
+			Summary:  "Runtime Worker 还没连上。启动 Runtime Worker 后会优先使用 WebSocket；网络不合适时会自动切到长轮询。",
+			TechnicalDetail: fmt.Sprintf(
+				"No live supported-contract Runtime Session in the %d-second database-clock window; transport_policy=ws_primary_long_poll_fallback.",
+				int(coreruntime.CurrentRuntimeLivenessPolicy().SessionStaleAfter/time.Second),
+			),
+			NextAction: "start_runtime",
 		})
 	} else if snapshot.readySessionCount == 0 {
 		diagnostics = append(diagnostics, RuntimeWorkbenchDiagnostic{
@@ -374,11 +408,38 @@ func runtimeWorkbenchDiagnostics(
 			Code:            "runtime_ready",
 			Severity:        "success",
 			Summary:         "Runtime Worker 已连接，可以接收运行。默认使用 WebSocket，网络受限时由长轮询接续。",
-			TechnicalDetail: "A current-contract Runtime Session is ready; both transports share mTLS, assignment ACK, lease fencing, resume, Event/Result ACK, and persistent spool semantics.",
+			TechnicalDetail: "A supported-contract Runtime Session is ready; both transports share mTLS, assignment ACK, lease fencing, resume, Event/Result ACK, and persistent spool semantics.",
 			NextAction:      "none",
 		})
 	}
 	return diagnostics
+}
+
+func runtimeWorkbenchCurrentTransport(snapshot runtimeWorkbenchSnapshot) string {
+	switch {
+	case snapshot.websocketCount > 0 && snapshot.longPollCount > 0:
+		return "mixed"
+	case snapshot.websocketCount > 0:
+		return string(coreruntime.RuntimeTransportWebSocket)
+	case snapshot.longPollCount > 0:
+		return string(coreruntime.RuntimeTransportLongPoll)
+	default:
+		return string(coreruntime.RuntimeTransportUnknown)
+	}
+}
+
+func runtimeWorkbenchFallbackReason(currentTransport string, reason *string) *string {
+	if reason == nil || (currentTransport != string(coreruntime.RuntimeTransportLongPoll) && currentTransport != "mixed") {
+		return nil
+	}
+	switch coreruntime.RuntimeTransportReason(*reason) {
+	case coreruntime.RuntimeTransportReasonWebSocketUnavailable,
+		coreruntime.RuntimeTransportReasonPolicyForced:
+		value := *reason
+		return &value
+	default:
+		return nil
+	}
 }
 
 func formatOptionalRuntimeTime(value *time.Time) *string {

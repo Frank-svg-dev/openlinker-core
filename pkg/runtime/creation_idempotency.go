@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/rs/zerolog/log"
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/endpointurl"
@@ -25,6 +26,55 @@ type normalizedRunCreation struct {
 	agentID                uuid.UUID
 	idempotencyKeyHash     []byte
 	idempotencyFingerprint []byte
+}
+
+// LookupRunByCreationRequest performs the read-only half of Run creation idempotency.
+// It deliberately resolves the immutable user/key/fingerprint identity before
+// any mutable Agent eligibility lookup, so retiring an Agent cannot invalidate
+// a committed Run. A missing identity is reported without creating a Run or
+// consulting the Agent registry.
+func (s *Service) LookupRunByCreationRequest(
+	ctx context.Context,
+	userID uuid.UUID,
+	req *RunRequest,
+	source string,
+) (*RunResponse, bool, error) {
+	if source == "" {
+		source = "web"
+	}
+	switch source {
+	case "web", "mcp", "api":
+	default:
+		return nil, false, httpx.BadRequest("source 取值非法")
+	}
+
+	normalized, err := s.normalizeRunCreation(req, source, createRunOptions{})
+	if err != nil {
+		return nil, false, err
+	}
+	runID, found, err := s.findExistingRunByIdentity(
+		ctx,
+		userID,
+		normalized.idempotencyKeyHash,
+		normalized.idempotencyFingerprint,
+	)
+	if err != nil {
+		var httpErr *httpx.HTTPError
+		if errors.As(err, &httpErr) {
+			return nil, false, err
+		}
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("runtime.LookupRunByCreationRequest: idempotency lookup")
+		return nil, false, httpx.Internal("查询幂等调用记录失败")
+	}
+	if !found {
+		return nil, false, nil
+	}
+
+	resp, err := s.idempotencyReplayResponse(ctx, userID, runID)
+	if err != nil {
+		return nil, true, err
+	}
+	return resp, true, nil
 }
 
 func (s *Service) findExistingRunByIdentity(

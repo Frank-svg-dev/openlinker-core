@@ -22,14 +22,14 @@ import (
 	"github.com/OpenLinker-ai/openlinker-core/pkg/auth"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/cutover"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
+	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/delivery"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/discovery"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/externalexecution"
 	corellm "github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcp"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/registry"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
-	"github.com/OpenLinker-ai/openlinker-core/pkg/servicebridge"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/skill"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/task"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/userdash"
@@ -39,11 +39,12 @@ import (
 )
 
 type Options struct {
-	LLMClient        corellm.Client
-	AdminMiddleware  echo.MiddlewareFunc
-	UserProvisioner  auth.UserProvisioner
-	CoreInstanceID   uuid.UUID
-	RuntimeSignalBus runtime.RuntimeSignalBus
+	LLMClient                   corellm.Client
+	AdminMiddleware             echo.MiddlewareFunc
+	UserProvisioner             auth.UserProvisioner
+	CoreInstanceID              uuid.UUID
+	RuntimeSignalBus            runtime.RuntimeSignalBus
+	ExternalExecutionAuthorizer *externalexecution.Authorizer
 }
 
 type Services struct {
@@ -59,7 +60,7 @@ type Services struct {
 	Webhook           *webhook.Service
 	A2A               *a2a.Service
 	Workflow          *workflow.Service
-	ServiceBridge     *servicebridge.Service
+	ExternalExecution *externalexecution.Service
 	Registry          *registry.Service
 	Benchmark         *skill.BenchmarkService
 	Task              *task.Service
@@ -173,13 +174,24 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
+	a2aHandler.RegisterAgentRuntimeProxy(
+		api,
+		a2a.AgentRuntimeProxyMiddleware(runtimeHandler.RuntimeController(), a2a.NewSQLAgentRuntimeIdentityResolver(pool)),
+	)
 	configureA2AGRPCAgentCard(cfg, &Services{AgentMarket: agentMarketSvc})
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
-	serviceBridgeSvc := servicebridge.NewService(agentSvc, runtimeSvc, workflowSvc, servicebridge.NewSQLStore(pool))
-	servicebridge.NewHandler(serviceBridgeSvc, cfg.InternalToken).Register(e)
+	externalExecutionSvc := externalexecution.NewService(
+		agentSvc,
+		runtimeSvc,
+		externalWorkflowService{inner: workflowSvc},
+		externalexecution.NewSQLStore(pool),
+	)
+	if opts.ExternalExecutionAuthorizer != nil {
+		externalexecution.NewHandler(externalExecutionSvc, opts.ExternalExecutionAuthorizer).Register(e)
+	}
 	if cfg.WorkflowRunWorkerEnabled {
 		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
 			Interval:   time.Duration(cfg.WorkflowRunWorkerIntervalSeconds) * time.Second,
@@ -232,7 +244,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		Webhook:           webhookSvc,
 		A2A:               a2aSvc,
 		Workflow:          workflowSvc,
-		ServiceBridge:     serviceBridgeSvc,
+		ExternalExecution: externalExecutionSvc,
 		Registry:          registrySvc,
 		Benchmark:         benchmarkSvc,
 		Task:              taskSvc,
@@ -241,6 +253,50 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		UserToken:         userTokenSvc,
 		UserStatus:        userStatusChecker,
 	}
+}
+
+type externalWorkflowService struct {
+	inner *workflow.Service
+}
+
+func (s externalWorkflowService) ValidateExternalExecutionTarget(
+	ctx context.Context,
+	targetOwnerID uuid.UUID,
+	workflowID uuid.UUID,
+) (*externalexecution.WorkflowTargetValidation, error) {
+	result, err := s.inner.ValidateExternalExecutionTarget(ctx, targetOwnerID, workflowID)
+	if err != nil {
+		return nil, err
+	}
+	return &externalexecution.WorkflowTargetValidation{
+		TargetName: result.TargetName, Executable: result.Executable,
+		UnavailableReason: result.UnavailableReason, ContractHash: result.ContractHash,
+	}, nil
+}
+
+func (s externalWorkflowService) StartExternalWorkflowRun(
+	ctx context.Context,
+	callerServiceID string,
+	targetOwnerID, actorUserID, workflowID, externalRequestID uuid.UUID,
+	input map[string]interface{},
+) (*workflow.WorkflowRunResponse, error) {
+	return s.inner.StartExternalExecutionWorkflowRun(ctx, callerServiceID, targetOwnerID, actorUserID, workflowID, externalRequestID, input)
+}
+
+func (s externalWorkflowService) LookupExternalExecutionWorkflowRun(
+	ctx context.Context,
+	callerServiceID string,
+	actorUserID, workflowID, externalRequestID uuid.UUID,
+	input map[string]interface{},
+) (*workflow.WorkflowRunResponse, bool, error) {
+	return s.inner.LookupExternalExecutionWorkflowRun(ctx, callerServiceID, actorUserID, workflowID, externalRequestID, input)
+}
+
+func (s externalWorkflowService) GetWorkflowRun(
+	ctx context.Context,
+	actorUserID, workflowRunID uuid.UUID,
+) (*workflow.WorkflowRunResponse, error) {
+	return s.inner.GetWorkflowRun(ctx, actorUserID, workflowRunID)
 }
 
 func configureRuntime(

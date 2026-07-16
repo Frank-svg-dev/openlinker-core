@@ -1,8 +1,11 @@
-package servicebridge
+package externalexecution
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
-func TestHostedInputSchemaCompatible(t *testing.T) {
+func TestExternalInputSchemaCompatible(t *testing.T) {
 	capability := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -20,7 +23,7 @@ func TestHostedInputSchemaCompatible(t *testing.T) {
 		},
 		"required": []interface{}{"topic"},
 	}
-	if !hostedInputSchemaCompatible(compatible, capability) {
+	if !externalInputSchemaCompatible(compatible, capability) {
 		t.Fatalf("expected controlled schema to be compatible")
 	}
 
@@ -28,7 +31,7 @@ func TestHostedInputSchemaCompatible(t *testing.T) {
 		"type":       "object",
 		"properties": map[string]interface{}{"topic": map[string]interface{}{"type": "string"}},
 	}
-	if hostedInputSchemaCompatible(missingRequired, capability) {
+	if externalInputSchemaCompatible(missingRequired, capability) {
 		t.Fatalf("Agent-required field must also be required by the listing")
 	}
 
@@ -37,35 +40,19 @@ func TestHostedInputSchemaCompatible(t *testing.T) {
 		"properties": map[string]interface{}{"topic": map[string]interface{}{"type": "number"}},
 		"required":   []interface{}{"topic"},
 	}
-	if hostedInputSchemaCompatible(wrongType, capability) {
+	if externalInputSchemaCompatible(wrongType, capability) {
 		t.Fatalf("incompatible field type should be rejected")
 	}
 }
 
-func TestControlledFieldsToJSONSchema(t *testing.T) {
-	schema, err := controlledFieldsToJSONSchema([]interface{}{
-		map[string]interface{}{"key": "topic", "type": "text", "required": true},
-		map[string]interface{}{"key": "count", "type": "number"},
-		map[string]interface{}{"key": "channel", "type": "select", "options": []interface{}{"email", "web"}},
-		map[string]interface{}{"key": "source", "type": "url"},
-	})
-	if err != nil || !schemaAllowsType(schema["type"], "object") {
-		t.Fatalf("controlledFieldsToJSONSchema() = %#v, %v", schema, err)
-	}
-	if _, ok := schemaRequiredSet(schema)["topic"]; !ok {
-		t.Fatalf("required field missing from schema: %#v", schema)
-	}
-	properties, _ := schemaProperties(schema)
-	channel := properties["channel"].(map[string]interface{})
-	if enum, ok := schemaStringEnum(channel["enum"]); !ok || len(enum) != 2 {
-		t.Fatalf("select options were not preserved as enum: %#v", channel)
-	}
-	if source := properties["source"].(map[string]interface{}); source["format"] != "uri" {
-		t.Fatalf("url field must preserve its uri guarantee: %#v", source)
+func TestNormalizeExternalInputSchemaRejectsHostedControlArrays(t *testing.T) {
+	_, err := normalizeExternalInputSchema(json.RawMessage(`[{"key":"topic","type":"text"}]`))
+	if err == nil {
+		t.Fatal("Core External Execution must accept only generic JSON Schema objects")
 	}
 }
 
-func TestHostedInputSchemaCompatibleRejectsUnprovenConstraints(t *testing.T) {
+func TestExternalInputSchemaCompatibleRejectsUnprovenConstraints(t *testing.T) {
 	listing := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -81,7 +68,7 @@ func TestHostedInputSchemaCompatibleRejectsUnprovenConstraints(t *testing.T) {
 		},
 		"additionalProperties": false,
 	}
-	if !hostedInputSchemaCompatible(listing, compatible) {
+	if !externalInputSchemaCompatible(listing, compatible) {
 		t.Fatal("listing enum subset and matching format should be compatible")
 	}
 
@@ -93,7 +80,7 @@ func TestHostedInputSchemaCompatibleRejectsUnprovenConstraints(t *testing.T) {
 		},
 		"additionalProperties": false,
 	}
-	if hostedInputSchemaCompatible(listing, restricted) {
+	if externalInputSchemaCompatible(listing, restricted) {
 		t.Fatal("constraints not guaranteed by the controlled form must fail closed")
 	}
 }
