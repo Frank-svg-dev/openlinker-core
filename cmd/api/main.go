@@ -44,7 +44,28 @@ import (
 
 const maxRequestBodySize = "8M"
 
+type coreServingMode string
+
+const (
+	coreServingModeFull              coreServingMode = "full"
+	coreServingModeRuntimeAttachOnly coreServingMode = "runtime-attach-only"
+)
+
+func parseCoreServingMode(value string) (coreServingMode, error) {
+	switch strings.TrimSpace(value) {
+	case "", string(coreServingModeFull):
+		return coreServingModeFull, nil
+	case string(coreServingModeRuntimeAttachOnly):
+		return coreServingModeRuntimeAttachOnly, nil
+	default:
+		return "", fmt.Errorf("OPENLINKER_CORE_MODE must be full or runtime-attach-only")
+	}
+}
+
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "runtime-mtls-edge" {
+		os.Exit(runRuntimeMTLSEdge(os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
+	}
 	if len(os.Args) >= 2 && os.Args[1] == "migrate" {
 		runMigrate(os.Args[2:])
 		return
@@ -59,6 +80,14 @@ func main() {
 		}
 		return
 	}
+	processExitCode := 0
+	// Registered before resource cleanup defers so a strict shutdown failure
+	// becomes a non-zero process result only after those cleanups have run.
+	defer func() {
+		if processExitCode != 0 {
+			os.Exit(processExitCode)
+		}
+	}()
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -69,9 +98,16 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	servingMode, err := parseCoreServingMode(os.Getenv("OPENLINKER_CORE_MODE"))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "config: %v\n", err)
+		os.Exit(1)
+	}
+	runtimeAttachOnly := servingMode == coreServingModeRuntimeAttachOnly
 
 	openlinkerlog.Init(cfg.LogLevel, cfg.IsProduction())
-	log.Info().Str("env", cfg.Env).Int("port", cfg.Port).Msg("openlinker-core starting")
+	log.Info().Str("env", cfg.Env).Str("mode", string(servingMode)).Int("port", cfg.Port).
+		Msg("openlinker-core starting")
 
 	rootCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -82,20 +118,22 @@ func main() {
 	}
 	defer pool.Close()
 	log.Info().Msg("database connected")
-	if err := autoBootstrapAdminIfNeeded(rootCtx, pool, cfg.Env); err != nil {
-		log.Fatal().Err(err).Msg("bootstrap admin failed")
+	if !runtimeAttachOnly {
+		if err := autoBootstrapAdminIfNeeded(rootCtx, pool, cfg.Env); err != nil {
+			log.Fatal().Err(err).Msg("bootstrap admin failed")
+		}
 	}
 
 	var rateLimiterStore emw.RateLimiterStore
 	var redisClient *redis.Client
-	if cfg.RuntimeHAMode || cfg.ExternalExecutionEnabled() {
+	if cfg.RuntimeHAMode || (!runtimeAttachOnly && cfg.ExternalExecutionEnabled()) {
 		redisClient, err = newRedisClient(cfg.RedisURL)
 		if err != nil {
 			log.Fatal().Err(err).Msg("configure redis failed")
 		}
 		defer func() { _ = redisClient.Close() }()
 	}
-	if cfg.IsProduction() && redisClient != nil {
+	if !runtimeAttachOnly && cfg.IsProduction() && redisClient != nil {
 		rateLimiterStore = ratelimit.NewRedisStore(
 			redisClient,
 			"openlinker:core:http",
@@ -105,7 +143,7 @@ func main() {
 			time.Second,
 		)
 		log.Info().Msg("redis-backed HTTP rate limiter configured")
-	} else if cfg.IsProduction() {
+	} else if !runtimeAttachOnly && cfg.IsProduction() {
 		log.Info().Msg("single-instance in-memory HTTP rate limiter configured")
 	}
 
@@ -138,37 +176,54 @@ func main() {
 		log.Fatal().Err(err).Msg("configure runtime cluster failed")
 	}
 	cluster.Start(rootCtx)
-	externalExecutionAuthorizer, err := buildExternalExecutionAuthorizer(cfg, redisClient)
-	if err != nil {
-		log.Fatal().Err(err).Msg("configure external execution authentication failed")
+	var externalExecutionAuthorizer *externalexecution.Authorizer
+	if !runtimeAttachOnly {
+		externalExecutionAuthorizer, err = buildExternalExecutionAuthorizer(cfg, redisClient)
+		if err != nil {
+			log.Fatal().Err(err).Msg("configure external execution authentication failed")
+		}
 	}
 
 	e := newEcho(cfg, rateLimiterStore)
-	registerHealthRoutes(e, cfg, pool, applicationReadiness(cfg, cluster, redisClient))
+	readiness := clusterReadinessChecker(cluster)
+	if !runtimeAttachOnly {
+		readiness = applicationReadiness(cfg, cluster, redisClient)
+	}
+	registerHealthRoutes(e, cfg, pool, readiness)
 	opts := coreapi.Options{
-		AdminMiddleware:             auth.AdminMiddleware(dbgen.New(pool)),
-		LLMClient:                   buildLLMClient(cfg),
-		CoreInstanceID:              coreInstanceID,
-		RuntimeSignalBus:            runtimeSignalBus,
-		ExternalExecutionAuthorizer: externalExecutionAuthorizer,
+		CoreInstanceID:   coreInstanceID,
+		RuntimeSignalBus: runtimeSignalBus,
 	}
-	log.Info().Msg("runtime billing is not part of core; run cost metadata is not settled")
-	if opts.LLMClient == nil {
-		log.Info().Msg("no llm client configured; task routing uses rule-based keyword fallback")
+	if !runtimeAttachOnly {
+		opts.AdminMiddleware = auth.AdminMiddleware(dbgen.New(pool))
+		opts.LLMClient = buildLLMClient(cfg)
+		opts.ExternalExecutionAuthorizer = externalExecutionAuthorizer
+		log.Info().Msg("runtime billing is not part of core; run cost metadata is not settled")
+		if opts.LLMClient == nil {
+			log.Info().Msg("no llm client configured; task routing uses rule-based keyword fallback")
+		}
 	}
-	services := coreapi.Register(rootCtx, e, pool, cfg, opts)
-	shutdownA2AGRPC, err := coreapi.StartA2AGRPCServer(rootCtx, cfg, services)
-	if err != nil {
-		log.Fatal().Err(err).Msg("start a2a grpc server failed")
+	var services *coreapi.Services
+	var shutdownA2AGRPC coreapi.ShutdownFunc
+	if runtimeAttachOnly {
+		services = coreapi.RegisterRuntimeAttachOnly(rootCtx, e, pool, cfg, opts)
+		log.Info().Msg("runtime attach-only boundary active; application workers and execution routes are disabled")
+	} else {
+		services = coreapi.Register(rootCtx, e, pool, cfg, opts)
+		shutdownA2AGRPC, err = coreapi.StartA2AGRPCServer(rootCtx, cfg, services)
+		if err != nil {
+			log.Fatal().Err(err).Msg("start a2a grpc server failed")
+		}
 	}
 	runtimeMTLSServer, runtimeMTLSListener, err := startRuntimeMTLSListener(cfg, e)
 	if err != nil {
 		log.Fatal().Err(err).Msg("start runtime mTLS listener failed")
 	}
+	serveErrors := make(chan error, 2)
 	if runtimeMTLSServer != nil {
 		go func() {
 			if serveErr := runtimeMTLSServer.Serve(runtimeMTLSListener); serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
-				log.Fatal().Err(serveErr).Msg("runtime mTLS server failed")
+				serveErrors <- fmt.Errorf("runtime mTLS server failed: %w", serveErr)
 			}
 		}()
 		log.Info().Int("port", cfg.RuntimeMTLSPort).Msg("agent runtime mTLS listener active")
@@ -177,39 +232,47 @@ func main() {
 	srv := newHTTPServer(cfg.Port)
 	go func() {
 		if err := e.StartServer(srv); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal().Err(err).Msg("server failed")
+			serveErrors <- fmt.Errorf("HTTP server failed: %w", err)
 		}
 	}()
 	log.Info().Int("port", cfg.Port).Msg("listening")
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	<-stop
+	if serveErr := waitForCoreStop(stop, serveErrors); serveErr != nil {
+		processExitCode = 1
+		log.Error().Err(serveErr).Msg("server stopped unexpectedly; beginning strict shutdown")
+	}
+	signal.Stop(stop)
 	log.Info().Msg("shutting down")
 	cancel()
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-	if services != nil && services.RuntimeController != nil {
-		if err := services.RuntimeController.Shutdown(shutdownCtx); err != nil {
-			log.Error().Err(err).Msg("runtime websocket shutdown failed")
-		}
+	shutdownPlan := coreShutdownPlan{
+		PhaseTimeout:        defaultCoreShutdownPhaseTimeout,
+		RuntimeAttachOnly:   runtimeAttachOnly,
+		ShutdownHTTP:        e.Shutdown,
+		CloseRuntimeCluster: cluster.Close,
 	}
-	if err := e.Shutdown(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("shutdown failed")
+	if services != nil && services.RuntimeController != nil {
+		shutdownPlan.ShutdownRuntimeController = services.RuntimeController.Shutdown
 	}
 	if runtimeMTLSServer != nil {
-		if err := runtimeMTLSServer.Shutdown(shutdownCtx); err != nil {
-			log.Error().Err(err).Msg("runtime mTLS shutdown failed")
-		}
+		shutdownPlan.ShutdownRuntimeMTLS = runtimeMTLSServer.Shutdown
+	}
+	if runtimeAttachOnly && services != nil && services.RuntimeSessions != nil {
+		shutdownPlan.DetachSessions = services.RuntimeSessions.DetachCutoverSessions
 	}
 	if shutdownA2AGRPC != nil {
-		if err := shutdownA2AGRPC(shutdownCtx); err != nil {
-			log.Error().Err(err).Msg("a2a grpc shutdown failed")
-		}
+		shutdownPlan.ShutdownA2AGRPC = coreShutdownFunc(shutdownA2AGRPC)
 	}
-	if err := cluster.Close(shutdownCtx); err != nil {
-		log.Error().Err(err).Msg("runtime cluster shutdown failed")
+	shutdownResult, shutdownErr := runCoreShutdown(shutdownPlan)
+	if shutdownResult.DetachCompleted {
+		log.Info().Int64("sessions", shutdownResult.DetachedSessions).
+			Msg("runtime attach-only Sessions detached for Core handoff")
+	}
+	if shutdownErr != nil {
+		processExitCode = 1
+		log.Error().Err(shutdownErr).Msg("strict Core shutdown failed")
 	}
 	log.Info().Msg("bye")
 }
@@ -528,7 +591,13 @@ func rateLimiterConfigWithConfig(cfg *config.Config, stores ...emw.RateLimiterSt
 	return emw.RateLimiterConfig{
 		Skipper: func(c echo.Context) bool {
 			path := c.Request().URL.Path
-			return path == "/healthz" || path == "/healthz/db" || path == "/readyz"
+			// Runtime traffic reaches Core through a raw TCP edge, so every
+			// connection has the edge container's source IP. An IP bucket here
+			// would become a cross-tenant global throttle. Runtime is instead
+			// protected by device mTLS, Agent Token authentication, authenticated
+			// principal rate limits, and bounded edge connection admission.
+			return path == "/healthz" || path == "/healthz/db" || path == "/readyz" ||
+				strings.HasPrefix(path, runtimePathPrefix)
 		},
 		Store: store,
 		DenyHandler: func(c echo.Context, _ string, _ error) error {

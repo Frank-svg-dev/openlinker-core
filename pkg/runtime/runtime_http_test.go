@@ -50,14 +50,41 @@ func TestRuntimeControllerRegistersLifecycleAndExecutionRoutes(t *testing.T) {
 	}
 }
 
+func TestRuntimeControllerAttachOnlyRegistersNoExecutionRoutes(t *testing.T) {
+	e := echo.New()
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{})
+	controller.RegisterAttachOnly(e.Group("/api/v1"))
+
+	routes := make(map[string]bool)
+	for _, route := range e.Routes() {
+		routes[route.Method+" "+route.Path] = true
+	}
+	for _, route := range []string{
+		"POST /api/v1/agent-runtime/sessions",
+		"POST /api/v1/agent-runtime/sessions/:id/heartbeat",
+		"POST /api/v1/agent-runtime/sessions/:id/drain",
+		"POST /api/v1/agent-runtime/sessions/:id/close",
+		"GET /api/v1/agent-runtime/ws",
+	} {
+		require.True(t, routes[route], route)
+	}
+	for _, route := range []string{
+		"POST /api/v1/agent-runtime/runs/claim",
+		"POST /api/v1/agent-runtime/runs/:id/events",
+		"POST /api/v1/agent-runtime/runs/:id/result",
+		"POST /api/v1/agent-runtime/runs/resume",
+		"GET /api/v1/agent-runtime/commands",
+		"POST /api/v1/agent-runtime/call-agent",
+	} {
+		require.False(t, routes[route], route)
+	}
+	require.True(t, controller.dependencies.AttachOnly)
+}
+
 func TestRuntimeHTTPTransportPolicyAdmissionUsesWireCompatibleSignals(t *testing.T) {
 	fixture := newRuntimeHandlerFixture()
 	controller := fixture.controller()
-	controller.dependencies.TransportPolicy = func() RuntimeTransportPolicy {
-		policy := CurrentRuntimeTransportPolicy()
-		policy.OrderedTransports = []RuntimeTransport{RuntimeTransportWebSocket}
-		return policy
-	}
+	controller.dependencies.TransportPolicy = RuntimeAttachOnlyTransportPolicy
 
 	initial := serveRuntimeRaw(
 		t, controller, http.MethodPost, "/api/v1/agent-runtime/sessions", `{}`,

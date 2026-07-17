@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -278,6 +279,41 @@ func TestRuntimeWebSocketControllerShutdownDrainsHijackedConnections(t *testing.
 	defer response.Body.Close()
 	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
 	require.Equal(t, 1, fixture.sessions.createCalls())
+}
+
+func TestRuntimeAttachOnlyWebSocketShutdownClosesSessionWithoutLeaseService(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
+		TokenValidator:      fixture.tokens,
+		DeviceAuthenticator: fixture.devices,
+		TransportPolicy:     RuntimeAttachOnlyTransportPolicy,
+		Sessions:            fixture.sessions,
+		AttachOnly:          true,
+	})
+	e := echo.New()
+	controller.RegisterAttachOnly(e.Group("/api/v1"))
+
+	var serverErrors strings.Builder
+	server := httptest.NewUnstartedServer(e)
+	server.Config.ErrorLog = log.New(&serverErrors, "", 0)
+	server.Start()
+	defer server.Close()
+	target := "ws" + strings.TrimPrefix(server.URL, "http") + "/api/v1/agent-runtime/ws"
+
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer shutdownCancel()
+	require.NoError(t, controller.Shutdown(shutdownCtx))
+	require.Equal(t, []string{"close_session"}, fixture.operations.snapshot())
+	require.Equal(t, "offline", fixture.sessions.closedStatus())
+	require.NotContains(t, serverErrors.String(), "panic serving")
+
+	_, _, err := conn.ReadMessage()
+	require.Error(t, err)
 }
 
 func TestRuntimeWebSocketRegistryShutdownCoversLateRegistration(t *testing.T) {

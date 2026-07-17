@@ -280,6 +280,12 @@ func (h *Handler) RegisterAgentRuntime(api *echo.Group) {
 	h.runtime.Register(api)
 }
 
+// RegisterAgentRuntimeAttachOnly mounts the cutover-only Session lifecycle.
+// Normal execution routes remain owned by RegisterAgentRuntime.
+func (h *Handler) RegisterAgentRuntimeAttachOnly(api *echo.Group) {
+	h.runtime.RegisterAttachOnly(api)
+}
+
 // PostRun 调用 Agent。
 //
 // Endpoint 连接模式会同步等待 Agent 返回；其他运行模式由各自的调度路径处理。

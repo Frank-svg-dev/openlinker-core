@@ -92,6 +92,14 @@ func (h *Handler) Register(api *echo.Group) {
 	auth.GET("/github/callback", h.GithubCallback)
 }
 
+// RegisterRuntimeAttachOnly mounts the single read-only credential check used
+// by persistent SDK clients during a release cutover. Registration, refresh,
+// profile mutation, and OAuth flows must remain unavailable in this mode.
+func (h *Handler) RegisterRuntimeAttachOnly(api *echo.Group) {
+	auth := api.Group("/auth")
+	auth.POST("/login", h.PostLogin)
+}
+
 // RegisterProtected 注册需要 JWT 的端点。
 //
 //	GET   /me

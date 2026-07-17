@@ -54,6 +54,9 @@ type Services struct {
 	Agent       *agent.Service
 	Skill       *skill.Service
 	Runtime     *runtime.Service
+	// RuntimeSessions is set only for the narrow attach-only lifecycle so the
+	// process can durably detach its Sessions during the Core handoff.
+	RuntimeSessions *runtime.RuntimeSessionService
 	// RuntimeController owns hijacked Runtime WebSocket lifecycles. The API
 	// process drains it before shutting down either HTTP listener.
 	RuntimeController *runtime.RuntimeHTTPController
@@ -68,6 +71,47 @@ type Services struct {
 	Delivery          *delivery.Service
 	UserToken         *usertoken.Service
 	UserStatus        auth.UserStatusChecker
+}
+
+// RegisterRuntimeAttachOnly mounts the deliberately narrow Core surface used
+// before a release crosses its producer boundary. This function does not start
+// any application, delivery, workflow, registry, metric, cancellation,
+// Runtime-maintenance, signal, or outbox worker.
+func RegisterRuntimeAttachOnly(
+	rootCtx context.Context,
+	e *echo.Echo,
+	pool *pgxpool.Pool,
+	cfg *config.Config,
+	opts Options,
+) *Services {
+	_ = rootCtx // Kept in the signature to make the lifecycle boundary explicit.
+	api := e.Group("/api/v1")
+
+	authSvc := auth.NewService(pool, cfg.JWTSecret, time.Duration(cfg.JWTExpireHours)*time.Hour)
+	authHandler := auth.NewHandler(authSvc, cfg)
+	authHandler.RegisterRuntimeAttachOnly(api)
+	userStatusQueries := db.New(pool)
+	userStatusChecker := auth.NewDBUserStatusChecker(pool)
+	jwtMiddleware := auth.JWTMiddlewareWithUserStatus(cfg.JWTSecret, userStatusQueries)
+
+	agentSvc := agent.NewRuntimeAttachReadOnlyService(pool, cfg)
+	agent.NewHandler(agentSvc, cfg).RegisterRuntimeAttachReadOnly(api, jwtMiddleware)
+	registrationSvc := agent.NewRegistrationService(pool, cfg)
+	agent.NewRegistrationHandler(registrationSvc).RegisterRuntimeAttachReadOnly(api, jwtMiddleware)
+
+	runtimeSvc := runtime.NewService(pool, cfg)
+	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
+	runtimeSessions := configureRuntimeAttachOnly(runtimeHandler, runtimeSvc, pool, opts.CoreInstanceID)
+	runtimeHandler.RegisterAgentRuntimeAttachOnly(api)
+
+	return &Services{
+		Auth:              authSvc,
+		Agent:             agentSvc,
+		Runtime:           runtimeSvc,
+		RuntimeSessions:   runtimeSessions,
+		RuntimeController: runtimeHandler.RuntimeController(),
+		UserStatus:        userStatusChecker,
+	}
 }
 
 // Register mounts all core-owned HTTP routes and starts core-owned workers.
@@ -393,6 +437,7 @@ func configureRuntime(
 		Cancellations:       cancellations,
 		WakeHub:             wakeHub,
 		Presence:            presence,
+		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
 		CoreInstanceID:      coreInstanceID,
 	})
 	go runtime.StartRuntimeMaintenanceWorker(
@@ -410,6 +455,36 @@ func configureRuntime(
 			runtime.RuntimeSignalOutboxWorkerConfig{},
 		)
 	}
+}
+
+func configureRuntimeAttachOnly(
+	handler *runtime.Handler,
+	runtimeService *runtime.Service,
+	pool *pgxpool.Pool,
+	coreInstanceID uuid.UUID,
+) *runtime.RuntimeSessionService {
+	if handler == nil || runtimeService == nil {
+		return nil
+	}
+	dependencies := runtime.RuntimeHTTPDependencies{
+		TokenValidator:   runtimeService,
+		TransportPolicy:  runtime.RuntimeAttachOnlyTransportPolicy,
+		AdmissionLimiter: runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
+		CoreInstanceID:   coreInstanceID,
+		AttachOnly:       true,
+	}
+	if pool == nil || coreInstanceID == uuid.Nil {
+		handler.SetRuntimeDependencies(dependencies)
+		return nil
+	}
+	runtimeService.ConfigureCoreRuntime(coreInstanceID)
+	dependencies.DeviceAuthenticator = runtime.NewMTLSRuntimeDeviceAuthenticator(
+		runtime.NewDBRuntimeNodeCredentialVerifier(pool),
+	)
+	runtimeSessions := runtime.NewRuntimeSessionService(pool, coreInstanceID)
+	dependencies.Sessions = runtimeSessions
+	handler.SetRuntimeDependencies(dependencies)
+	return runtimeSessions
 }
 
 // ConfigureGoth initializes OAuth providers and the cookie session store.

@@ -159,6 +159,9 @@ func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 	if transportErr != nil {
 		return writeRuntimeError(c, transportErr)
 	}
+	if !h.allowRuntimeHTTP(authenticated) {
+		return writeRuntimeError(c, runtimeRateLimitedError())
+	}
 	reportedReason, reasonErr := runtimeFallbackReasonFromRequest(c.Request())
 	if reasonErr != nil {
 		return writeRuntimeError(c, reasonErr)
@@ -166,9 +169,9 @@ func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 	if admissionErr := h.runtimeTransportAdmission(RuntimeTransportWebSocket, false); admissionErr != nil {
 		return writeRuntimeError(c, admissionErr)
 	}
-	if h == nil || h.dependencies.Sessions == nil || h.dependencies.Leases == nil ||
-		h.dependencies.EventProjector == nil || h.dependencies.Finalizer == nil ||
-		h.dependencies.Cancellations == nil {
+	if h == nil || h.dependencies.Sessions == nil || (!h.dependencies.AttachOnly &&
+		(h.dependencies.Leases == nil || h.dependencies.EventProjector == nil ||
+			h.dependencies.Finalizer == nil || h.dependencies.Cancellations == nil)) {
 		return writeRuntimeError(c, runtimeUnavailableError())
 	}
 	if !websocket.IsWebSocketUpgrade(c.Request()) {
@@ -181,6 +184,20 @@ func (h *RuntimeHTTPController) WebSocket(c echo.Context) error {
 			RuntimeErrorForbidden, runtimeErrorDefaultMessage(RuntimeErrorForbidden),
 		))
 	}
+	releaseAdmission := func() {}
+	if h.dependencies.AdmissionLimiter != nil {
+		var allowed bool
+		releaseAdmission, allowed = h.dependencies.AdmissionLimiter.AcquireWebSocket(
+			runtimeAdmissionIdentityFromPrincipal(authenticated),
+		)
+		if !allowed {
+			return writeRuntimeError(c, runtimeRateLimitedError())
+		}
+		if releaseAdmission == nil {
+			releaseAdmission = func() {}
+		}
+	}
+	defer releaseAdmission()
 	if h.webSockets == nil || !h.webSockets.admit() {
 		return writeRuntimeError(c, runtimeUnavailableError())
 	}
@@ -383,6 +400,15 @@ func (c *runtimeWSConnection) run() {
 			}
 			return
 		}
+		if c.controller.dependencies.AdmissionLimiter != nil &&
+			!c.controller.dependencies.AdmissionLimiter.AllowWebSocketMessage(
+				runtimeAdmissionIdentityFromPrincipal(c.authenticated),
+			) {
+			if c.replyErrorAndMaybeClose(envelope, runtimeRateLimitedError(), false) {
+				return
+			}
+			continue
+		}
 		if c.handleEnvelope(envelope) {
 			return
 		}
@@ -421,6 +447,9 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 	}
 	if err := c.refreshSession(); err != nil {
 		return c.replyErrorAndMaybeClose(envelope, err, true)
+	}
+	if c.controller.dependencies.AttachOnly && envelope.Type != RuntimeMessageDrain {
+		return c.replyErrorAndMaybeClose(envelope, runtimeUnavailableError(), false)
 	}
 
 	c.operationMu.Lock()
@@ -656,10 +685,31 @@ func (c *runtimeWSConnection) handleDrain(envelope RuntimeEnvelope) error {
 }
 
 func (c *runtimeWSConnection) maintenanceLoop() {
-	claimTicker := time.NewTicker(runtimeWSClaimInterval)
 	heartbeatTicker := time.NewTicker(runtimeWSHeartbeatInterval)
-	defer claimTicker.Stop()
 	defer heartbeatTicker.Stop()
+	if c.controller.dependencies.AttachOnly {
+		for {
+			select {
+			case <-c.ctx.Done():
+				return
+			case <-heartbeatTicker.C:
+				if !c.refreshMaintenanceSession() {
+					return
+				}
+				state, err := c.controller.dependencies.Sessions.HeartbeatSession(
+					c.ctx, c.authenticated, c.sessionRequest,
+				)
+				if err != nil {
+					c.closeForError(mapRuntimeHTTPError(err))
+					return
+				}
+				c.controller.refreshPresence(c.ctx, state, c.connectionID)
+			}
+		}
+	}
+
+	claimTicker := time.NewTicker(runtimeWSClaimInterval)
+	defer claimTicker.Stop()
 
 	if !c.refreshMaintenanceSession() {
 		return
@@ -1070,7 +1120,8 @@ func (c *runtimeWSConnection) cleanup() {
 			// This call is deliberately after durable detach/offline evidence.
 			// Lease implementations must use the exact offline cleanup path: only
 			// an unaccepted offer may be released; executing Attempts are untouched.
-			if detached && c.sessionPrincipal.RuntimeSessionID != uuid.Nil {
+			if detached && c.sessionPrincipal.RuntimeSessionID != uuid.Nil &&
+				c.controller.dependencies.Leases != nil {
 				releaseCtx, releaseCancel := context.WithTimeout(context.Background(), runtimeWSCleanupTimeout)
 				if releaseErr := c.controller.dependencies.Leases.ReleaseUnackedOffer(
 					releaseCtx, c.sessionPrincipal, "SESSION_DISCONNECTED",

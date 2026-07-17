@@ -244,6 +244,59 @@ func TestRegisterMountsCoreRoutesAndReturnsServices(t *testing.T) {
 	}
 }
 
+func TestRegisterRuntimeAttachOnlyMountsStrictReadOnlySurface(t *testing.T) {
+	e := echo.New()
+	services := RegisterRuntimeAttachOnly(
+		context.Background(),
+		e,
+		nil,
+		&config.Config{JWTSecret: "test-secret", JWTExpireHours: 24},
+		Options{},
+	)
+	if services == nil || services.Auth == nil || services.Agent == nil ||
+		services.Runtime == nil || services.RuntimeController == nil {
+		t.Fatalf("RegisterRuntimeAttachOnly returned incomplete services: %#v", services)
+	}
+
+	routes := routeSet(e)
+	for _, route := range []string{
+		"POST /api/v1/auth/login",
+		"GET /api/v1/creator/agents",
+		"GET /api/v1/creator/agents/:id/onboarding",
+		"GET /api/v1/creator/agent-tokens",
+		"POST /api/v1/agent-runtime/sessions",
+		"POST /api/v1/agent-runtime/sessions/:id/heartbeat",
+		"POST /api/v1/agent-runtime/sessions/:id/drain",
+		"POST /api/v1/agent-runtime/sessions/:id/close",
+		"GET /api/v1/agent-runtime/ws",
+	} {
+		if !routes[route] {
+			t.Fatalf("attach-only route %s not registered; routes=%v", route, sortedRouteKeys(routes))
+		}
+	}
+	for _, forbidden := range []string{
+		"POST /api/v1/auth/register",
+		"POST /api/v1/auth/refresh",
+		"POST /api/v1/creator/agents",
+		"PATCH /api/v1/creator/agents/:id",
+		"POST /api/v1/creator/agent-tokens",
+		"DELETE /api/v1/creator/agent-tokens/:id",
+		"POST /api/v1/agent-registration/agents",
+		"POST /api/v1/agent-runtime/runs/claim",
+		"POST /api/v1/agent-runtime/runs/:id/events",
+		"POST /api/v1/agent-runtime/runs/:id/result",
+		"POST /api/v1/agent-runtime/runs/resume",
+		"POST /api/v1/agent-runtime/call-agent",
+		"POST /api/v1/runs",
+		"POST /api/v1/mcp/run_agent",
+		"POST /api/v1/workflows/:id/run",
+	} {
+		if routes[forbidden] {
+			t.Fatalf("attach-only mode exposed forbidden route %s", forbidden)
+		}
+	}
+}
+
 func testExternalExecutionAuthorizer(t *testing.T) *externalexecution.Authorizer {
 	t.Helper()
 	seed := bytes.Repeat([]byte{3}, ed25519.SeedSize)

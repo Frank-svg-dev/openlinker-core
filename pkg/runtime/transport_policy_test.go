@@ -29,6 +29,21 @@ func TestCurrentRuntimeTransportPolicyPreservesWebSocketFallbackDefaults(t *test
 	require.Equal(t, 10*time.Second, policy.WebSocketProbeTimeout)
 }
 
+func TestRuntimeAttachOnlyTransportPolicyRequiresWebSocketWithoutMutatingFullPolicy(t *testing.T) {
+	full := CurrentRuntimeTransportPolicy()
+	want := full
+	want.OrderedTransports = []RuntimeTransport{RuntimeTransportWebSocket}
+
+	attachOnly := RuntimeAttachOnlyTransportPolicy()
+	require.Equal(t, want, attachOnly)
+	require.Equal(t, RuntimeDefaultTransportPolicy, attachOnly.DefaultTransport)
+	require.False(t, runtimeTransportAllowed(attachOnly, RuntimeTransportLongPoll))
+	require.True(t, runtimeTransportAllowed(attachOnly, RuntimeTransportWebSocket))
+
+	attachOnly.OrderedTransports[0] = RuntimeTransportLongPoll
+	require.Equal(t, full, CurrentRuntimeTransportPolicy())
+}
+
 func TestRuntimeTransportReasonUsesOnlyServerObservedTransition(t *testing.T) {
 	tests := []struct {
 		name      string

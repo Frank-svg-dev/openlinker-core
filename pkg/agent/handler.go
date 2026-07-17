@@ -101,6 +101,14 @@ func (h *Handler) RegisterProtected(api *echo.Group, jwtMiddleware echo.Middlewa
 	creator.POST("/availability-alerts/:alertID/read", h.MarkAvailabilityAlertRead)
 }
 
+// RegisterRuntimeAttachReadOnly mounts only the creator inventory needed to
+// verify that persistent SDK state still points at the expected Agents.
+func (h *Handler) RegisterRuntimeAttachReadOnly(api *echo.Group, jwtMiddleware echo.MiddlewareFunc) {
+	creator := api.Group("/creator", jwtMiddleware)
+	creator.GET("/agents", h.ListMyAgents)
+	creator.GET("/agents/:id/onboarding", h.GetAgentOnboarding)
+}
+
 // RegisterAdmin 管理员/运营人工处理端点（需 JWT + admin 双重中间件）。
 //
 //	GET  /admin/agents/pending          # 待审认证申请队列

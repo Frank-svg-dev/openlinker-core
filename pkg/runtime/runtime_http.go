@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	runtimeTokenScope           = "agent:pull"
-	RuntimeAttachmentIDHeader   = "OpenLinker-Runtime-Attachment"
-	RuntimeFallbackReasonHeader = "OpenLinker-Runtime-Fallback-Reason"
+	runtimeTokenScope                       = "agent:pull"
+	RuntimeAttachmentIDHeader               = "OpenLinker-Runtime-Attachment"
+	RuntimeFallbackReasonHeader             = "OpenLinker-Runtime-Fallback-Reason"
+	runtimeAuthenticatedPrincipalContextKey = "openlinker.runtime.authenticated-principal"
 )
 
 // RuntimeTokenValidator authenticates the Agent half of a runtime principal.
@@ -90,7 +91,12 @@ type RuntimeHTTPDependencies struct {
 	Cancellations       RuntimeCancellationAPI
 	WakeHub             *RuntimeWakeHub
 	Presence            RuntimePresenceStore
+	AdmissionLimiter    RuntimeAdmissionLimiter
 	CoreInstanceID      uuid.UUID
+	// AttachOnly is a release-cutover safety mode. It permits authenticated
+	// Session lifecycle traffic, but never claims Runs or accepts execution
+	// events/results before the normal Core producer boundary is crossed.
+	AttachOnly bool
 }
 
 // RuntimeHTTPController is the strict HTTP transport adapter for the durable
@@ -201,22 +207,57 @@ func (h *RuntimeHTTPController) Register(api *echo.Group) {
 	api.GET("/agent-runtime/ws", h.WebSocket)
 }
 
+// RegisterAttachOnly mounts only the Runtime Session lifecycle required to
+// prove SDK connectivity during a release cutover. Execution, command, resume,
+// result, event, and delegation routes deliberately remain absent.
+func (h *RuntimeHTTPController) RegisterAttachOnly(api *echo.Group) {
+	if api == nil {
+		return
+	}
+	if h == nil {
+		h = NewRuntimeHTTPController(RuntimeHTTPDependencies{AttachOnly: true})
+	}
+	h.dependencies.AttachOnly = true
+	api.POST("/agent-runtime/sessions", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, false, h.CreateSession,
+	))
+	api.POST("/agent-runtime/sessions/:id/heartbeat", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.HeartbeatSession,
+	))
+	api.POST("/agent-runtime/sessions/:id/drain", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.DrainSession,
+	))
+	api.POST("/agent-runtime/sessions/:id/close", h.runtimeTransportEndpoint(
+		RuntimeTransportLongPoll, true, h.CloseSession,
+	))
+	api.GET("/agent-runtime/ws", h.WebSocket)
+}
+
 func (h *RuntimeHTTPController) runtimeTransportEndpoint(
 	transport RuntimeTransport,
 	established bool,
 	next echo.HandlerFunc,
 ) echo.HandlerFunc {
 	return func(c echo.Context) error {
+		principal, authenticationErr := h.authenticate(c)
+		if authenticationErr != nil {
+			return writeRuntimeError(c, authenticationErr)
+		}
+		if !h.allowRuntimeHTTP(principal) {
+			return writeRuntimeError(c, runtimeRateLimitedError())
+		}
 		if admissionErr := h.runtimeTransportAdmission(transport, established); admissionErr != nil {
-			// Policy admission must never become an unauthenticated oracle or
-			// replace the canonical Agent Token + device-mTLS 401 boundary.
-			if _, authenticationErr := h.authenticate(c); authenticationErr != nil {
-				return writeRuntimeError(c, authenticationErr)
-			}
 			return writeRuntimeError(c, admissionErr)
 		}
 		return next(c)
 	}
+}
+
+func (h *RuntimeHTTPController) allowRuntimeHTTP(principal AuthenticatedRuntimePrincipal) bool {
+	if h == nil || h.dependencies.AdmissionLimiter == nil {
+		return true
+	}
+	return h.dependencies.AdmissionLimiter.AllowHTTP(runtimeAdmissionIdentityFromPrincipal(principal))
 }
 
 func (h *RuntimeHTTPController) runtimeTransportAdmission(
@@ -702,6 +743,10 @@ func (h *RuntimeHTTPController) CallAgent(c echo.Context) error {
 	if err != nil {
 		return writeRuntimeError(c, runtimeUnauthorizedError(err))
 	}
+	if h.dependencies.AdmissionLimiter != nil &&
+		!h.dependencies.AdmissionLimiter.AllowHTTP(runtimeAdmissionIdentityFromDevice(device)) {
+		return writeRuntimeError(c, runtimeRateLimitedError())
+	}
 	if c.Request().URL.RawQuery != "" {
 		return writeRuntimeError(c, runtimeTransportValidationError())
 	}
@@ -732,6 +777,11 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 	if h == nil || h.dependencies.TokenValidator == nil || h.dependencies.DeviceAuthenticator == nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnavailableError()
 	}
+	if cached, ok := c.Get(runtimeAuthenticatedPrincipalContextKey).(AuthenticatedRuntimePrincipal); ok {
+		if err := validateAuthenticatedRuntimePrincipal(cached); err == nil {
+			return cached, nil
+		}
+	}
 	rawToken, err := runtimeBearerToken(c.Request().Header.Get(echo.HeaderAuthorization))
 	if err != nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
@@ -748,6 +798,7 @@ func (h *RuntimeHTTPController) authenticate(c echo.Context) (AuthenticatedRunti
 	if err = validateAuthenticatedRuntimePrincipal(principal); err != nil {
 		return AuthenticatedRuntimePrincipal{}, runtimeUnauthorizedError(err)
 	}
+	c.Set(runtimeAuthenticatedPrincipalContextKey, principal)
 	return principal, nil
 }
 
@@ -1140,6 +1191,12 @@ func runtimePolicySignal(err *RuntimeTransportError) (string, bool) {
 
 func runtimeUnavailableError() *RuntimeTransportError {
 	err := NewRuntimeTransportError(RuntimeErrorServiceUnavailable, runtimeErrorDefaultMessage(RuntimeErrorServiceUnavailable))
+	err.Body.Retryable = true
+	return err
+}
+
+func runtimeRateLimitedError() *RuntimeTransportError {
+	err := NewRuntimeTransportError(RuntimeErrorRateLimited, runtimeErrorDefaultMessage(RuntimeErrorRateLimited))
 	err.Body.Retryable = true
 	return err
 }

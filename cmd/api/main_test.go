@@ -145,6 +145,20 @@ func TestRateLimiterConfigSkipsHealthAndDeniesWithStandardError(t *testing.T) {
 	if !cfg.Skipper(ready) {
 		t.Fatal("readyz should skip rate limiting")
 	}
+	runtimeRequest := e.NewContext(
+		httptest.NewRequest(http.MethodGet, "/api/v1/agent-runtime/ws", nil),
+		httptest.NewRecorder(),
+	)
+	if !cfg.Skipper(runtimeRequest) {
+		t.Fatal("mTLS Runtime route should skip the shared HTTP IP limiter")
+	}
+	runtimeNearPrefix := e.NewContext(
+		httptest.NewRequest(http.MethodGet, "/api/v1/agent-runtime-not-runtime", nil),
+		httptest.NewRecorder(),
+	)
+	if cfg.Skipper(runtimeNearPrefix) {
+		t.Fatal("non-Runtime near-prefix route should remain rate limited")
+	}
 
 	api := e.NewContext(httptest.NewRequest(http.MethodGet, "/api/v1/runs", nil), httptest.NewRecorder())
 	if cfg.Skipper(api) {

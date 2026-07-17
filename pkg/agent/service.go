@@ -41,10 +41,20 @@ var (
 
 // Service Agent 注册 / 公开状态业务逻辑层。
 type Service struct {
-	queries   *db.Queries
-	pool      *pgxpool.Pool
-	cfg       *config.Config
-	dryRunner DryRunner
+	queries                   *db.Queries
+	pool                      *pgxpool.Pool
+	cfg                       *config.Config
+	dryRunner                 DryRunner
+	runtimeAttachReadOnlyMode bool
+}
+
+// NewRuntimeAttachReadOnlyService constructs the creator inventory reader
+// used during a release handoff. In this mode GET onboarding must never lazily
+// insert missing status rows; provisioning preflight owns that invariant.
+func NewRuntimeAttachReadOnlyService(pool *pgxpool.Pool, cfg *config.Config) *Service {
+	service := NewService(pool, cfg)
+	service.runtimeAttachReadOnlyMode = true
+	return service
 }
 
 // DryRunner Agent endpoint 探活调用接口；由 runtime.Service 实现。
@@ -425,7 +435,9 @@ func (s *Service) GetAgentOnboarding(ctx context.Context, agentID, creatorID uui
 		log.Error().Err(err).Str("agent_id", agentID.String()).Msg("agent.GetAgentOnboarding: GetAgentByIDForOwner")
 		return nil, httpx.Internal("查询 Agent 失败")
 	}
-	s.ensureOnboardingStatusBestEffort(ctx, agentID)
+	if !s.runtimeAttachReadOnlyMode {
+		s.ensureOnboardingStatusBestEffort(ctx, agentID)
+	}
 
 	status, err := s.queries.GetOnboardingStatusForOwner(ctx, db.GetOnboardingStatusForOwnerParams{
 		AgentID:   agentID,

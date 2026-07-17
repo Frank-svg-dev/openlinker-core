@@ -107,6 +107,17 @@ func CurrentRuntimeTransportPolicy() RuntimeTransportPolicy {
 	}
 }
 
+// RuntimeAttachOnlyTransportPolicy is the honest cutover policy for the
+// narrow Core that accepts Session attachments before the producer boundary.
+// Pull execution routes are deliberately absent in that mode, so advertising
+// long-poll fallback would let an auto-mode SDK attach to an unusable
+// transport. Timing and retry semantics remain identical to full Core.
+func RuntimeAttachOnlyTransportPolicy() RuntimeTransportPolicy {
+	policy := CurrentRuntimeTransportPolicy()
+	policy.OrderedTransports = []RuntimeTransport{RuntimeTransportWebSocket}
+	return policy
+}
+
 func runtimeTransportAllowed(policy RuntimeTransportPolicy, transport RuntimeTransport) bool {
 	if !transport.IsLive() {
 		return false

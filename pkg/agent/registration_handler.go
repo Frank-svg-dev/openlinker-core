@@ -47,6 +47,12 @@ func (h *RegistrationHandler) RegisterProtected(api *echo.Group, authMiddleware 
 	g.DELETE("/:id", h.RevokeAgentToken)
 }
 
+// RegisterRuntimeAttachReadOnly mounts token metadata lookup without exposing
+// token issuance, revocation, or Agent registration during a release cutover.
+func (h *RegistrationHandler) RegisterRuntimeAttachReadOnly(api *echo.Group, authMiddleware echo.MiddlewareFunc) {
+	api.GET("/creator/agent-tokens", h.ListAgentTokens, authMiddleware)
+}
+
 // RegisterPublic Agent 侧（无 JWT，凭 agent token）。
 //
 //	POST /api/v1/agent-registration/agents

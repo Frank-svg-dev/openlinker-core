@@ -362,6 +362,7 @@ func newRuntimeSessionError(code RuntimeSessionErrorCode, cause error) error {
 // Session -> Node -> Token -> Attachment.
 type RuntimeSessionService struct {
 	repository     runtimeSessionRepository
+	pool           *pgxpool.Pool
 	coreInstanceID uuid.UUID
 }
 
@@ -371,12 +372,88 @@ func NewRuntimeSessionService(pool *pgxpool.Pool, coreInstanceID uuid.UUID) *Run
 	}
 	return &RuntimeSessionService{
 		repository:     &postgresRuntimeSessionRepository{pool: pool, queries: db.New(pool)},
+		pool:           pool,
 		coreInstanceID: coreInstanceID,
 	}
 }
 
 func newRuntimeSessionService(repository runtimeSessionRepository, coreInstanceID uuid.UUID) *RuntimeSessionService {
 	return &RuntimeSessionService{repository: repository, coreInstanceID: coreInstanceID}
+}
+
+// DetachCutoverSessions closes every zero-inflight Session owned by this Core
+// instance. It is used only by the runtime-attach-only process after both
+// listeners have stopped, so the normal Core can claim the same durable
+// Session identities without waiting for stale-member reconciliation.
+func (s *RuntimeSessionService) DetachCutoverSessions(ctx context.Context) (int64, error) {
+	if s == nil || s.pool == nil || s.coreInstanceID == uuid.Nil {
+		return 0, errors.New("runtime cutover session detach is unavailable")
+	}
+	var detached int64
+	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `
+SELECT runtime_session_id, inflight, status
+FROM runtime_sessions
+WHERE attached_core_instance_id = $1
+ORDER BY runtime_session_id
+FOR UPDATE`, s.coreInstanceID)
+		if err != nil {
+			return err
+		}
+		var sessionIDs []uuid.UUID
+		for rows.Next() {
+			var sessionID uuid.UUID
+			var inflight int32
+			var status string
+			if err = rows.Scan(&sessionID, &inflight, &status); err != nil {
+				rows.Close()
+				return err
+			}
+			if inflight != 0 || (status != "active" && status != "draining") {
+				rows.Close()
+				return errors.New("runtime cutover session is not safely detachable")
+			}
+			sessionIDs = append(sessionIDs, sessionID)
+		}
+		if err = rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		if len(sessionIDs) == 0 {
+			return nil
+		}
+		attachmentTag, err := tx.Exec(ctx, `
+UPDATE runtime_session_attachments
+SET detached_at = clock_timestamp(), disconnect_reason = 'core_cutover_handoff'
+WHERE core_instance_id = $1
+  AND runtime_session_id = ANY($2::uuid[])
+  AND detached_at IS NULL`, s.coreInstanceID, sessionIDs)
+		if err != nil {
+			return err
+		}
+		if attachmentTag.RowsAffected() != int64(len(sessionIDs)) {
+			return errors.New("runtime cutover attachment cardinality mismatch")
+		}
+		sessionTag, err := tx.Exec(ctx, `
+UPDATE runtime_sessions
+SET status = 'offline', attached_core_instance_id = NULL,
+    disconnected_at = COALESCE(disconnected_at, clock_timestamp()),
+    updated_at = clock_timestamp()
+WHERE attached_core_instance_id = $1
+  AND runtime_session_id = ANY($2::uuid[])
+  AND inflight = 0
+  AND status IN ('active', 'draining')`, s.coreInstanceID, sessionIDs)
+		if err != nil {
+			return err
+		}
+		if sessionTag.RowsAffected() != int64(len(sessionIDs)) {
+			return errors.New("runtime cutover session cardinality mismatch")
+		}
+		detached = sessionTag.RowsAffected()
+		return nil
+	})
+	return detached, err
 }
 
 // ResolveSessionPrincipal turns an authenticated Token/device pair plus an
