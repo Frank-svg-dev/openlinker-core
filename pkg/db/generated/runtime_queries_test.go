@@ -598,6 +598,85 @@ func TestRuntimeNodeSessionAndClusterQueries(t *testing.T) {
 		t.Fatalf("CreateRuntimeSession = %#v, %v", session, err)
 	}
 
+	successorID := uuid.New()
+	successorValues := append([]any(nil), sessionValues...)
+	successorValues[0] = successorID
+	successorValues[5] = int64(2)
+	successorValues[12] = int32(0)
+	successorValues[14] = "draining"
+	dbtx.row = fakeRow{values: successorValues}
+	successor, err := q.CreateDrainingRuntimeSessionSuccessor(
+		context.Background(),
+		CreateDrainingRuntimeSessionSuccessorParams{
+			RuntimeSessionID:          successorID,
+			NodeID:                    nodeID,
+			AgentID:                   agentID,
+			CredentialID:              credentialID,
+			WorkerID:                  "worker-a",
+			SessionEpoch:              2,
+			DeviceCertificateSerial:   "serial-a",
+			DevicePublicKeyThumbprint: "thumb-a",
+			NodeVersion:               "0.2.0",
+			ProtocolVersion:           2,
+			RuntimeContractID:         "openlinker.runtime.v2",
+			RuntimeContractDigest:     digest,
+			Features:                  features,
+			ResumeCapacity:            2,
+			AttachedCoreInstanceID:    coreID,
+			DrainDeadlineMS:           60_000,
+		},
+	)
+	if err != nil || successor.RuntimeSessionID != successorID || successor.Status != "draining" {
+		t.Fatalf("CreateDrainingRuntimeSessionSuccessor = %#v, %v", successor, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "CreateDrainingRuntimeSessionSuccessor")
+	for _, fragment := range []string{
+		"latest_predecessor", "predecessor.status = 'offline'",
+		"predecessor.session_epoch < $6", "node.status = 'draining'",
+		"node.device_public_key_thumbprint = $8", "token.status = 'active_runtime'",
+		"'draining', $15", "'ADMIN_REQUESTED', $14",
+		"current_or_newer.session_epoch >= $6",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("CreateDrainingRuntimeSessionSuccessor missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+	if len(dbtx.queryRowArgs) != 16 || dbtx.queryRowArgs[13] != int32(2) ||
+		dbtx.queryRowArgs[15] != int64(60_000) {
+		t.Fatalf("CreateDrainingRuntimeSessionSuccessor args = %#v", dbtx.queryRowArgs)
+	}
+
+	dbtx.row = fakeRow{values: successorValues}
+	claimed, err := q.ClaimRuntimeSessionForCore(
+		context.Background(),
+		ClaimRuntimeSessionForCoreParams{
+			RuntimeSessionID: successorID,
+			NodeID:           nodeID,
+			AgentID:          agentID,
+			CredentialID:     credentialID,
+			WorkerID:         "worker-a",
+			SessionEpoch:     2,
+			CoreInstanceID:   coreID,
+			ResumeCapacity:   2,
+			DrainDeadlineMS:  60_000,
+		},
+	)
+	if err != nil || claimed.RuntimeSessionID != successorID {
+		t.Fatalf("ClaimRuntimeSessionForCore = %#v, %v", claimed, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "ClaimRuntimeSessionForCore")
+	for _, fragment := range []string{
+		"SET drain_requested_at = CASE", "COALESCE(s.drain_reason_code, 'ADMIN_REQUESTED')",
+		"COALESCE(s.resume_capacity, $8)", "$9::bigint * INTERVAL '1 millisecond'",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("ClaimRuntimeSessionForCore missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+	if len(dbtx.queryRowArgs) != 9 {
+		t.Fatalf("ClaimRuntimeSessionForCore args = %#v", dbtx.queryRowArgs)
+	}
+
 	attachmentID := uuid.New()
 	reason := "explicit"
 	dbtx.row = fakeRow{values: []any{

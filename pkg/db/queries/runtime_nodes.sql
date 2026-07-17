@@ -508,6 +508,115 @@ RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
           features, capacity, inflight, status, attached_core_instance_id,
           connected_at, heartbeat_at, disconnected_at, created_at, updated_at;
 
+-- name: CreateDrainingRuntimeSessionSuccessor :one
+-- Lock precondition: the caller must already hold row locks for the Node's
+-- complete mutable Session scope (active/draining/offline), followed by the
+-- runtime_nodes row. The predecessor and monotonic fences rely on that order.
+WITH database_clock AS (
+    SELECT clock_timestamp() AS database_now
+), latest_predecessor AS (
+    SELECT predecessor.*
+    FROM runtime_sessions predecessor
+    WHERE predecessor.node_id = sqlc.arg(node_id)
+      AND predecessor.agent_id = sqlc.arg(agent_id)
+      AND predecessor.worker_id = sqlc.arg(worker_id)
+      AND predecessor.session_epoch < sqlc.arg(session_epoch)
+    ORDER BY predecessor.session_epoch DESC
+    LIMIT 1
+)
+INSERT INTO runtime_sessions (
+    runtime_session_id,
+    node_id,
+    agent_id,
+    credential_id,
+    worker_id,
+    session_epoch,
+    device_certificate_serial,
+    node_version,
+    protocol_version,
+    runtime_contract_id,
+    runtime_contract_digest,
+    features,
+    capacity,
+    status,
+    attached_core_instance_id,
+    drain_requested_at,
+    drain_deadline_at,
+    drain_reason_code,
+    resume_capacity
+) SELECT
+    sqlc.arg(runtime_session_id),
+    sqlc.arg(node_id),
+    sqlc.arg(agent_id),
+    sqlc.arg(credential_id),
+    sqlc.arg(worker_id),
+    sqlc.arg(session_epoch),
+    sqlc.arg(device_certificate_serial),
+    sqlc.arg(node_version),
+    sqlc.arg(protocol_version),
+    sqlc.arg(runtime_contract_id),
+    sqlc.arg(runtime_contract_digest),
+    sqlc.arg(features),
+    0,
+    'draining',
+    sqlc.arg(attached_core_instance_id),
+    database_clock.database_now,
+    database_clock.database_now
+        + (sqlc.arg(drain_deadline_ms)::bigint * INTERVAL '1 millisecond'),
+    'ADMIN_REQUESTED',
+    sqlc.arg(resume_capacity)
+FROM runtime_nodes node
+JOIN agent_tokens token
+  ON token.id = sqlc.arg(credential_id)
+ AND token.agent_id = sqlc.arg(agent_id)
+JOIN latest_predecessor predecessor
+  ON predecessor.node_id = node.node_id
+CROSS JOIN database_clock
+WHERE node.node_id = sqlc.arg(node_id)
+  AND node.status = 'draining'
+  AND node.draining_at IS NOT NULL
+  AND node.revoked_at IS NULL
+  AND node.device_certificate_serial = sqlc.arg(device_certificate_serial)
+  AND node.device_public_key_thumbprint = sqlc.arg(device_public_key_thumbprint)
+  AND node.node_version = sqlc.arg(node_version)
+  AND node.protocol_version = sqlc.arg(protocol_version)
+  AND node.runtime_contract_id = sqlc.arg(runtime_contract_id)
+  AND node.runtime_contract_digest = sqlc.arg(runtime_contract_digest)
+  AND node.features @> sqlc.arg(features)::text[]
+  AND sqlc.arg(features)::text[] @> node.features
+  AND predecessor.status = 'offline'
+  AND predecessor.attached_core_instance_id IS NULL
+  AND predecessor.disconnected_at IS NOT NULL
+  AND predecessor.device_certificate_serial = sqlc.arg(device_certificate_serial)
+  AND predecessor.protocol_version = sqlc.arg(protocol_version)
+  AND predecessor.runtime_contract_id = sqlc.arg(runtime_contract_id)
+  AND predecessor.runtime_contract_digest = sqlc.arg(runtime_contract_digest)
+  AND predecessor.features @> sqlc.arg(features)::text[]
+  AND sqlc.arg(features)::text[] @> predecessor.features
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = sqlc.arg(runtime_contract_id)
+        AND wire.runtime_contract_digest = sqlc.arg(runtime_contract_digest)
+        AND wire.support_tier IN ('current', 'previous')
+  )
+  AND token.status = 'active_runtime'
+  AND token.revoked_at IS NULL
+  AND token.scopes @> ARRAY['agent:pull']::text[]
+  AND (token.expires_at IS NULL OR token.expires_at > database_clock.database_now)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM runtime_sessions current_or_newer
+      WHERE current_or_newer.node_id = sqlc.arg(node_id)
+        AND current_or_newer.agent_id = sqlc.arg(agent_id)
+        AND current_or_newer.worker_id = sqlc.arg(worker_id)
+        AND current_or_newer.session_epoch >= sqlc.arg(session_epoch)
+  )
+RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
+          session_epoch, device_certificate_serial, node_version,
+          protocol_version, runtime_contract_id, runtime_contract_digest,
+          features, capacity, inflight, status, attached_core_instance_id,
+          connected_at, heartbeat_at, disconnected_at, created_at, updated_at;
+
 -- name: GetRuntimeSession :one
 SELECT runtime_session_id, node_id, agent_id, credential_id, worker_id,
        session_epoch, device_certificate_serial, node_version,
@@ -598,7 +707,31 @@ WITH candidate AS (
     FOR UPDATE SKIP LOCKED
 )
 UPDATE runtime_sessions s
-SET status = CASE
+SET drain_requested_at = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(s.drain_requested_at, clock_timestamp())
+        ELSE s.drain_requested_at
+    END,
+    drain_deadline_at = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(
+                s.drain_deadline_at,
+                clock_timestamp()
+                    + (sqlc.arg(drain_deadline_ms)::bigint * INTERVAL '1 millisecond')
+            )
+        ELSE s.drain_deadline_at
+    END,
+    drain_reason_code = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(s.drain_reason_code, 'ADMIN_REQUESTED')
+        ELSE s.drain_reason_code
+    END,
+    resume_capacity = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(s.resume_capacity, sqlc.arg(resume_capacity))
+        ELSE s.resume_capacity
+    END,
+    status = CASE
         WHEN candidate.node_status = 'draining' OR s.status = 'draining'
              OR s.drain_requested_at IS NOT NULL
             THEN 'draining'

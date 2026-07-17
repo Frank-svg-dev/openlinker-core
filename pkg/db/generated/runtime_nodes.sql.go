@@ -1193,6 +1193,145 @@ func (q *Queries) CreateRuntimeSession(ctx context.Context, arg CreateRuntimeSes
 	return session, err
 }
 
+const createDrainingRuntimeSessionSuccessor = `-- name: CreateDrainingRuntimeSessionSuccessor :one
+-- Lock precondition: the caller must already hold row locks for the Node's
+-- complete mutable Session scope (active/draining/offline), followed by the
+-- runtime_nodes row. The predecessor and monotonic fences rely on that order.
+WITH database_clock AS (
+    SELECT clock_timestamp() AS database_now
+), latest_predecessor AS (
+    SELECT predecessor.*
+    FROM runtime_sessions predecessor
+    WHERE predecessor.node_id = $2
+      AND predecessor.agent_id = $3
+      AND predecessor.worker_id = $5
+      AND predecessor.session_epoch < $6
+    ORDER BY predecessor.session_epoch DESC
+    LIMIT 1
+)
+INSERT INTO runtime_sessions (
+    runtime_session_id,
+    node_id,
+    agent_id,
+    credential_id,
+    worker_id,
+    session_epoch,
+    device_certificate_serial,
+    node_version,
+    protocol_version,
+    runtime_contract_id,
+    runtime_contract_digest,
+    features,
+    capacity,
+    status,
+    attached_core_instance_id,
+    drain_requested_at,
+    drain_deadline_at,
+    drain_reason_code,
+    resume_capacity
+) SELECT
+    $1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13,
+    0, 'draining', $15, database_clock.database_now,
+    database_clock.database_now + ($16::bigint * INTERVAL '1 millisecond'),
+    'ADMIN_REQUESTED', $14
+FROM runtime_nodes node
+JOIN agent_tokens token
+  ON token.id = $4
+ AND token.agent_id = $3
+JOIN latest_predecessor predecessor
+  ON predecessor.node_id = node.node_id
+CROSS JOIN database_clock
+WHERE node.node_id = $2
+  AND node.status = 'draining'
+  AND node.draining_at IS NOT NULL
+  AND node.revoked_at IS NULL
+  AND node.device_certificate_serial = $7
+  AND node.device_public_key_thumbprint = $8
+  AND node.node_version = $9
+  AND node.protocol_version = $10
+  AND node.runtime_contract_id = $11
+  AND node.runtime_contract_digest = $12
+  AND node.features @> $13::text[]
+  AND $13::text[] @> node.features
+  AND predecessor.status = 'offline'
+  AND predecessor.attached_core_instance_id IS NULL
+  AND predecessor.disconnected_at IS NOT NULL
+  AND predecessor.device_certificate_serial = $7
+  AND predecessor.protocol_version = $10
+  AND predecessor.runtime_contract_id = $11
+  AND predecessor.runtime_contract_digest = $12
+  AND predecessor.features @> $13::text[]
+  AND $13::text[] @> predecessor.features
+  AND EXISTS (
+      SELECT 1 FROM runtime_wire_contracts wire
+      WHERE wire.runtime_contract_id = $11
+        AND wire.runtime_contract_digest = $12
+        AND wire.support_tier IN ('current', 'previous')
+  )
+  AND token.status = 'active_runtime'
+  AND token.revoked_at IS NULL
+  AND token.scopes @> ARRAY['agent:pull']::text[]
+  AND (token.expires_at IS NULL OR token.expires_at > database_clock.database_now)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM runtime_sessions current_or_newer
+      WHERE current_or_newer.node_id = $2
+        AND current_or_newer.agent_id = $3
+        AND current_or_newer.worker_id = $5
+        AND current_or_newer.session_epoch >= $6
+  )
+RETURNING runtime_session_id, node_id, agent_id, credential_id, worker_id,
+          session_epoch, device_certificate_serial, node_version,
+          protocol_version, runtime_contract_id, runtime_contract_digest,
+          features, capacity, inflight, status, attached_core_instance_id,
+          connected_at, heartbeat_at, disconnected_at, created_at, updated_at`
+
+type CreateDrainingRuntimeSessionSuccessorParams struct {
+	RuntimeSessionID          uuid.UUID `db:"runtime_session_id" json:"runtime_session_id"`
+	NodeID                    uuid.UUID `db:"node_id" json:"node_id"`
+	AgentID                   uuid.UUID `db:"agent_id" json:"agent_id"`
+	CredentialID              uuid.UUID `db:"credential_id" json:"credential_id"`
+	WorkerID                  string    `db:"worker_id" json:"worker_id"`
+	SessionEpoch              int64     `db:"session_epoch" json:"session_epoch"`
+	DeviceCertificateSerial   string    `db:"device_certificate_serial" json:"device_certificate_serial"`
+	DevicePublicKeyThumbprint string    `db:"device_public_key_thumbprint" json:"device_public_key_thumbprint"`
+	NodeVersion               string    `db:"node_version" json:"node_version"`
+	ProtocolVersion           int32     `db:"protocol_version" json:"protocol_version"`
+	RuntimeContractID         string    `db:"runtime_contract_id" json:"runtime_contract_id"`
+	RuntimeContractDigest     string    `db:"runtime_contract_digest" json:"runtime_contract_digest"`
+	Features                  []string  `db:"features" json:"features"`
+	ResumeCapacity            int32     `db:"resume_capacity" json:"resume_capacity"`
+	AttachedCoreInstanceID    uuid.UUID `db:"attached_core_instance_id" json:"attached_core_instance_id"`
+	DrainDeadlineMS           int64     `db:"drain_deadline_ms" json:"drain_deadline_ms"`
+}
+
+func (q *Queries) CreateDrainingRuntimeSessionSuccessor(
+	ctx context.Context,
+	arg CreateDrainingRuntimeSessionSuccessorParams,
+) (RuntimeSession, error) {
+	row := q.db.QueryRow(ctx, createDrainingRuntimeSessionSuccessor,
+		arg.RuntimeSessionID,
+		arg.NodeID,
+		arg.AgentID,
+		arg.CredentialID,
+		arg.WorkerID,
+		arg.SessionEpoch,
+		arg.DeviceCertificateSerial,
+		arg.DevicePublicKeyThumbprint,
+		arg.NodeVersion,
+		arg.ProtocolVersion,
+		arg.RuntimeContractID,
+		arg.RuntimeContractDigest,
+		arg.Features,
+		arg.ResumeCapacity,
+		arg.AttachedCoreInstanceID,
+		arg.DrainDeadlineMS,
+	)
+	var session RuntimeSession
+	err := scanRuntimeSession(row, &session)
+	return session, err
+}
+
 const getRuntimeSession = `-- name: GetRuntimeSession :one
 SELECT runtime_session_id, node_id, agent_id, credential_id, worker_id,
        session_epoch, device_certificate_serial, node_version,
@@ -1356,7 +1495,30 @@ WITH candidate AS (
     FOR UPDATE SKIP LOCKED
 )
 UPDATE runtime_sessions s
-SET status = CASE
+SET drain_requested_at = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(s.drain_requested_at, clock_timestamp())
+        ELSE s.drain_requested_at
+    END,
+    drain_deadline_at = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(
+                s.drain_deadline_at,
+                clock_timestamp() + ($9::bigint * INTERVAL '1 millisecond')
+            )
+        ELSE s.drain_deadline_at
+    END,
+    drain_reason_code = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(s.drain_reason_code, 'ADMIN_REQUESTED')
+        ELSE s.drain_reason_code
+    END,
+    resume_capacity = CASE
+        WHEN candidate.node_status = 'draining'
+            THEN COALESCE(s.resume_capacity, $8)
+        ELSE s.resume_capacity
+    END,
+    status = CASE
         WHEN candidate.node_status = 'draining' OR s.status = 'draining'
              OR s.drain_requested_at IS NOT NULL
             THEN 'draining'
@@ -1389,6 +1551,8 @@ type ClaimRuntimeSessionForCoreParams struct {
 	WorkerID         string    `db:"worker_id" json:"worker_id"`
 	SessionEpoch     int64     `db:"session_epoch" json:"session_epoch"`
 	CoreInstanceID   uuid.UUID `db:"core_instance_id" json:"core_instance_id"`
+	ResumeCapacity   int32     `db:"resume_capacity" json:"resume_capacity"`
+	DrainDeadlineMS  int64     `db:"drain_deadline_ms" json:"drain_deadline_ms"`
 }
 
 func (q *Queries) ClaimRuntimeSessionForCore(ctx context.Context, arg ClaimRuntimeSessionForCoreParams) (RuntimeSession, error) {
@@ -1400,6 +1564,8 @@ func (q *Queries) ClaimRuntimeSessionForCore(ctx context.Context, arg ClaimRunti
 		arg.WorkerID,
 		arg.SessionEpoch,
 		arg.CoreInstanceID,
+		arg.ResumeCapacity,
+		arg.DrainDeadlineMS,
 	)
 	var session RuntimeSession
 	err := scanRuntimeSession(row, &session)

@@ -585,7 +585,7 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 			}
 			return nodeErr
 		}
-		if node.Status != "active" {
+		if node.Status != "active" && node.Status != "draining" {
 			return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, nil)
 		}
 		active, nodeErr := negotiateRuntimeNodeForSession(ctx, tx, node, principal, normalized)
@@ -598,22 +598,52 @@ func (s *RuntimeSessionService) CreateOrAttachSession(
 				return newRuntimeSessionError(RuntimeSessionErrorSessionConflict, nil)
 			}
 		}
-		created, createErr := tx.CreateRuntimeSession(ctx, db.CreateRuntimeSessionParams{
-			RuntimeSessionID:        normalized.RuntimeSessionID,
-			NodeID:                  principal.Device.NodeID,
-			AgentID:                 principal.AgentID,
-			CredentialID:            principal.CredentialID,
-			WorkerID:                normalized.WorkerID,
-			SessionEpoch:            normalized.SessionEpoch,
-			DeviceCertificateSerial: principal.Device.CertificateSerial,
-			NodeVersion:             normalized.NodeVersion,
-			ProtocolVersion:         normalized.ProtocolVersion,
-			RuntimeContractID:       normalized.RuntimeContractID,
-			RuntimeContractDigest:   normalized.RuntimeContractDigest,
-			Features:                normalized.Features,
-			Capacity:                normalized.Capacity,
-			AttachedCoreInstanceID:  s.coreInstanceID,
-		})
+		var created db.RuntimeSession
+		var createErr error
+		if node.Status == "draining" {
+			// SDK process restarts rotate both Session ID and epoch. The dedicated
+			// statement admits only a monotonic successor of the latest durable
+			// offline worker generation and commits the drain fence with the row;
+			// it cannot become a general new-Session path for a draining Node.
+			created, createErr = tx.CreateDrainingRuntimeSessionSuccessor(
+				ctx,
+				db.CreateDrainingRuntimeSessionSuccessorParams{
+					RuntimeSessionID:          normalized.RuntimeSessionID,
+					NodeID:                    principal.Device.NodeID,
+					AgentID:                   principal.AgentID,
+					CredentialID:              principal.CredentialID,
+					WorkerID:                  normalized.WorkerID,
+					SessionEpoch:              normalized.SessionEpoch,
+					DeviceCertificateSerial:   principal.Device.CertificateSerial,
+					DevicePublicKeyThumbprint: principal.Device.PublicKeyThumbprintSHA256,
+					NodeVersion:               normalized.NodeVersion,
+					ProtocolVersion:           normalized.ProtocolVersion,
+					RuntimeContractID:         normalized.RuntimeContractID,
+					RuntimeContractDigest:     normalized.RuntimeContractDigest,
+					Features:                  normalized.Features,
+					ResumeCapacity:            normalized.Capacity,
+					AttachedCoreInstanceID:    s.coreInstanceID,
+					DrainDeadlineMS:           runtimeNodeDrainDeadline.Milliseconds(),
+				},
+			)
+		} else {
+			created, createErr = tx.CreateRuntimeSession(ctx, db.CreateRuntimeSessionParams{
+				RuntimeSessionID:        normalized.RuntimeSessionID,
+				NodeID:                  principal.Device.NodeID,
+				AgentID:                 principal.AgentID,
+				CredentialID:            principal.CredentialID,
+				WorkerID:                normalized.WorkerID,
+				SessionEpoch:            normalized.SessionEpoch,
+				DeviceCertificateSerial: principal.Device.CertificateSerial,
+				NodeVersion:             normalized.NodeVersion,
+				ProtocolVersion:         normalized.ProtocolVersion,
+				RuntimeContractID:       normalized.RuntimeContractID,
+				RuntimeContractDigest:   normalized.RuntimeContractDigest,
+				Features:                normalized.Features,
+				Capacity:                normalized.Capacity,
+				AttachedCoreInstanceID:  s.coreInstanceID,
+			})
+		}
 		if createErr != nil {
 			if errors.Is(createErr, pgx.ErrNoRows) {
 				return newRuntimeSessionError(RuntimeSessionErrorPrincipalInactive, createErr)
@@ -712,6 +742,8 @@ func (s *RuntimeSessionService) attachExistingSession(
 		WorkerID:         existing.WorkerID,
 		SessionEpoch:     existing.SessionEpoch,
 		CoreInstanceID:   s.coreInstanceID,
+		ResumeCapacity:   request.Capacity,
+		DrainDeadlineMS:  runtimeNodeDrainDeadline.Milliseconds(),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1539,6 +1571,7 @@ type runtimeSessionTransaction interface {
 	ListActiveRuntimeSessionsByNode(context.Context, uuid.UUID) ([]db.RuntimeSession, error)
 	RetireOfflineRuntimeSessionsForGenerationSwitch(context.Context, uuid.UUID, string) (int64, error)
 	CreateRuntimeSession(context.Context, db.CreateRuntimeSessionParams) (db.RuntimeSession, error)
+	CreateDrainingRuntimeSessionSuccessor(context.Context, db.CreateDrainingRuntimeSessionSuccessorParams) (db.RuntimeSession, error)
 	ClaimRuntimeSessionForCore(context.Context, db.ClaimRuntimeSessionForCoreParams) (db.RuntimeSession, error)
 	HeartbeatRuntimeSession(context.Context, db.HeartbeatRuntimeSessionParams) (db.RuntimeSession, error)
 	DrainRuntimeSession(context.Context, uuid.UUID, uuid.UUID, RuntimeDrainPayload) (runtimeSessionDrainRecord, error)
@@ -1784,6 +1817,13 @@ func (t *postgresRuntimeSessionTransaction) ListActiveRuntimeSessionsByNode(ctx 
 
 func (t *postgresRuntimeSessionTransaction) CreateRuntimeSession(ctx context.Context, params db.CreateRuntimeSessionParams) (db.RuntimeSession, error) {
 	return t.queries.CreateRuntimeSession(ctx, params)
+}
+
+func (t *postgresRuntimeSessionTransaction) CreateDrainingRuntimeSessionSuccessor(
+	ctx context.Context,
+	params db.CreateDrainingRuntimeSessionSuccessorParams,
+) (db.RuntimeSession, error) {
+	return t.queries.CreateDrainingRuntimeSessionSuccessor(ctx, params)
 }
 
 func (t *postgresRuntimeSessionTransaction) ClaimRuntimeSessionForCore(ctx context.Context, params db.ClaimRuntimeSessionForCoreParams) (db.RuntimeSession, error) {

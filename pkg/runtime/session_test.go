@@ -163,6 +163,116 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	}
 }
 
+func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	predecessorID := fixture.request.RuntimeSessionID
+	fixture.request.RuntimeSessionID = uuid.New()
+	fixture.request.SessionEpoch++
+	fixture.request.Capacity = 7
+	tx := newSessionTransactionFake(fixture)
+	tx.getErr = pgx.ErrNoRows
+	tx.node.Status = "draining"
+	tx.session.RuntimeSessionID = predecessorID
+	tx.session.SessionEpoch = fixture.request.SessionEpoch - 1
+	tx.session.Status = "offline"
+	tx.session.AttachedCoreInstanceID = nil
+	disconnectedAt := fixture.databaseNow.Add(-time.Second)
+	tx.session.DisconnectedAt = &disconnectedAt
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if err != nil {
+		t.Fatalf("CreateOrAttachSession() error = %v", err)
+	}
+	wantOrder := []string{
+		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
+		"lock_attachments", "get_session_for_update", "cluster_gate", "check_generation",
+		"get_node", "list_active", "heartbeat_node", "create_draining_successor", "create_attachment",
+	}
+	if !reflect.DeepEqual(tx.operations, wantOrder) {
+		t.Fatalf("operation order = %#v, want %#v", tx.operations, wantOrder)
+	}
+	params := tx.createSuccessorParams
+	if tx.createCalls != 0 || tx.createSuccessorCalls != 1 ||
+		params.RuntimeSessionID != fixture.request.RuntimeSessionID ||
+		params.NodeID != fixture.principal.Device.NodeID ||
+		params.AgentID != fixture.principal.AgentID ||
+		params.CredentialID != fixture.principal.CredentialID ||
+		params.WorkerID != fixture.request.WorkerID ||
+		params.SessionEpoch != fixture.request.SessionEpoch ||
+		params.DeviceCertificateSerial != fixture.principal.Device.CertificateSerial ||
+		params.DevicePublicKeyThumbprint != fixture.principal.Device.PublicKeyThumbprintSHA256 ||
+		params.RuntimeContractID != fixture.request.RuntimeContractID ||
+		params.RuntimeContractDigest != fixture.request.RuntimeContractDigest ||
+		params.ResumeCapacity != fixture.request.Capacity ||
+		params.AttachedCoreInstanceID != fixture.coreID ||
+		params.DrainDeadlineMS != runtimeNodeDrainDeadline.Milliseconds() {
+		t.Fatalf("draining successor params = %#v", params)
+	}
+	if state.Session.Status != "draining" || state.Session.Capacity != 0 ||
+		state.Attachment == nil || tx.drainResumeCapacity != fixture.request.Capacity ||
+		tx.drainReason != "ADMIN_REQUESTED" || tx.drainRequestedAt.IsZero() ||
+		!tx.drainDeadline.Equal(tx.drainRequestedAt.Add(runtimeNodeDrainDeadline)) {
+		t.Fatalf("draining successor state=%#v evidence=%s/%s/%s resume=%d",
+			state, tx.drainRequestedAt, tx.drainDeadline, tx.drainReason, tx.drainResumeCapacity)
+	}
+}
+
+func TestRuntimeSessionServiceDrainingNodeStillRejectsOrdinaryNewSession(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	tx.getErr = pgx.ErrNoRows
+	tx.node.Status = "draining"
+	tx.createSuccessorErr = pgx.ErrNoRows
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	_, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if !IsRuntimeSessionError(err, RuntimeSessionErrorPrincipalInactive) {
+		t.Fatalf("ordinary new Session error = %v", err)
+	}
+	if tx.createCalls != 0 || tx.createSuccessorCalls != 1 ||
+		slices.Contains(tx.operations, "create_attachment") {
+		t.Fatalf("ordinary new Session crossed draining fence: %#v", tx.operations)
+	}
+}
+
+func TestRuntimeSessionServiceOfflineClaimOnDrainingNodeAddsEvidenceAtomically(t *testing.T) {
+	t.Parallel()
+
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	tx.node.Status = "draining"
+	tx.session.Status = "offline"
+	tx.session.AttachedCoreInstanceID = nil
+	disconnectedAt := fixture.databaseNow.Add(-time.Second)
+	tx.session.DisconnectedAt = &disconnectedAt
+	service := newRuntimeSessionService(&sessionRepositoryFake{tx: tx}, fixture.coreID)
+
+	state, err := service.CreateOrAttachSession(context.Background(), fixture.principal, fixture.request)
+	if err != nil {
+		t.Fatalf("CreateOrAttachSession() error = %v", err)
+	}
+	if state.Session.Status != "draining" || state.Session.Capacity != 0 ||
+		tx.claimParams.ResumeCapacity != fixture.request.Capacity ||
+		tx.claimParams.DrainDeadlineMS != runtimeNodeDrainDeadline.Milliseconds() ||
+		tx.drainRequestedAt.IsZero() || tx.drainReason != "ADMIN_REQUESTED" ||
+		tx.drainResumeCapacity != fixture.request.Capacity ||
+		!tx.drainDeadline.Equal(tx.drainRequestedAt.Add(runtimeNodeDrainDeadline)) {
+		t.Fatalf("offline claim state=%#v params=%#v evidence=%s/%s/%s resume=%d",
+			state, tx.claimParams, tx.drainRequestedAt, tx.drainDeadline,
+			tx.drainReason, tx.drainResumeCapacity)
+	}
+	if !slices.Contains(tx.operations, "claim_session") ||
+		!slices.Contains(tx.operations, "heartbeat_session") ||
+		!slices.Contains(tx.operations, "create_attachment") {
+		t.Fatalf("offline claim did not commit claim/heartbeat/attachment: %#v", tx.operations)
+	}
+}
+
 func TestRuntimeSessionServiceRejectsUnprovableTransportReasonBeforeMutableWrites(t *testing.T) {
 	t.Parallel()
 
@@ -837,6 +947,9 @@ type sessionTransactionFake struct {
 	createErr              error
 	createCalls            int
 	createParams           db.CreateRuntimeSessionParams
+	createSuccessorErr     error
+	createSuccessorCalls   int
+	createSuccessorParams  db.CreateDrainingRuntimeSessionSuccessorParams
 	claimParams            db.ClaimRuntimeSessionForCoreParams
 	heartbeatParams        db.HeartbeatRuntimeSessionParams
 	heartbeatNodeParams    db.HeartbeatRuntimeNodeParams
@@ -1002,12 +1115,62 @@ func (f *sessionTransactionFake) CreateRuntimeSession(_ context.Context, params 
 	return created, nil
 }
 
+func (f *sessionTransactionFake) CreateDrainingRuntimeSessionSuccessor(
+	_ context.Context,
+	params db.CreateDrainingRuntimeSessionSuccessorParams,
+) (db.RuntimeSession, error) {
+	f.op("create_draining_successor")
+	f.createSuccessorCalls++
+	f.createSuccessorParams = params
+	if f.createSuccessorErr != nil {
+		return db.RuntimeSession{}, f.createSuccessorErr
+	}
+	requestedAt := f.fixture.databaseNow.Add(2 * time.Second)
+	f.drainRequestedAt = requestedAt
+	f.drainDeadline = requestedAt.Add(time.Duration(params.DrainDeadlineMS) * time.Millisecond)
+	f.drainReason = "ADMIN_REQUESTED"
+	f.drainResumeCapacity = params.ResumeCapacity
+	created := f.session
+	created.RuntimeSessionID = params.RuntimeSessionID
+	created.NodeID = params.NodeID
+	created.AgentID = params.AgentID
+	created.CredentialID = params.CredentialID
+	created.WorkerID = params.WorkerID
+	created.SessionEpoch = params.SessionEpoch
+	created.DeviceCertificateSerial = params.DeviceCertificateSerial
+	created.NodeVersion = params.NodeVersion
+	created.ProtocolVersion = params.ProtocolVersion
+	created.RuntimeContractID = params.RuntimeContractID
+	created.RuntimeContractDigest = params.RuntimeContractDigest
+	created.Features = append([]string(nil), params.Features...)
+	created.Capacity = 0
+	created.Status = "draining"
+	created.AttachedCoreInstanceID = &f.fixture.coreID
+	created.DisconnectedAt = nil
+	created.HeartbeatAt = requestedAt
+	f.session = created
+	return created, nil
+}
+
 func (f *sessionTransactionFake) ClaimRuntimeSessionForCore(_ context.Context, params db.ClaimRuntimeSessionForCoreParams) (db.RuntimeSession, error) {
 	f.op("claim_session")
 	f.claimParams = params
 	claimed := f.session
-	claimed.Status = "active"
+	if f.node.Status == "draining" {
+		if f.drainRequestedAt.IsZero() {
+			f.drainRequestedAt = f.fixture.databaseNow.Add(2 * time.Second)
+			f.drainDeadline = f.drainRequestedAt.Add(time.Duration(params.DrainDeadlineMS) * time.Millisecond)
+			f.drainReason = "ADMIN_REQUESTED"
+			f.drainResumeCapacity = params.ResumeCapacity
+		}
+		claimed.Status = "draining"
+		claimed.Capacity = 0
+	} else {
+		claimed.Status = "active"
+	}
 	claimed.AttachedCoreInstanceID = &f.fixture.coreID
+	claimed.DisconnectedAt = nil
+	f.session = claimed
 	return claimed, nil
 }
 
@@ -1018,10 +1181,15 @@ func (f *sessionTransactionFake) HeartbeatRuntimeSession(_ context.Context, para
 		return db.RuntimeSession{}, f.heartbeatErr
 	}
 	heartbeat := f.session
-	heartbeat.Status = "active"
+	if heartbeat.Status == "draining" {
+		heartbeat.Capacity = 0
+	} else {
+		heartbeat.Status = "active"
+		heartbeat.Capacity = params.Capacity
+	}
 	heartbeat.AttachedCoreInstanceID = &f.fixture.coreID
-	heartbeat.Capacity = params.Capacity
 	heartbeat.HeartbeatAt = f.fixture.databaseNow.Add(2 * time.Second)
+	f.session = heartbeat
 	return heartbeat, nil
 }
 
