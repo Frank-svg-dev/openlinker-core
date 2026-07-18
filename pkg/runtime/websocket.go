@@ -17,13 +17,16 @@ import (
 )
 
 const (
-	runtimeWSWriteWait         = 10 * time.Second
-	runtimeWSPongWait          = 75 * time.Second
-	runtimeWSPingInterval      = 30 * time.Second
-	runtimeWSClaimInterval     = 500 * time.Millisecond
-	runtimeWSHeartbeatInterval = RuntimeHeartbeatInterval
-	runtimeWSCleanupTimeout    = 5 * time.Second
-	runtimeWSWriteQueue        = 32
+	runtimeWSWriteWait           = 10 * time.Second
+	runtimeWSPongWait            = 75 * time.Second
+	runtimeWSPingInterval        = 30 * time.Second
+	runtimeWSPolicyCheckInterval = 500 * time.Millisecond
+	// WakeHub is the normal dispatch path. This ticker is only the bounded
+	// database recovery path for a duplicated or missed Runtime signal.
+	defaultRuntimeWSFallbackInterval = 30 * time.Second
+	runtimeWSHeartbeatInterval       = RuntimeHeartbeatInterval
+	runtimeWSCleanupTimeout          = 5 * time.Second
+	runtimeWSWriteQueue              = 32
 )
 
 var runtimeWSUpgrader = websocket.Upgrader{
@@ -708,8 +711,10 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 		}
 	}
 
-	claimTicker := time.NewTicker(runtimeWSClaimInterval)
-	defer claimTicker.Stop()
+	fallbackTicker := time.NewTicker(c.controller.runtimeWebSocketFallbackInterval())
+	defer fallbackTicker.Stop()
+	policyTicker := time.NewTicker(runtimeWSPolicyCheckInterval)
+	defer policyTicker.Stop()
 
 	if !c.refreshMaintenanceSession() {
 		return
@@ -724,7 +729,14 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 		select {
 		case <-c.ctx.Done():
 			return
-		case <-claimTicker.C:
+		case <-policyTicker.C:
+			// Policy providers are in-memory. Preserve fast policy cutover without
+			// reintroducing the former per-connection PostgreSQL poll.
+			if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
+				c.closeForError(admissionErr)
+				return
+			}
+		case <-fallbackTicker.C:
 			if !c.refreshMaintenanceSession() {
 				return
 			}

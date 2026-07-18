@@ -102,8 +102,9 @@ type RuntimeHTTPDependencies struct {
 // RuntimeHTTPController is the strict HTTP transport adapter for the durable
 // Runtime state machine.
 type RuntimeHTTPController struct {
-	dependencies RuntimeHTTPDependencies
-	webSockets   *runtimeWSRegistry
+	dependencies              RuntimeHTTPDependencies
+	webSockets                *runtimeWSRegistry
+	webSocketFallbackInterval time.Duration
 }
 
 // runtimePreviousReadyPayload is the strict pre-attachment-generation Ready
@@ -119,9 +120,17 @@ type runtimePreviousReadyPayload struct {
 
 func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
 	return &RuntimeHTTPController{
-		dependencies: dependencies,
-		webSockets:   newRuntimeWSRegistry(),
+		dependencies:              dependencies,
+		webSockets:                newRuntimeWSRegistry(),
+		webSocketFallbackInterval: defaultRuntimeWSFallbackInterval,
 	}
+}
+
+func (h *RuntimeHTTPController) runtimeWebSocketFallbackInterval() time.Duration {
+	if h == nil || h.webSocketFallbackInterval <= 0 {
+		return defaultRuntimeWSFallbackInterval
+	}
+	return h.webSocketFallbackInterval
 }
 
 func newRuntimeHTTPControllerForService(service runtimeService) *RuntimeHTTPController {
@@ -847,10 +856,12 @@ func (h *RuntimeHTTPController) claimWithWait(
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,
 ) (*RunAssignedPayload, error) {
+	// Query once on request entry, then let the durable signal outbox/WakeHub
+	// drive normal delivery. The next long-poll request is the database fallback
+	// when a signal is missed; polling inside this request only amplifies idle DB
+	// traffic by the number of connected workers.
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
-	poll := time.NewTicker(200 * time.Millisecond)
-	defer poll.Stop()
 	for {
 		var wake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
@@ -866,7 +877,6 @@ func (h *RuntimeHTTPController) claimWithWait(
 		case <-deadline.C:
 			return nil, nil
 		case <-wake:
-		case <-poll.C:
 		}
 	}
 }
@@ -876,10 +886,10 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 	principal RuntimeSessionPrincipal,
 	wait time.Duration,
 ) (RuntimeCommandsResponse, error) {
+	// Cancellation signals use the same wake path. A request deadline remains
+	// the bounded fallback without a 200ms PostgreSQL loop.
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
-	poll := time.NewTicker(200 * time.Millisecond)
-	defer poll.Stop()
 	for {
 		var wake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
@@ -895,7 +905,6 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 		case <-deadline.C:
 			return response, nil
 		case <-wake:
-		case <-poll.C:
 		}
 	}
 }

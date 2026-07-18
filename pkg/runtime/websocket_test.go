@@ -372,6 +372,41 @@ func TestRuntimeWebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *tes
 	require.Empty(t, fixture.leases.releaseReason())
 }
 
+func TestRuntimeWebSocketIdleDoesNotContinuouslyPollDatabase(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() >= 1 && fixture.cancellations.nextCallCount() >= 1
+	}, time.Second, 10*time.Millisecond)
+
+	claims := fixture.leases.claimCallCount()
+	commands := fixture.cancellations.nextCallCount()
+	time.Sleep(750 * time.Millisecond)
+	require.Equal(t, claims, fixture.leases.claimCallCount())
+	require.Equal(t, commands, fixture.cancellations.nextCallCount())
+}
+
+func TestRuntimeWebSocketFallbackEventuallyPollsDatabase(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	fixture.fallbackInterval = 50 * time.Millisecond
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() >= 2 && fixture.cancellations.nextCallCount() >= 2
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestRuntimeWebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
@@ -875,21 +910,22 @@ func TestRuntimeWebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
 }
 
 type runtimeWSTestFixture struct {
-	now             time.Time
-	authenticated   AuthenticatedRuntimePrincipal
-	hello           RuntimeHelloPayload
-	principal       RuntimeSessionPrincipal
-	operations      *runtimeWSOperations
-	tokens          *runtimeWSTokenValidatorFake
-	devices         *runtimeWSDeviceAuthenticatorFake
-	sessions        *runtimeWSSessionServiceFake
-	leases          *runtimeWSLeaseServiceFake
-	events          *runtimeWSEventStoreFake
-	finalizer       *runtimeWSFinalizerFake
-	resume          RuntimeResumeAPI
-	cancellations   *runtimeWSCancellationServiceFake
-	wakeHub         *RuntimeWakeHub
-	transportPolicy RuntimeTransportPolicyProvider
+	now              time.Time
+	authenticated    AuthenticatedRuntimePrincipal
+	hello            RuntimeHelloPayload
+	principal        RuntimeSessionPrincipal
+	operations       *runtimeWSOperations
+	tokens           *runtimeWSTokenValidatorFake
+	devices          *runtimeWSDeviceAuthenticatorFake
+	sessions         *runtimeWSSessionServiceFake
+	leases           *runtimeWSLeaseServiceFake
+	events           *runtimeWSEventStoreFake
+	finalizer        *runtimeWSFinalizerFake
+	resume           RuntimeResumeAPI
+	cancellations    *runtimeWSCancellationServiceFake
+	wakeHub          *RuntimeWakeHub
+	transportPolicy  RuntimeTransportPolicyProvider
+	fallbackInterval time.Duration
 }
 
 func newRuntimeWSTestFixture() *runtimeWSTestFixture {
@@ -977,7 +1013,7 @@ func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 }
 
 func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
-	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
 		TransportPolicy:     f.transportPolicy,
@@ -989,6 +1025,10 @@ func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
 		Cancellations:       f.cancellations,
 		WakeHub:             f.wakeHub,
 	})
+	if f.fallbackInterval > 0 {
+		controller.webSocketFallbackInterval = f.fallbackInterval
+	}
+	return controller
 }
 
 func (f *runtimeWSTestFixture) server(t *testing.T) (*httptest.Server, string) {
@@ -1251,6 +1291,7 @@ type runtimeWSLeaseServiceFake struct {
 	renewErr       error
 	releaseErr     error
 	releaseCode    string
+	claimCalls     int
 	ackCalls       int
 	rejectCalls    int
 	renewCalls     int
@@ -1259,11 +1300,18 @@ type runtimeWSLeaseServiceFake struct {
 func (f *runtimeWSLeaseServiceFake) ClaimOffer(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.claimCalls++
 	if f.assignment == nil {
 		return nil, f.claimErr
 	}
 	copy := *f.assignment
 	return &copy, f.claimErr
+}
+
+func (f *runtimeWSLeaseServiceFake) claimCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.claimCalls
 }
 
 func (f *runtimeWSLeaseServiceFake) AckAssignment(_ context.Context, _ RuntimeSessionPrincipal, _ RunAssignmentAckPayload) (RunAssignmentConfirmedPayload, error) {
@@ -1396,6 +1444,7 @@ type runtimeWSCancellationServiceFake struct {
 	command      *PendingCommand
 	databaseTime time.Time
 	nextErr      error
+	nextCalls    int
 	ackState     RunCancellationState
 	ackErr       error
 	ackPayloads  []RunCancelAckPayload
@@ -1407,12 +1456,19 @@ func (f *runtimeWSCancellationServiceFake) NextCommand(
 ) (*PendingCommand, time.Time, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.nextCalls++
 	if f.command == nil {
 		return nil, f.databaseTime, f.nextErr
 	}
 	command := *f.command
 	command.Payload = append([]byte(nil), f.command.Payload...)
 	return &command, f.databaseTime, f.nextErr
+}
+
+func (f *runtimeWSCancellationServiceFake) nextCallCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.nextCalls
 }
 
 func (f *runtimeWSCancellationServiceFake) PollCommands(

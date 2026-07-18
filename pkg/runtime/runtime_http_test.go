@@ -179,6 +179,41 @@ func TestRuntimePullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
 	require.Less(t, time.Since(started), 190*time.Millisecond)
 }
 
+func TestRuntimePullClaimWaitDoesNotContinuouslyPollDatabase(t *testing.T) {
+	var calls int
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
+		Leases: &runtimeLeaseServiceFake{
+			claim: func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
+				calls++
+				return nil, nil
+			},
+		},
+		WakeHub: NewRuntimeWakeHub(),
+	})
+
+	assignment, err := controller.claimWithWait(
+		context.Background(), RuntimeSessionPrincipal{AgentID: uuid.New()}, 450*time.Millisecond,
+	)
+	require.NoError(t, err)
+	require.Nil(t, assignment)
+	require.Equal(t, 1, calls)
+}
+
+func TestRuntimePullCommandWaitDoesNotContinuouslyPollDatabase(t *testing.T) {
+	cancellations := &runtimeCancellationServiceFake{}
+	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
+		Cancellations: cancellations,
+		WakeHub:       NewRuntimeWakeHub(),
+	})
+
+	response, err := controller.pollCommandsWithWait(
+		context.Background(), RuntimeSessionPrincipal{AgentID: uuid.New()}, 450*time.Millisecond,
+	)
+	require.NoError(t, err)
+	require.Empty(t, response.Commands)
+	require.Equal(t, 1, cancellations.pollCalls)
+}
+
 func TestRuntimeCreateSessionAuthenticatesThenMapsFormalHello(t *testing.T) {
 	fixture := newRuntimeHandlerFixture()
 	var created RuntimeSessionRequest
