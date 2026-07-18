@@ -3,7 +3,7 @@ BEGIN;
 SET LOCAL lock_timeout = '5s';
 SET LOCAL statement_timeout = '0';
 
-SELECT pg_advisory_xact_lock(hashtextextended('openlinker.runtime.migration.079', 0));
+SELECT pg_advisory_xact_lock(hashtextextended('openlinker.runtime.migration.080', 0));
 
 LOCK TABLE runs IN SHARE ROW EXCLUSIVE MODE;
 LOCK TABLE run_attempts IN ACCESS EXCLUSIVE MODE;
@@ -17,26 +17,26 @@ DECLARE
     current_digest CONSTANT TEXT := '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481';
 BEGIN
     IF EXISTS (SELECT 1 FROM runtime_cluster_members) THEN
-        RAISE EXCEPTION 'migration 079 rollback requires zero registered Core cluster members';
+        RAISE EXCEPTION 'migration 080 rollback requires zero registered Core cluster members';
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM runtime_cluster_control
         WHERE singleton_id = 1 AND mode = 'hard_maintenance'
     ) THEN
-        RAISE EXCEPTION 'migration 079 rollback requires hard maintenance';
+        RAISE EXCEPTION 'migration 080 rollback requires hard maintenance';
     END IF;
     IF EXISTS (SELECT 1 FROM runs WHERE status = 'running') THEN
-        RAISE EXCEPTION 'migration 079 rollback requires zero running Runs';
+        RAISE EXCEPTION 'migration 080 rollback requires zero running Runs';
     END IF;
     IF (
         SELECT COUNT(*) FROM runtime_schema_contracts
-        WHERE schema_version = 79
-          AND migration_name = '079_runtime_attempt_transport_evidence'
+        WHERE schema_version = 80
+          AND migration_name = '080_runtime_attempt_transport_evidence'
           AND runtime_contract_id = 'openlinker.runtime.v2'
           AND runtime_contract_digest = current_digest
           AND is_current
     ) <> 1 OR (SELECT COUNT(*) FROM runtime_schema_contracts WHERE is_current) <> 1 THEN
-        RAISE EXCEPTION 'migration 079 rollback requires the exact current schema contract 79';
+        RAISE EXCEPTION 'migration 080 rollback requires the exact current schema contract 80';
     END IF;
     IF (
         SELECT COUNT(*) FROM runtime_schema_contracts
@@ -46,27 +46,27 @@ BEGIN
           AND runtime_contract_digest = current_digest
           AND NOT is_current
     ) <> 1 THEN
-        RAISE EXCEPTION 'migration 079 rollback requires the exact historical schema contract 77';
+        RAISE EXCEPTION 'migration 080 rollback requires the exact historical schema contract 77';
     END IF;
     IF EXISTS (
         SELECT 1 FROM run_attempts WHERE runtime_attachment_id IS NOT NULL
     ) THEN
-        RAISE EXCEPTION 'migration 079 rollback refuses recorded Runtime Attachment evidence';
+        RAISE EXCEPTION 'migration 080 rollback refuses recorded Runtime Attachment evidence';
     END IF;
 END
 $$;
 
 UPDATE runtime_schema_contracts
 SET is_current = FALSE
-WHERE schema_version = 79
-  AND migration_name = '079_runtime_attempt_transport_evidence'
+WHERE schema_version = 80
+  AND migration_name = '080_runtime_attempt_transport_evidence'
   AND runtime_contract_id = 'openlinker.runtime.v2'
   AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481'
   AND is_current;
 
 DELETE FROM runtime_schema_contracts
-WHERE schema_version = 79
-  AND migration_name = '079_runtime_attempt_transport_evidence'
+WHERE schema_version = 80
+  AND migration_name = '080_runtime_attempt_transport_evidence'
   AND runtime_contract_id = 'openlinker.runtime.v2'
   AND runtime_contract_digest = '4be9b2fe09eeedf0e37119075134064be88f93b301c502cdfa21a6cb978c6481'
   AND NOT is_current;

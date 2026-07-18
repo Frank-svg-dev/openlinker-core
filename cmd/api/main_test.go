@@ -13,6 +13,7 @@ import (
 	"time"
 
 	migratecmd "github.com/golang-migrate/migrate/v4"
+	migratefile "github.com/golang-migrate/migrate/v4/source/file"
 	"github.com/google/uuid"
 	"github.com/labstack/echo/v4"
 
@@ -594,6 +595,21 @@ func TestMigrationConfig(t *testing.T) {
 				t.Fatalf("migrationConfig = %q/%q, want %q/%q", gotURL, gotSrc, tt.wantURL, tt.wantSrc)
 			}
 		})
+	}
+}
+
+func TestMigrationSourceLoadsWithoutDuplicateVersions(t *testing.T) {
+	driver, err := (&migratefile.File{}).Open("file://../../migrations")
+	if err != nil {
+		t.Fatalf("open migration source: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := driver.Close(); err != nil {
+			t.Errorf("close migration source: %v", err)
+		}
+	})
+	if _, err := driver.First(); err != nil {
+		t.Fatalf("read first migration: %v", err)
 	}
 }
 
