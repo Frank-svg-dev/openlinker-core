@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -98,6 +99,109 @@ func TestEnsureAccountUsesVerificationCodeAndLoginAfterRegister(t *testing.T) {
 	}
 }
 
+func TestSetupAccountsUsesAuthAndCoreAPIRoots(t *testing.T) {
+	var authCalls atomic.Int32
+	var coreCalls atomic.Int32
+	authServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/auth/login" {
+			http.NotFound(w, r)
+			return
+		}
+		authCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"email": "openlinker-perf-routing-u000@example.local",
+			"jwt":   "jwt-token",
+			"user":  map[string]any{"id": "user-1"},
+		})
+	}))
+	defer authServer.Close()
+	coreServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/me/become-creator" {
+			http.NotFound(w, r)
+			return
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer jwt-token" {
+			t.Errorf("authorization = %q", got)
+		}
+		coreCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer coreServer.Close()
+
+	cfg := config{Users: 1, SetupUserConcurrency: 1}
+	accounts, err := setupAccounts(
+		context.Background(),
+		&apiClient{root: authServer.URL, client: authServer.Client()},
+		&apiClient{root: coreServer.URL, client: coreServer.Client()},
+		cfg,
+		"routing",
+		&metrics{},
+	)
+	if err != nil {
+		t.Fatalf("setupAccounts error = %v", err)
+	}
+	if len(accounts) != 1 || accounts[0].JWT != "jwt-token" {
+		t.Fatalf("accounts = %#v", accounts)
+	}
+	if got := authCalls.Load(); got != 1 {
+		t.Fatalf("auth calls = %d, want 1", got)
+	}
+	if got := coreCalls.Load(); got != 1 {
+		t.Fatalf("core calls = %d, want 1", got)
+	}
+}
+
+func TestSetupAgentsReusesRedeemedTokenWithinWorkerLimit(t *testing.T) {
+	for _, workers := range []int{1, 10} {
+		t.Run(fmt.Sprintf("workers_%d", workers), func(t *testing.T) {
+			var tokenCalls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/creator/agent-tokens":
+					call := tokenCalls.Add(1)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"plaintext_token": fmt.Sprintf("runtime-token-%02d", call),
+					})
+				case "/agent-registration/agents":
+					if got := r.Header.Get("Authorization"); got != "Bearer runtime-token-01" {
+						t.Errorf("registration authorization = %q", got)
+					}
+					w.WriteHeader(http.StatusCreated)
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"agent": map[string]any{"id": "agent-1", "slug": "perf-agent-1"},
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+
+			creator := account{JWT: "creator-jwt"}
+			creator.User.ID = "user-1"
+			agents, err := setupAgents(
+				context.Background(),
+				&apiClient{root: server.URL, client: server.Client()},
+				config{Agents: 1, WorkersPerAgent: workers, SetupAgentConcurrency: 1},
+				"token-count",
+				[]account{creator},
+				&metrics{},
+			)
+			if err != nil {
+				t.Fatalf("setupAgents error = %v", err)
+			}
+			if got := tokenCalls.Load(); got != int32(workers) {
+				t.Fatalf("token calls = %d, want %d", got, workers)
+			}
+			if got := len(agents[0].RuntimeKeys); got != workers {
+				t.Fatalf("runtime key count = %d, want %d", got, workers)
+			}
+			if got := agents[0].RuntimeKeys[0]; got != "runtime-token-01" {
+				t.Fatalf("first runtime key = %q, want redeemed registration token", got)
+			}
+		})
+	}
+}
+
 func TestConfigValidateDerivesSetupConcurrency(t *testing.T) {
 	directory := t.TempDir()
 	cert := filepath.Join(directory, "node.crt")
@@ -129,6 +233,9 @@ func TestConfigValidateDerivesSetupConcurrency(t *testing.T) {
 	}
 	if cfg.SetupAgentConcurrency != 16 {
 		t.Fatalf("setup agent concurrency = %d, want 16", cfg.SetupAgentConcurrency)
+	}
+	if cfg.AuthAPIRoot != cfg.APIRoot {
+		t.Fatalf("auth API root = %q, want Core API root %q", cfg.AuthAPIRoot, cfg.APIRoot)
 	}
 }
 
@@ -171,6 +278,14 @@ func TestSubmitRunsDoesNotDeadlockWhenErrorsExceedConcurrency(t *testing.T) {
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		var body struct {
+			Input map[string]any `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode run request: %v", err)
+		} else if got, want := r.Header.Get("Idempotency-Key"), body.Input["client_task_id"]; got == "" || got != want {
+			t.Errorf("Idempotency-Key = %q, client_task_id = %v", got, want)
+		}
 		http.Error(w, `{"error":"create failed"}`, http.StatusInternalServerError)
 	}))
 	defer server.Close()
@@ -205,6 +320,31 @@ func TestSubmitRunsDoesNotDeadlockWhenErrorsExceedConcurrency(t *testing.T) {
 	}
 	if got := requests.Load(); got != 8 {
 		t.Fatalf("requests = %d, want 8", got)
+	}
+}
+
+func TestSubmitRunsAcceptsCreatedRun(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"run_id": "run-1"})
+	}))
+	defer server.Close()
+
+	creator := &account{JWT: "jwt-token"}
+	creator.User.ID = "user-1"
+	err := submitRuns(
+		context.Background(),
+		&apiClient{root: server.URL, client: server.Client()},
+		config{},
+		[]agentRef{{ID: "agent-1", Creator: creator}},
+		newRunTracker(),
+		&metrics{},
+		"measured",
+		1,
+		1,
+	)
+	if err != nil {
+		t.Fatalf("submitRuns error = %v", err)
 	}
 }
 

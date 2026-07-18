@@ -31,6 +31,7 @@ import (
 
 type config struct {
 	APIRoot               string
+	AuthAPIRoot           string
 	RuntimeURL            string
 	RuntimeURLSecondary   string
 	DatabaseURL           string
@@ -702,7 +703,8 @@ func main() {
 	m := &metrics{startedAt: time.Now(), runtime: newRuntimeMetrics()}
 	ctx = withMetrics(ctx, m)
 	tracker := newRunTracker()
-	api := newAPIClient(cfg)
+	coreAPI := newAPIClient(cfg.APIRoot, cfg)
+	authAPI := newAPIClient(cfg.AuthAPIRoot, cfg)
 	runID := randomSuffix()
 	accountRunID := cfg.AccountRunID
 	if accountRunID == "" {
@@ -712,13 +714,13 @@ func main() {
 	phases := phaseTimestamps{}
 
 	phases.setupAccountsStart = time.Now()
-	accounts, err := setupAccounts(ctx, api, cfg, accountRunID, m)
+	accounts, err := setupAccounts(ctx, authAPI, coreAPI, cfg, accountRunID, m)
 	phases.setupAccountsEnd = time.Now()
 	if err != nil {
 		fail(err)
 	}
 	phases.setupAgentsStart = time.Now()
-	agents, err := setupAgents(ctx, api, cfg, runID, accounts, m)
+	agents, err := setupAgents(ctx, coreAPI, cfg, runID, accounts, m)
 	phases.setupAgentsEnd = time.Now()
 	if err != nil {
 		fail(err)
@@ -767,7 +769,7 @@ func main() {
 	}
 	phases.workersReady = time.Now()
 	if cfg.hasScenario("redis-signal-outage") {
-		if err := waitForRedisSignalOutage(ctx, api, cfg.RedisOutageObserve, m.runtime); err != nil {
+		if err := waitForRedisSignalOutage(ctx, coreAPI, cfg.RedisOutageObserve, m.runtime); err != nil {
 			stopWorkers()
 			workerWG.Wait()
 			fail(err)
@@ -775,7 +777,7 @@ func main() {
 	}
 	if cfg.HistoryPerAgent > 0 {
 		phases.historyStart = time.Now()
-		if err := submitRuns(ctx, api, cfg, agents, tracker, m, "history", cfg.HistoryPerAgent*len(agents), 1); err != nil {
+		if err := submitRuns(ctx, coreAPI, cfg, agents, tracker, m, "history", cfg.HistoryPerAgent*len(agents), 1); err != nil {
 			stopWorkers()
 			workerWG.Wait()
 			fail(err)
@@ -790,14 +792,14 @@ func main() {
 
 	measuredStart := time.Now()
 	phases.measuredStart = measuredStart
-	if err := submitRuns(ctx, api, cfg, agents, tracker, m, "measured", cfg.Runs, cfg.RunConcurrency); err != nil {
+	if err := submitRuns(ctx, coreAPI, cfg, agents, tracker, m, "measured", cfg.Runs, cfg.RunConcurrency); err != nil {
 		stopWorkers()
 		workerWG.Wait()
 		fail(err)
 	}
 	var cancelErr error
 	if cfg.CancelCount > 0 {
-		cancelErr = driveRuntimeCancellations(ctx, api, cfg, accounts, tracker, m)
+		cancelErr = driveRuntimeCancellations(ctx, coreAPI, cfg, accounts, tracker, m)
 	}
 	waitErr := waitForMeasuredPhase(ctx, cfg, tracker, cfg.Runs, cfg.Timeout)
 	if waitErr == nil && cancelErr != nil {
@@ -848,6 +850,7 @@ func parseFlags() config {
 	var scenarios string
 	var dropACKResponses string
 	flag.StringVar(&cfg.APIRoot, "api", envDefault("OPENLINKER_API_ROOT", "http://127.0.0.1:8080/api/v1"), "OpenLinker Core user/API root")
+	flag.StringVar(&cfg.AuthAPIRoot, "auth-api", os.Getenv("OPENLINKER_AUTH_API_ROOT"), "account auth API root; defaults to -api")
 	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_RUNTIME_URL"), "required dedicated Runtime mTLS origin (https)")
 	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_RUNTIME_URL_SECONDARY"), "second Runtime mTLS origin for Core A→B resume")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
@@ -946,8 +949,14 @@ func (c *config) validate() error {
 	if c.HeartbeatInterval <= 0 || c.WSProbeInterval <= 0 {
 		return errors.New("heartbeat and WebSocket probe intervals must be positive")
 	}
+	if strings.TrimSpace(c.AuthAPIRoot) == "" {
+		c.AuthAPIRoot = c.APIRoot
+	}
 	if _, err := url.ParseRequestURI(c.APIRoot); err != nil {
 		return fmt.Errorf("invalid api root: %w", err)
+	}
+	if _, err := url.ParseRequestURI(c.AuthAPIRoot); err != nil {
+		return fmt.Errorf("invalid auth api root: %w", err)
 	}
 	if err := validateRuntimeOrigin(c.RuntimeURL, "runtime-url"); err != nil {
 		return err
@@ -998,13 +1007,13 @@ func (c *config) validate() error {
 	return nil
 }
 
-func newAPIClient(cfg config) *apiClient {
+func newAPIClient(root string, cfg config) *apiClient {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	if cfg.APIInsecureTLS {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} //nolint:gosec // explicit load-test flag for disposable test hosts.
 	}
 	return &apiClient{
-		root: strings.TrimRight(cfg.APIRoot, "/"),
+		root: strings.TrimRight(root, "/"),
 		client: &http.Client{
 			Timeout:   cfg.RequestTimeout,
 			Transport: transport,
@@ -1012,17 +1021,24 @@ func newAPIClient(cfg config) *apiClient {
 	}
 }
 
-func setupAccounts(ctx context.Context, api *apiClient, cfg config, runID string, m *metrics) ([]account, error) {
+func setupAccounts(
+	ctx context.Context,
+	authAPI *apiClient,
+	coreAPI *apiClient,
+	cfg config,
+	runID string,
+	m *metrics,
+) ([]account, error) {
 	accounts := make([]account, cfg.Users)
 	err := runSetupJobs(ctx, cfg.SetupUserConcurrency, cfg.Users, func(ctx context.Context, i int) error {
 		email := fmt.Sprintf("openlinker-perf-%s-u%03d@example.local", runID, i)
 		password := "password123"
 		display := fmt.Sprintf("OpenLinker Perf %s User %03d", runID, i)
-		acc, err := ensureAccount(ctx, api, email, password, display, m)
+		acc, err := ensureAccount(ctx, authAPI, email, password, display, m)
 		if err != nil {
 			return err
 		}
-		if _, err := api.do(ctx, "become-creator", http.MethodPost, "/me/become-creator", map[string]any{}, acc.JWT, nil); err != nil {
+		if _, err := coreAPI.do(ctx, "become-creator", http.MethodPost, "/me/become-creator", map[string]any{}, acc.JWT, nil); err != nil {
 			return err
 		}
 		accounts[i] = acc
@@ -1063,8 +1079,9 @@ func setupAgents(ctx context.Context, api *apiClient, cfg config, runID string, 
 		}
 		agent := reg.Agent
 		agent.Creator = creator
+		agent.RuntimeKeys = append(agent.RuntimeKeys, tokenResp.PlaintextToken)
 
-		for worker := 0; worker < cfg.WorkersPerAgent; worker++ {
+		for worker := 1; worker < cfg.WorkersPerAgent; worker++ {
 			extra := struct {
 				PlaintextToken string `json:"plaintext_token"`
 			}{}
@@ -1196,11 +1213,38 @@ func ensureAccount(ctx context.Context, api *apiClient, email, password, display
 }
 
 func (api *apiClient) do(ctx context.Context, op, method, path string, body any, token string, out any) (int, error) {
-	status, _, err := api.doWithHeaders(ctx, op, method, path, body, token, out)
+	status, _, err := api.doRequest(ctx, op, method, path, body, token, nil, out)
 	return status, err
 }
 
 func (api *apiClient) doWithHeaders(ctx context.Context, op, method, path string, body any, token string, out any) (int, http.Header, error) {
+	return api.doRequest(ctx, op, method, path, body, token, nil, out)
+}
+
+func (api *apiClient) doWithRequestHeaders(
+	ctx context.Context,
+	op string,
+	method string,
+	path string,
+	body any,
+	token string,
+	requestHeaders http.Header,
+	out any,
+) (int, error) {
+	status, _, err := api.doRequest(ctx, op, method, path, body, token, requestHeaders, out)
+	return status, err
+}
+
+func (api *apiClient) doRequest(
+	ctx context.Context,
+	op string,
+	method string,
+	path string,
+	body any,
+	token string,
+	requestHeaders http.Header,
+	out any,
+) (int, http.Header, error) {
 	start := time.Now()
 	var reader io.Reader
 	if body != nil {
@@ -1213,6 +1257,11 @@ func (api *apiClient) doWithHeaders(ctx context.Context, op, method, path string
 	req, err := http.NewRequestWithContext(ctx, method, api.root+path, reader)
 	if err != nil {
 		return 0, nil, err
+	}
+	for key, values := range requestHeaders {
+		for _, value := range values {
+			req.Header.Add(key, value)
+		}
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -1264,6 +1313,15 @@ func globalMetricsFromContext(ctx context.Context) *metrics {
 }
 
 var fallbackMetrics = &metrics{}
+
+func isRunCreationStatus(status int) bool {
+	switch status {
+	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
+		return true
+	default:
+		return false
+	}
+}
 
 func submitRuns(ctx context.Context, api *apiClient, cfg config, agents []agentRef, tracker *runTracker, m *metrics, phase string, total, concurrency int) error {
 	ctx = withMetrics(ctx, m)
@@ -1318,13 +1376,22 @@ func submitRuns(ctx context.Context, api *apiClient, cfg config, agents []agentR
 				resp := struct {
 					RunID string `json:"run_id"`
 				}{}
-				status, err := api.do(ctx, "create-run", http.MethodPost, "/runs", body, agent.Creator.JWT, &resp)
+				status, err := api.doWithRequestHeaders(
+					ctx,
+					"create-run",
+					http.MethodPost,
+					"/runs",
+					body,
+					agent.Creator.JWT,
+					http.Header{"Idempotency-Key": []string{clientID}},
+					&resp,
+				)
 				if err != nil {
 					tracker.markCreated(clientID, "", time.Now(), err.Error())
 					recordErr(err)
 					continue
 				}
-				if status != http.StatusAccepted || resp.RunID == "" {
+				if !isRunCreationStatus(status) || resp.RunID == "" {
 					err := fmt.Errorf("POST /runs returned status=%d run_id=%q", status, resp.RunID)
 					tracker.markCreated(clientID, resp.RunID, time.Now(), err.Error())
 					recordErr(err)

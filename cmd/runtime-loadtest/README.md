@@ -18,9 +18,11 @@ transport fails the run.
 
 ## Before running
 
-The public API and the dedicated Runtime listener are different origins. The
-public API creates disposable users, Agents, Agent Tokens, and Runs. Runtime
-traffic must use the mTLS listener.
+The account Auth API, Core API, and dedicated Runtime listener may be different
+origins. The Auth API creates disposable users. Core creates Agents, Agent
+Tokens, and Runs. Runtime traffic must use the mTLS listener. In a single-service
+deployment, `OPENLINKER_AUTH_API_ROOT` may be omitted and defaults to
+`OPENLINKER_API_ROOT`.
 
 Issue one load-generator Node whose capacity covers the number of worker
 Sessions. The client CA key stays on the provisioning host:
@@ -42,6 +44,8 @@ the Node certificate.
 ```bash
 export OPENLINKER_NODE_ID='00000000-0000-4000-8000-000000000001'
 export OPENLINKER_API_ROOT='http://127.0.0.1:8080/api/v1'
+# Set this when Cloud owns account registration and Core has a separate origin.
+export OPENLINKER_AUTH_API_ROOT='http://127.0.0.1:8080/api/v1'
 export OPENLINKER_RUNTIME_URL='https://127.0.0.1:8443'
 export OPENLINKER_RUNTIME_MTLS_CERT_FILE="$PWD/node-pki/loadtest.crt"
 export OPENLINKER_RUNTIME_MTLS_KEY_FILE="$PWD/node-pki/loadtest.key"
@@ -63,6 +67,7 @@ same in-flight Attempts before switching back.
 ```bash
 go run ./cmd/runtime-loadtest \
   -api http://127.0.0.1:8080/api/v1 \
+  -auth-api http://127.0.0.1:8080/api/v1 \
   -runtime-url https://127.0.0.1:8443 \
   -transport auto \
   -agents 10 -workers-per-agent 1 -node-capacity 10 \
