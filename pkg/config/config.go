@@ -32,6 +32,10 @@ type Config struct {
 	JWTSecret          string `envconfig:"JWT_SECRET" required:"true"`
 	JWTExpireHours     int    `envconfig:"JWT_EXPIRE_HOURS" default:"24"`
 	OAuthSessionSecret string `envconfig:"OAUTH_SESSION_SECRET"`
+	// OAuthCodeStorageMode controls only the temporary OAuth handoff row format.
+	// legacy-jwt is the rolling-deployment compatibility default; subject-only
+	// must be enabled only after every reader understands nullable JWT rows.
+	OAuthCodeStorageMode string `envconfig:"OAUTH_CODE_STORAGE_MODE" default:"legacy-jwt"`
 
 	// Google OAuth
 	GoogleClientID     string `envconfig:"GOOGLE_OAUTH_CLIENT_ID"`
@@ -135,7 +139,23 @@ func Load() (*Config, error) {
 	if err := envconfig.Process("", &cfg); err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
+	mode, err := normalizeOAuthCodeStorageMode(cfg.OAuthCodeStorageMode)
+	if err != nil {
+		return nil, fmt.Errorf("load config: %w", err)
+	}
+	cfg.OAuthCodeStorageMode = mode
 	return &cfg, nil
+}
+
+func normalizeOAuthCodeStorageMode(value string) (string, error) {
+	switch value {
+	case "", "legacy-jwt":
+		return "legacy-jwt", nil
+	case "subject-only":
+		return "subject-only", nil
+	default:
+		return "", fmt.Errorf("OAUTH_CODE_STORAGE_MODE is invalid")
+	}
 }
 
 // IsProduction 是否生产环境。

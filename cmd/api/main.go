@@ -44,6 +44,8 @@ import (
 
 const maxRequestBodySize = "8M"
 
+const minimumProductionSecretBytes = 32
+
 type coreServingMode string
 
 const (
@@ -480,6 +482,9 @@ func validateProductionConfig(cfg *config.Config) error {
 	if err := validateExternalExecutionCallerServiceID(cfg); err != nil {
 		return err
 	}
+	if _, err := auth.ParseOAuthCodeStorageMode(cfg.OAuthCodeStorageMode); err != nil {
+		return fmt.Errorf("OAUTH_CODE_STORAGE_MODE: %w", err)
+	}
 	if !cfg.IsProduction() {
 		return nil
 	}
@@ -491,6 +496,12 @@ func validateProductionConfig(cfg *config.Config) error {
 	}
 	if commit := strings.TrimSpace(cfg.ReleaseCommit); commit == "" || commit == "unknown" {
 		return fmt.Errorf("OPENLINKER_GIT_SHA must identify the deployed commit in production")
+	}
+	if len(cfg.JWTSecret) < minimumProductionSecretBytes {
+		return fmt.Errorf("JWT_SECRET must be at least %d bytes in production", minimumProductionSecretBytes)
+	}
+	if internalToken := strings.TrimSpace(cfg.InternalToken); internalToken != "" && len(internalToken) < minimumProductionSecretBytes {
+		return fmt.Errorf("OPENLINKER_INTERNAL_TOKEN must be at least %d bytes in production when configured", minimumProductionSecretBytes)
 	}
 	if cfg.RuntimeHAMode && strings.TrimSpace(cfg.RedisURL) == "" {
 		return fmt.Errorf("REDIS_URL is required for production runtime HA")

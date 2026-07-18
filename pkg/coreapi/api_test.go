@@ -71,6 +71,33 @@ func TestOAuthSessionSecretPrefersDedicatedSecret(t *testing.T) {
 	}
 }
 
+func TestNewAuthServiceAcceptsConfiguredOAuthCodeStorageModes(t *testing.T) {
+	for _, mode := range []string{"", "legacy-jwt", "subject-only"} {
+		t.Run(mode, func(t *testing.T) {
+			if svc := newAuthService(nil, &config.Config{
+				JWTSecret:            "test-secret",
+				JWTExpireHours:       24,
+				OAuthCodeStorageMode: mode,
+			}); svc == nil {
+				t.Fatal("newAuthService returned nil")
+			}
+		})
+	}
+}
+
+func TestNewAuthServiceRejectsUnknownOAuthCodeStorageMode(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("newAuthService should fail closed for an unknown OAuth code storage mode")
+		}
+	}()
+	_ = newAuthService(nil, &config.Config{
+		JWTSecret:            "test-secret",
+		JWTExpireHours:       24,
+		OAuthCodeStorageMode: "secret-looking-invalid-mode",
+	})
+}
+
 func TestConfigureGothUsesOAuthCallbackBaseURLWhenSet(t *testing.T) {
 	resetGothGlobals(t)
 

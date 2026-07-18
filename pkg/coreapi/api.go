@@ -87,7 +87,7 @@ func RegisterRuntimeAttachOnly(
 	_ = rootCtx // Kept in the signature to make the lifecycle boundary explicit.
 	api := e.Group("/api/v1")
 
-	authSvc := auth.NewService(pool, cfg.JWTSecret, time.Duration(cfg.JWTExpireHours)*time.Hour)
+	authSvc := newAuthService(pool, cfg)
 	authHandler := auth.NewHandler(authSvc, cfg)
 	authHandler.RegisterRuntimeAttachOnly(api)
 	userStatusQueries := db.New(pool)
@@ -120,7 +120,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	api := e.Group("/api/v1")
 
 	ConfigureGoth(cfg)
-	authSvc := auth.NewService(pool, cfg.JWTSecret, time.Duration(cfg.JWTExpireHours)*time.Hour)
+	authSvc := newAuthService(pool, cfg)
 	authSvc.SetUserProvisioner(opts.UserProvisioner)
 	authHandler := auth.NewHandler(authSvc, cfg)
 	userStatusQueries := db.New(pool)
@@ -299,6 +299,18 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		UserToken:         userTokenSvc,
 		UserStatus:        userStatusChecker,
 	}
+}
+
+func newAuthService(pool *pgxpool.Pool, cfg *config.Config) *auth.Service {
+	svc := auth.NewService(pool, cfg.JWTSecret, time.Duration(cfg.JWTExpireHours)*time.Hour)
+	mode, err := auth.ParseOAuthCodeStorageMode(cfg.OAuthCodeStorageMode)
+	if err != nil {
+		panic("invalid OAuth code storage mode configuration")
+	}
+	if err := svc.SetOAuthCodeStorageMode(mode); err != nil {
+		panic("invalid OAuth code storage mode configuration")
+	}
+	return svc
 }
 
 type externalWorkflowService struct {
