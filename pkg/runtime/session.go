@@ -1144,10 +1144,11 @@ func heartbeatRuntimeNodeForSession(
 
 // negotiateRuntimeNodeForSession is the only generation-switch path. The
 // authenticated certificate fixes the Node identity; the supported Hello
-// digest selects a Server-owned adapter generation. All Session rows for the
-// Node are locked before this function is called. A Node may switch generation
-// only when every live Session already uses the requested digest (which means
-// there is no conflicting live generation during a real switch).
+// digest selects a Server-owned adapter generation. The Node row serializes
+// lifecycle negotiation, while administrative Node mutations recheck their
+// Session scope after acquiring it. A Node may switch generation only when
+// every live Session already uses the requested digest (which means there is
+// no conflicting live generation during a real switch).
 func negotiateRuntimeNodeForSession(
 	ctx context.Context,
 	tx runtimeSessionTransaction,
@@ -1412,12 +1413,16 @@ func lockRuntimeSessionPrincipal(
 	credentialID uuid.UUID,
 	targetSessionID uuid.UUID,
 ) ([]uuid.UUID, error) {
-	lockedSessions, err := tx.LockRuntimeSessionsForPrincipalRevocation(
+	// Lock only rows that can race this lifecycle mutation: the explicitly
+	// addressed Session plus every live/offline Session owned by the presented
+	// credential. Locking every historical Session for the Node made heartbeat
+	// and attach cost grow with unrelated Node history. The target is included
+	// even when it belongs to another principal so malformed requests cannot
+	// invert the global Session -> Node -> Token -> Attachment lock order.
+	lockedSessions, err := tx.LockRuntimeLifecycleSessions(
 		ctx,
-		db.LockRuntimeSessionsForPrincipalRevocationParams{
-			NodeIDs:  []uuid.UUID{nodeID},
-			TokenIDs: []uuid.UUID{credentialID},
-		},
+		targetSessionID,
+		credentialID,
 	)
 	if err != nil {
 		return nil, err
@@ -1440,12 +1445,12 @@ func lockRuntimeSessionPrincipal(
 
 	sessionIDs := make([]uuid.UUID, 0, len(lockedSessions)+1)
 	seen := make(map[uuid.UUID]struct{}, len(lockedSessions)+1)
-	for _, session := range lockedSessions {
-		if _, ok := seen[session.RuntimeSessionID]; ok {
+	for _, sessionID := range lockedSessions {
+		if _, ok := seen[sessionID]; ok {
 			continue
 		}
-		seen[session.RuntimeSessionID] = struct{}{}
-		sessionIDs = append(sessionIDs, session.RuntimeSessionID)
+		seen[sessionID] = struct{}{}
+		sessionIDs = append(sessionIDs, sessionID)
 	}
 	if _, ok := seen[targetSessionID]; !ok {
 		sessionIDs = append(sessionIDs, targetSessionID)
@@ -1561,7 +1566,7 @@ type runtimeSessionTransaction interface {
 	RequireRuntimeClusterOperation(context.Context, RuntimeClusterOperation) error
 	LockSessionIdentity(context.Context, uuid.UUID) error
 	GetRuntimeSessionForUpdate(context.Context, uuid.UUID) (db.RuntimeSession, error)
-	LockRuntimeSessionsForPrincipalRevocation(context.Context, db.LockRuntimeSessionsForPrincipalRevocationParams) ([]db.LockRuntimeSessionsForPrincipalRevocationRow, error)
+	LockRuntimeLifecycleSessions(context.Context, uuid.UUID, uuid.UUID) ([]uuid.UUID, error)
 	LockRuntimeNodesForPrincipalRevocation(context.Context, []uuid.UUID) ([]uuid.UUID, error)
 	LockAgentTokensForPrincipalRevocation(context.Context, []uuid.UUID) ([]uuid.UUID, error)
 	LockActiveRuntimeSessionAttachmentsForPrincipalRevocation(context.Context, []uuid.UUID) ([]uuid.UUID, error)
@@ -1787,8 +1792,32 @@ WHERE node_id = $1
 	return tag.RowsAffected(), err
 }
 
-func (t *postgresRuntimeSessionTransaction) LockRuntimeSessionsForPrincipalRevocation(ctx context.Context, params db.LockRuntimeSessionsForPrincipalRevocationParams) ([]db.LockRuntimeSessionsForPrincipalRevocationRow, error) {
-	return t.queries.LockRuntimeSessionsForPrincipalRevocation(ctx, params)
+func (t *postgresRuntimeSessionTransaction) LockRuntimeLifecycleSessions(
+	ctx context.Context,
+	targetSessionID uuid.UUID,
+	credentialID uuid.UUID,
+) ([]uuid.UUID, error) {
+	rows, err := t.tx.Query(ctx, `
+SELECT runtime_session_id
+FROM runtime_sessions
+WHERE status IN ('active', 'draining', 'offline')
+  AND (runtime_session_id = $1 OR credential_id = $2)
+ORDER BY runtime_session_id ASC
+FOR UPDATE`, targetSessionID, credentialID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	locked := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var sessionID uuid.UUID
+		if err = rows.Scan(&sessionID); err != nil {
+			return nil, err
+		}
+		locked = append(locked, sessionID)
+	}
+	return locked, rows.Err()
 }
 
 func (t *postgresRuntimeSessionTransaction) LockRuntimeNodesForPrincipalRevocation(ctx context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {

@@ -24,7 +24,7 @@ func TestRuntimeSessionReaperClosesExactStaleAttachment(t *testing.T) {
 	require.Equal(t, 2*time.Minute, repository.staleTTL)
 	require.Equal(t, 32, repository.staleLimit)
 	require.Equal(t, []string{
-		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens", "lock_attachments",
+		"lock_session_identity", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens", "lock_attachments",
 		"get_session_for_update", "get_attachment", "close_attachment", "close_stale_session",
 	}, tx.operations)
 	require.Equal(t, tx.attachment.ID, tx.closeAttachmentParams.AttachmentID)

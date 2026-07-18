@@ -1,0 +1,1 @@
+DROP INDEX IF EXISTS idx_runtime_sessions_credential_lifecycle;

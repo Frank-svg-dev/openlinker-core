@@ -132,7 +132,7 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
+		"lock_session_identity", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
 		"lock_attachments", "get_session_for_update", "cluster_gate", "check_generation", "get_node", "list_active", "heartbeat_node", "create_session", "create_attachment",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
@@ -161,6 +161,14 @@ func TestRuntimeSessionServiceCreateLocksPrincipalAndPersistsAuthenticatedIdenti
 	if tx.clusterGateOperation != RuntimeClusterNewSession {
 		t.Fatalf("cluster gate operation = %q", tx.clusterGateOperation)
 	}
+	if tx.lifecycleTargetSessionID != fixture.request.RuntimeSessionID ||
+		tx.lifecycleCredentialID != fixture.principal.CredentialID {
+		t.Fatalf(
+			"lifecycle Session lock scope = target %s, credential %s",
+			tx.lifecycleTargetSessionID,
+			tx.lifecycleCredentialID,
+		)
+	}
 }
 
 func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *testing.T) {
@@ -187,7 +195,7 @@ func TestRuntimeSessionServiceCreatesDrainingSuccessorWithServerEvidence(t *test
 		t.Fatalf("CreateOrAttachSession() error = %v", err)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
+		"lock_session_identity", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
 		"lock_attachments", "get_session_for_update", "cluster_gate", "check_generation",
 		"get_node", "list_active", "heartbeat_node", "create_draining_successor", "create_attachment",
 	}
@@ -320,7 +328,7 @@ func TestRuntimeSessionServiceDrainCommitsServerCapacityAndFirstWriterEvidence(t
 		t.Fatalf("receipt = %#v", receipt)
 	}
 	wantOrder := []string{
-		"lock_session_identity", "lock_sessions", "lock_nodes", "lock_tokens",
+		"lock_session_identity", "lock_lifecycle_sessions", "lock_nodes", "lock_tokens",
 		"lock_attachments", "get_session_for_update", "get_attachment", "get_node", "drain_session",
 	}
 	if !reflect.DeepEqual(tx.operations, wantOrder) {
@@ -936,35 +944,37 @@ func (r *sessionRepositoryFake) ResolveRuntimeWorkerSessionPrincipal(_ context.C
 }
 
 type sessionTransactionFake struct {
-	operations             []string
-	clusterGateErr         error
-	clusterGateOperation   RuntimeClusterOperation
-	fixture                sessionFixture
-	session                db.RuntimeSession
-	getErr                 error
-	node                   db.RuntimeNode
-	active                 []db.RuntimeSession
-	createErr              error
-	createCalls            int
-	createParams           db.CreateRuntimeSessionParams
-	createSuccessorErr     error
-	createSuccessorCalls   int
-	createSuccessorParams  db.CreateDrainingRuntimeSessionSuccessorParams
-	claimParams            db.ClaimRuntimeSessionForCoreParams
-	heartbeatParams        db.HeartbeatRuntimeSessionParams
-	heartbeatNodeParams    db.HeartbeatRuntimeNodeParams
-	heartbeatErr           error
-	newerGeneration        bool
-	newerGenerationErr     error
-	retiredOffline         int64
-	attachment             db.RuntimeSessionAttachment
-	createAttachmentParams db.CreateRuntimeSessionAttachmentParams
-	closeAttachmentParams  db.CloseRuntimeSessionAttachmentParams
-	closeSessionCalls      int
-	drainDeadline          time.Time
-	drainReason            string
-	drainRequestedAt       time.Time
-	drainResumeCapacity    int32
+	operations               []string
+	clusterGateErr           error
+	clusterGateOperation     RuntimeClusterOperation
+	fixture                  sessionFixture
+	session                  db.RuntimeSession
+	getErr                   error
+	node                     db.RuntimeNode
+	active                   []db.RuntimeSession
+	createErr                error
+	createCalls              int
+	createParams             db.CreateRuntimeSessionParams
+	createSuccessorErr       error
+	createSuccessorCalls     int
+	createSuccessorParams    db.CreateDrainingRuntimeSessionSuccessorParams
+	claimParams              db.ClaimRuntimeSessionForCoreParams
+	heartbeatParams          db.HeartbeatRuntimeSessionParams
+	heartbeatNodeParams      db.HeartbeatRuntimeNodeParams
+	heartbeatErr             error
+	newerGeneration          bool
+	newerGenerationErr       error
+	retiredOffline           int64
+	attachment               db.RuntimeSessionAttachment
+	createAttachmentParams   db.CreateRuntimeSessionAttachmentParams
+	closeAttachmentParams    db.CloseRuntimeSessionAttachmentParams
+	closeSessionCalls        int
+	drainDeadline            time.Time
+	drainReason              string
+	drainRequestedAt         time.Time
+	drainResumeCapacity      int32
+	lifecycleTargetSessionID uuid.UUID
+	lifecycleCredentialID    uuid.UUID
 }
 
 func newSessionTransactionFake(fixture sessionFixture) *sessionTransactionFake {
@@ -1038,9 +1048,15 @@ func (f *sessionTransactionFake) GetRuntimeSessionForUpdate(context.Context, uui
 	return f.session, f.getErr
 }
 
-func (f *sessionTransactionFake) LockRuntimeSessionsForPrincipalRevocation(context.Context, db.LockRuntimeSessionsForPrincipalRevocationParams) ([]db.LockRuntimeSessionsForPrincipalRevocationRow, error) {
-	f.op("lock_sessions")
-	return []db.LockRuntimeSessionsForPrincipalRevocationRow{{RuntimeSessionID: f.session.RuntimeSessionID}}, nil
+func (f *sessionTransactionFake) LockRuntimeLifecycleSessions(
+	_ context.Context,
+	targetSessionID uuid.UUID,
+	credentialID uuid.UUID,
+) ([]uuid.UUID, error) {
+	f.op("lock_lifecycle_sessions")
+	f.lifecycleTargetSessionID = targetSessionID
+	f.lifecycleCredentialID = credentialID
+	return []uuid.UUID{f.session.RuntimeSessionID}, nil
 }
 
 func (f *sessionTransactionFake) LockRuntimeNodesForPrincipalRevocation(_ context.Context, ids []uuid.UUID) ([]uuid.UUID, error) {
