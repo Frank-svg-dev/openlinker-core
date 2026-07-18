@@ -94,12 +94,13 @@ type Config struct {
 	// Agent Runtime device traffic terminates mTLS directly in Core. It is a
 	// separate listener so a reverse proxy cannot replace verified peer
 	// certificates with spoofable headers.
-	RuntimeMTLSEnabled      bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
-	RuntimeMTLSPort         int    `envconfig:"RUNTIME_MTLS_PORT" default:"8443"`
-	RuntimeMTLSAPIURL       string `envconfig:"RUNTIME_MTLS_API_URL"`
-	RuntimeMTLSCertFile     string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
-	RuntimeMTLSKeyFile      string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
-	RuntimeMTLSClientCAFile string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
+	RuntimeMTLSEnabled        bool   `envconfig:"RUNTIME_MTLS_ENABLED" default:"false"`
+	RuntimeMTLSPort           int    `envconfig:"RUNTIME_MTLS_PORT" default:"8443"`
+	RuntimeMTLSMaxConnections int    `envconfig:"RUNTIME_MTLS_MAX_CONNECTIONS" default:"4096"`
+	RuntimeMTLSAPIURL         string `envconfig:"RUNTIME_MTLS_API_URL"`
+	RuntimeMTLSCertFile       string `envconfig:"RUNTIME_MTLS_CERT_FILE"`
+	RuntimeMTLSKeyFile        string `envconfig:"RUNTIME_MTLS_KEY_FILE"`
+	RuntimeMTLSClientCAFile   string `envconfig:"RUNTIME_MTLS_CLIENT_CA_FILE"`
 	// RuntimeHAMode selects the Redis-backed cross-instance signal dependency.
 	// PostgreSQL remains the fact source and its workers continue if Redis is
 	// unavailable; production HA readiness fails closed until Redis recovers.

@@ -9,13 +9,19 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/config"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 	"github.com/labstack/echo/v4"
+	"github.com/rs/zerolog/log"
 )
 
-const runtimePathPrefix = "/api/v1/agent-runtime/"
+const (
+	runtimePathPrefix                = "/api/v1/agent-runtime/"
+	minimumRuntimeMTLSMaxConnections = 1
+	maximumRuntimeMTLSMaxConnections = 65535
+)
 
 type runtimeListenerContextKey struct{}
 
@@ -31,9 +37,66 @@ func startRuntimeMTLSListener(cfg *config.Config, application http.Handler) (*ht
 	if err != nil {
 		return nil, nil, fmt.Errorf("listen runtime mTLS: %w", err)
 	}
+	listener = newRuntimeConnectionLimitListener(listener, cfg.RuntimeMTLSMaxConnections, func() {
+		log.Warn().
+			Int("max_connections", cfg.RuntimeMTLSMaxConnections).
+			Msg("agent runtime mTLS connection limit reached")
+	})
 	server := newHTTPServer(cfg.RuntimeMTLSPort)
 	server.Handler = runtimeOnlyHandler(application)
 	return server, tls.NewListener(listener, tlsConfig), nil
+}
+
+type runtimeConnectionLimitListener struct {
+	net.Listener
+	permits        chan struct{}
+	onLimitReached func()
+	warnOnce       sync.Once
+}
+
+func newRuntimeConnectionLimitListener(listener net.Listener, maxConnections int, onLimitReached func()) net.Listener {
+	return &runtimeConnectionLimitListener{
+		Listener:       listener,
+		permits:        make(chan struct{}, maxConnections),
+		onLimitReached: onLimitReached,
+	}
+}
+
+func (listener *runtimeConnectionLimitListener) Accept() (net.Conn, error) {
+	for {
+		connection, err := listener.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case listener.permits <- struct{}{}:
+			return &runtimeConnectionLimitConnection{
+				Conn:    connection,
+				release: listener.release,
+			}, nil
+		default:
+			_ = connection.Close()
+			if listener.onLimitReached != nil {
+				listener.warnOnce.Do(listener.onLimitReached)
+			}
+		}
+	}
+}
+
+func (listener *runtimeConnectionLimitListener) release() {
+	<-listener.permits
+}
+
+type runtimeConnectionLimitConnection struct {
+	net.Conn
+	release     func()
+	releaseOnce sync.Once
+}
+
+func (connection *runtimeConnectionLimitConnection) Close() error {
+	err := connection.Conn.Close()
+	connection.releaseOnce.Do(connection.release)
+	return err
 }
 
 func buildRuntimeMTLSConfig(cfg *config.Config) (*tls.Config, error) {
@@ -73,6 +136,10 @@ func validateRuntimeMTLSConfig(cfg *config.Config) error {
 	}
 	if cfg.RuntimeMTLSPort == cfg.Port {
 		return fmt.Errorf("RUNTIME_MTLS_PORT must differ from PORT")
+	}
+	if cfg.RuntimeMTLSMaxConnections < minimumRuntimeMTLSMaxConnections ||
+		cfg.RuntimeMTLSMaxConnections > maximumRuntimeMTLSMaxConnections {
+		return fmt.Errorf("RUNTIME_MTLS_MAX_CONNECTIONS must be between 1 and 65535")
 	}
 	for name, value := range map[string]string{
 		"RUNTIME_MTLS_API_URL":        cfg.RuntimeMTLSAPIURL,

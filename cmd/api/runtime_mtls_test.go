@@ -8,10 +8,12 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -25,6 +27,7 @@ func TestBuildRuntimeMTLSConfigRequiresVerifiedClientCertificates(t *testing.T) 
 		Port:                           8080,
 		RuntimeMTLSEnabled:             true,
 		RuntimeMTLSPort:                8443,
+		RuntimeMTLSMaxConnections:      4096,
 		RuntimeMTLSAPIURL:              "https://runtime.example.test:8443",
 		RuntimeMTLSCertFile:            certFile,
 		RuntimeMTLSKeyFile:             keyFile,
@@ -42,7 +45,7 @@ func TestBuildRuntimeMTLSConfigRequiresVerifiedClientCertificates(t *testing.T) 
 }
 
 func TestRuntimeMTLSConfigAndPathFailClosed(t *testing.T) {
-	cfg := &config.Config{Port: 8080, RuntimeMTLSEnabled: true, RuntimeMTLSPort: 8080}
+	cfg := &config.Config{Port: 8080, RuntimeMTLSEnabled: true, RuntimeMTLSPort: 8080, RuntimeMTLSMaxConnections: 4096}
 	if err := validateRuntimeMTLSConfig(cfg); err == nil {
 		t.Fatal("same public/runtime port must fail")
 	}
@@ -117,6 +120,7 @@ func TestValidateRuntimeMTLSConfigRejectsNonOriginPublicURL(t *testing.T) {
 		Port:                           8080,
 		RuntimeMTLSEnabled:             true,
 		RuntimeMTLSPort:                8443,
+		RuntimeMTLSMaxConnections:      4096,
 		RuntimeMTLSCertFile:            "server.pem",
 		RuntimeMTLSKeyFile:             "server-key.pem",
 		RuntimeMTLSClientCAFile:        "client-ca.pem",
@@ -148,6 +152,164 @@ func TestValidateRuntimeMTLSConfigRejectsNonOriginPublicURL(t *testing.T) {
 	cfg.RuntimeMTLSAPIURL = "https://runtime.example.test:8443"
 	if err := validateRuntimeMTLSConfig(cfg); err != nil {
 		t.Fatalf("valid Runtime origin rejected: %v", err)
+	}
+}
+
+func TestValidateRuntimeMTLSConfigRejectsInvalidConnectionLimit(t *testing.T) {
+	cfg := &config.Config{
+		Port:                           8080,
+		RuntimeMTLSEnabled:             true,
+		RuntimeMTLSPort:                8443,
+		RuntimeMTLSAPIURL:              "https://runtime.example.test:8443",
+		RuntimeMTLSCertFile:            "server.pem",
+		RuntimeMTLSKeyFile:             "server-key.pem",
+		RuntimeMTLSClientCAFile:        "client-ca.pem",
+		RuntimeInvocationSigningKeyID:  "current",
+		RuntimeInvocationSigningSecret: "runtime-test-signing-secret-00000000",
+	}
+	for _, value := range []int{-1, 0, 65536} {
+		cfg.RuntimeMTLSMaxConnections = value
+		if err := validateRuntimeMTLSConfig(cfg); err == nil {
+			t.Fatalf("RUNTIME_MTLS_MAX_CONNECTIONS=%d succeeded", value)
+		}
+	}
+	for _, value := range []int{1, 4096, 65535} {
+		cfg.RuntimeMTLSMaxConnections = value
+		if err := validateRuntimeMTLSConfig(cfg); err != nil {
+			t.Fatalf("RUNTIME_MTLS_MAX_CONNECTIONS=%d rejected: %v", value, err)
+		}
+	}
+}
+
+func TestRuntimeConnectionLimitListenerRejectsExcessAndReleases(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var limitWarnings atomic.Int32
+	listener := newRuntimeConnectionLimitListener(raw, 1, func() {
+		limitWarnings.Add(1)
+	})
+	t.Cleanup(func() { _ = listener.Close() })
+
+	firstAccept := acceptRuntimeTestConnection(listener)
+	firstClient := dialRuntimeTestConnection(t, listener.Addr().String())
+	firstServer := awaitRuntimeTestAccept(t, firstAccept)
+
+	replacementAccept := acceptRuntimeTestConnection(listener)
+	for range 2 {
+		excess := dialRuntimeTestConnection(t, listener.Addr().String())
+		assertRuntimeTestPeerClosed(t, excess)
+	}
+	if got := limitWarnings.Load(); got != 1 {
+		t.Fatalf("connection-limit warnings = %d, want 1", got)
+	}
+
+	if err := firstServer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_ = firstClient.Close()
+	replacementClient := dialRuntimeTestConnection(t, listener.Addr().String())
+	replacementServer := awaitRuntimeTestAccept(t, replacementAccept)
+
+	closedTwice := make(chan struct{})
+	go func() {
+		_ = replacementServer.Close()
+		_ = replacementServer.Close()
+		close(closedTwice)
+	}()
+	select {
+	case <-closedTwice:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing an admitted connection twice blocked while releasing its permit")
+	}
+	_ = replacementClient.Close()
+
+	finalAccept := acceptRuntimeTestConnection(listener)
+	finalClient := dialRuntimeTestConnection(t, listener.Addr().String())
+	finalServer := awaitRuntimeTestAccept(t, finalAccept)
+	_ = finalServer.Close()
+	_ = finalClient.Close()
+}
+
+func TestRuntimeConnectionLimitListenerCloseUnblocksAccept(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := newRuntimeConnectionLimitListener(raw, 1, nil)
+
+	firstAccept := acceptRuntimeTestConnection(listener)
+	firstClient := dialRuntimeTestConnection(t, listener.Addr().String())
+	firstServer := awaitRuntimeTestAccept(t, firstAccept)
+	blockedAccept := acceptRuntimeTestConnection(listener)
+
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case accepted := <-blockedAccept:
+		if accepted.err == nil {
+			_ = accepted.connection.Close()
+			t.Fatal("Accept succeeded after the listener was closed")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("listener Close did not unblock Accept")
+	}
+	_ = firstServer.Close()
+	_ = firstClient.Close()
+}
+
+type runtimeTestAcceptResult struct {
+	connection net.Conn
+	err        error
+}
+
+func acceptRuntimeTestConnection(listener net.Listener) <-chan runtimeTestAcceptResult {
+	result := make(chan runtimeTestAcceptResult, 1)
+	go func() {
+		connection, err := listener.Accept()
+		result <- runtimeTestAcceptResult{connection: connection, err: err}
+	}()
+	return result
+}
+
+func awaitRuntimeTestAccept(t *testing.T, result <-chan runtimeTestAcceptResult) net.Conn {
+	t.Helper()
+	select {
+	case accepted := <-result:
+		if accepted.err != nil {
+			t.Fatalf("Accept returned error: %v", accepted.err)
+		}
+		if accepted.connection == nil {
+			t.Fatal("Accept returned a nil connection")
+		}
+		return accepted.connection
+	case <-time.After(2 * time.Second):
+		t.Fatal("Accept did not return")
+		return nil
+	}
+}
+
+func dialRuntimeTestConnection(t *testing.T, address string) net.Conn {
+	t.Helper()
+	connection, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial %s: %v", address, err)
+	}
+	return connection
+}
+
+func assertRuntimeTestPeerClosed(t *testing.T, connection net.Conn) {
+	t.Helper()
+	defer connection.Close()
+	if err := connection.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := connection.Read(make([]byte, 1)); err == nil {
+		t.Fatal("excess connection remained open")
+	} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+		t.Fatal("excess connection was not closed before the deadline")
 	}
 }
 
