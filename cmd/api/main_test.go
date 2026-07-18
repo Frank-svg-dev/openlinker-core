@@ -54,6 +54,7 @@ func TestAllowedCORSOrigins(t *testing.T) {
 }
 
 func TestValidateProductionConfig(t *testing.T) {
+	validJWTSecret := strings.Repeat("j", 32)
 	if err := validateProductionConfig(&config.Config{Env: "development"}); err != nil {
 		t.Fatalf("development config should pass: %v", err)
 	}
@@ -70,6 +71,7 @@ func TestValidateProductionConfig(t *testing.T) {
 		FrontendURL:    "https://app.example",
 		ReleaseVersion: "20260712-test",
 		ReleaseCommit:  "0123456789abcdef",
+		JWTSecret:      validJWTSecret,
 	}); err != nil {
 		t.Fatalf("valid production config without internal integrations: %v", err)
 	}
@@ -78,27 +80,28 @@ func TestValidateProductionConfig(t *testing.T) {
 		FrontendURL:    "https://app.example",
 		ReleaseVersion: "20260712-test",
 		ReleaseCommit:  "0123456789abcdef",
-		InternalToken:  "secret",
+		JWTSecret:      validJWTSecret,
+		InternalToken:  strings.Repeat("i", 32),
 	}); err != nil {
 		t.Fatalf("valid production config error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
-		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef", JWTSecret: validJWTSecret,
 		ExternalExecutionJWTCurrentPublicKey: "public-key", ExternalExecutionCallerServiceID: "openlinker-cloud",
 	}); err == nil || !strings.Contains(err.Error(), "REDIS_URL") {
 		t.Fatalf("missing external execution Redis error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
-		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef", JWTSecret: validJWTSecret,
 		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
 	}); err == nil || !strings.Contains(err.Error(), "caller service id") {
 		t.Fatalf("missing external execution identity metadata error = %v", err)
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
-		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef", JWTSecret: validJWTSecret,
 		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
 		ExternalExecutionJWTCurrentKeyID: "current", ExternalExecutionJWTIssuer: "openlinker-cloud",
 		ExternalExecutionJWTAudience: "openlinker-core.external-execution", ExternalExecutionCallerServiceID: "openlinker-cloud",
@@ -107,7 +110,7 @@ func TestValidateProductionConfig(t *testing.T) {
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
-		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef", JWTSecret: validJWTSecret,
 		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
 		ExternalExecutionJWTCurrentKeyID: "current", ExternalExecutionJWTIssuer: "openlinker-cloud",
 		ExternalExecutionJWTAudience: "openlinker-core.external-execution", ExternalExecutionCallerServiceID: "openlinker-cloud",
@@ -117,7 +120,7 @@ func TestValidateProductionConfig(t *testing.T) {
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
-		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef",
+		ReleaseVersion: "20260712-test", ReleaseCommit: "0123456789abcdef", JWTSecret: validJWTSecret,
 		RedisURL: "redis://redis:6379/0", ExternalExecutionJWTCurrentPublicKey: "public-key",
 		ExternalExecutionJWTCurrentKeyID: "current", ExternalExecutionJWTIssuer: "openlinker-cloud",
 		ExternalExecutionJWTAudience: "openlinker-core.external-execution", ExternalExecutionCallerServiceID: "openlinker-cloud",
@@ -127,9 +130,106 @@ func TestValidateProductionConfig(t *testing.T) {
 	}
 	if err := validateProductionConfig(&config.Config{
 		Env: "production", FrontendURL: "https://app.example",
-		ReleaseVersion: "local", ReleaseCommit: "0123456789abcdef",
+		ReleaseVersion: "local", ReleaseCommit: "0123456789abcdef", JWTSecret: validJWTSecret,
 	}); err == nil || !strings.Contains(err.Error(), "OPENLINKER_RELEASE_ID") {
 		t.Fatalf("placeholder release error = %v", err)
+	}
+}
+
+func TestValidateProductionConfigSecretLengths(t *testing.T) {
+	base := func() *config.Config {
+		return &config.Config{
+			Env:                  "production",
+			FrontendURL:          "https://app.example",
+			ReleaseVersion:       "20260718-test",
+			ReleaseCommit:        "0123456789abcdef",
+			JWTSecret:            strings.Repeat("j", 32),
+			OAuthCodeStorageMode: "legacy-jwt",
+		}
+	}
+
+	t.Run("JWT 31 bytes fails", func(t *testing.T) {
+		cfg := base()
+		cfg.JWTSecret = strings.Repeat("j", 31)
+		err := validateProductionConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "JWT_SECRET") || strings.Contains(err.Error(), cfg.JWTSecret) {
+			t.Fatalf("short JWT error = %v", err)
+		}
+	})
+
+	t.Run("JWT 32 bytes passes", func(t *testing.T) {
+		if err := validateProductionConfig(base()); err != nil {
+			t.Fatalf("32-byte JWT should pass: %v", err)
+		}
+	})
+
+	t.Run("JWT uses UTF-8 bytes", func(t *testing.T) {
+		cfg := base()
+		cfg.JWTSecret = strings.Repeat("密", 10) // 30 UTF-8 bytes.
+		if err := validateProductionConfig(cfg); err == nil || !strings.Contains(err.Error(), "JWT_SECRET") {
+			t.Fatalf("30-byte UTF-8 JWT error = %v", err)
+		}
+		cfg.JWTSecret = strings.Repeat("密", 11) // 33 UTF-8 bytes.
+		if err := validateProductionConfig(cfg); err != nil {
+			t.Fatalf("33-byte UTF-8 JWT should pass: %v", err)
+		}
+	})
+
+	t.Run("empty internal token remains disabled", func(t *testing.T) {
+		if err := validateProductionConfig(base()); err != nil {
+			t.Fatalf("empty internal token should remain valid: %v", err)
+		}
+	})
+
+	t.Run("internal token uses trimmed bytes", func(t *testing.T) {
+		cfg := base()
+		cfg.InternalToken = "  " + strings.Repeat("i", 31) + "  "
+		err := validateProductionConfig(cfg)
+		if err == nil || !strings.Contains(err.Error(), "OPENLINKER_INTERNAL_TOKEN") || strings.Contains(err.Error(), cfg.InternalToken) {
+			t.Fatalf("short internal token error = %v", err)
+		}
+		cfg.InternalToken = "  " + strings.Repeat("i", 32) + "  "
+		if err := validateProductionConfig(cfg); err != nil {
+			t.Fatalf("trimmed 32-byte internal token should pass: %v", err)
+		}
+	})
+
+	t.Run("internal token uses UTF-8 bytes after trim", func(t *testing.T) {
+		cfg := base()
+		cfg.InternalToken = "  " + strings.Repeat("密", 10) + "  " // 30 trimmed bytes.
+		if err := validateProductionConfig(cfg); err == nil || !strings.Contains(err.Error(), "OPENLINKER_INTERNAL_TOKEN") {
+			t.Fatalf("30-byte UTF-8 internal token error = %v", err)
+		}
+		cfg.InternalToken = "  " + strings.Repeat("密", 11) + "  " // 33 trimmed bytes.
+		if err := validateProductionConfig(cfg); err != nil {
+			t.Fatalf("33-byte UTF-8 internal token should pass: %v", err)
+		}
+	})
+
+	t.Run("development preserves short test secrets", func(t *testing.T) {
+		cfg := &config.Config{
+			Env:                  "development",
+			JWTSecret:            "short",
+			InternalToken:        "short",
+			OAuthCodeStorageMode: "legacy-jwt",
+		}
+		if err := validateProductionConfig(cfg); err != nil {
+			t.Fatalf("development short secrets should pass: %v", err)
+		}
+	})
+}
+
+func TestValidateProductionConfigRejectsUnknownOAuthCodeStorageMode(t *testing.T) {
+	const invalid = "secret-looking-invalid-storage-value"
+	err := validateProductionConfig(&config.Config{
+		Env:                  "development",
+		OAuthCodeStorageMode: invalid,
+	})
+	if err == nil || !strings.Contains(err.Error(), "OAUTH_CODE_STORAGE_MODE") {
+		t.Fatalf("unknown storage mode error = %v", err)
+	}
+	if strings.Contains(err.Error(), invalid) {
+		t.Fatalf("unknown storage mode error echoed value: %v", err)
 	}
 }
 

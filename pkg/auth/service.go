@@ -25,6 +25,28 @@ const (
 	oauthCodeTTL   = 2 * time.Minute
 )
 
+// OAuthCodeStorageMode selects the database representation of a short-lived
+// OAuth redirect code. The default remains legacy-jwt for rolling compatibility.
+type OAuthCodeStorageMode string
+
+const (
+	OAuthCodeStorageModeLegacyJWT   OAuthCodeStorageMode = "legacy-jwt"
+	OAuthCodeStorageModeSubjectOnly OAuthCodeStorageMode = "subject-only"
+)
+
+// ParseOAuthCodeStorageMode returns the compatibility default for an empty
+// value and rejects every unknown mode without echoing the supplied value.
+func ParseOAuthCodeStorageMode(value string) (OAuthCodeStorageMode, error) {
+	switch strings.TrimSpace(value) {
+	case "", string(OAuthCodeStorageModeLegacyJWT):
+		return OAuthCodeStorageModeLegacyJWT, nil
+	case string(OAuthCodeStorageModeSubjectOnly):
+		return OAuthCodeStorageModeSubjectOnly, nil
+	default:
+		return "", fmt.Errorf("OAuth code storage mode must be legacy-jwt or subject-only")
+	}
+}
+
 // UserProvisioner is an optional extension point after user creation.
 //
 // Core standalone deployments do not inject an implementation; hosted
@@ -35,20 +57,35 @@ type UserProvisioner interface {
 
 // Service 认证业务逻辑层。
 type Service struct {
-	queries         *db.Queries
-	pool            *pgxpool.Pool
-	jwtSecret       string
-	jwtExpire       time.Duration
-	userProvisioner UserProvisioner
+	queries              *db.Queries
+	pool                 *pgxpool.Pool
+	jwtSecret            string
+	jwtExpire            time.Duration
+	oauthCodeStorageMode OAuthCodeStorageMode
+	userProvisioner      UserProvisioner
 }
 
 // NewService 构造 Service。jwtTTL 是 token 有效期（time.Duration）。
 func NewService(pool *pgxpool.Pool, jwtSecret string, jwtTTL time.Duration) *Service {
 	return &Service{
-		queries:   db.New(pool),
-		pool:      pool,
-		jwtSecret: jwtSecret,
-		jwtExpire: jwtTTL,
+		queries:              db.New(pool),
+		pool:                 pool,
+		jwtSecret:            jwtSecret,
+		jwtExpire:            jwtTTL,
+		oauthCodeStorageMode: OAuthCodeStorageModeLegacyJWT,
+	}
+}
+
+// SetOAuthCodeStorageMode changes only future OAuth handoff writes. Readers
+// always remain compatible with both legacy JWT and subject-only rows.
+// Configure this before serving requests.
+func (s *Service) SetOAuthCodeStorageMode(mode OAuthCodeStorageMode) error {
+	switch mode {
+	case OAuthCodeStorageModeLegacyJWT, OAuthCodeStorageModeSubjectOnly:
+		s.oauthCodeStorageMode = mode
+		return nil
+	default:
+		return fmt.Errorf("OAuth code storage mode must be legacy-jwt or subject-only")
 	}
 }
 
@@ -147,7 +184,33 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*AuthResponse, 
 
 // RefreshToken issues a fresh JWT for the currently authenticated user.
 func (s *Service) RefreshToken(ctx context.Context, userID uuid.UUID) (*AuthResponse, error) {
-	user, err := s.queries.GetUserByID(ctx, userID)
+	return s.refreshTokenWithQueries(ctx, s.queries, userID)
+}
+
+// GetAuthResponseWithTx reads identity state and issues a JWT through the
+// caller's transaction. It preserves GetMe's not-found semantics and does not
+// commit or roll back tx. Hosted flows use this primitive while retaining
+// ownership of their OAuth handoff row.
+func (s *Service) GetAuthResponseWithTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*AuthResponse, error) {
+	if tx == nil {
+		return nil, httpx.Internal("查询用户失败")
+	}
+	user, err := s.queries.WithTx(tx).GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("用户不存在")
+		}
+		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.GetAuthResponseWithTx: GetUserByID")
+		return nil, httpx.Internal("查询用户失败")
+	}
+	if err := ensureUserEnabled(&user); err != nil {
+		return nil, err
+	}
+	return s.respondWithToken(&user)
+}
+
+func (s *Service) refreshTokenWithQueries(ctx context.Context, queries *db.Queries, userID uuid.UUID) (*AuthResponse, error) {
+	user, err := queries.GetUserByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.Unauthorized("用户不存在或会话已失效")
@@ -248,10 +311,14 @@ DELETE FROM oauth_login_codes
 WHERE expires_at < NOW() - INTERVAL '1 hour'
    OR consumed_at < NOW() - INTERVAL '1 hour'
 `)
+	var storedJWT *string
+	if s.oauthCodeStorageMode == OAuthCodeStorageModeLegacyJWT {
+		storedJWT = &resp.JWT
+	}
 	_, err = s.pool.Exec(ctx, `
 INSERT INTO oauth_login_codes (code_hash, user_id, jwt, expires_at)
 VALUES ($1, $2, $3, $4)
-`, codeHash, userID, resp.JWT, time.Now().UTC().Add(oauthCodeTTL))
+`, codeHash, userID, storedJWT, time.Now().UTC().Add(oauthCodeTTL))
 	if err != nil {
 		log.Error().Err(err).Str("user_id", userID.String()).Msg("auth.IssueOAuthCode: insert")
 		return "", httpx.Internal("创建 OAuth 登录 code 失败")
@@ -259,31 +326,39 @@ VALUES ($1, $2, $3, $4)
 	return code, nil
 }
 
-// ExchangeOAuthCode consumes an OAuth redirect code and returns the stored JWT.
+// ExchangeOAuthCode consumes an OAuth redirect code and returns either the
+// legacy stored JWT or a freshly signed JWT for a subject-only row.
 func (s *Service) ExchangeOAuthCode(ctx context.Context, code string) (*AuthResponse, error) {
 	code = strings.TrimSpace(code)
 	if len(code) != oauthCodeBytes*2 {
 		return nil, httpx.Unauthorized("OAuth code 无效或已过期")
 	}
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		log.Error().Err(err).Msg("auth.ExchangeOAuthCode: begin")
+		return nil, httpx.Internal("交换 OAuth code 失败")
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
 	var userID uuid.UUID
-	var jwt string
-	err := s.pool.QueryRow(ctx, `
-UPDATE oauth_login_codes
-SET consumed_at = NOW()
+	var storedJWT *string
+	err = tx.QueryRow(ctx, `
+SELECT user_id, jwt
+FROM oauth_login_codes
 WHERE code_hash = $1
   AND consumed_at IS NULL
   AND expires_at > NOW()
-RETURNING user_id, jwt
-`, hashOAuthCode(code)).Scan(&userID, &jwt)
+FOR UPDATE
+`, hashOAuthCode(code)).Scan(&userID, &storedJWT)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, httpx.Unauthorized("OAuth code 无效或已过期")
 	}
 	if err != nil {
-		log.Error().Err(err).Msg("auth.ExchangeOAuthCode: consume")
+		log.Error().Err(err).Msg("auth.ExchangeOAuthCode: lock")
 		return nil, httpx.Internal("交换 OAuth code 失败")
 	}
 
-	user, err := s.queries.GetUserByID(ctx, userID)
+	user, err := s.queries.WithTx(tx).GetUserByID(ctx, userID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, httpx.Unauthorized("OAuth code 无效或已过期")
@@ -294,12 +369,46 @@ RETURNING user_id, jwt
 	if err := ensureUserEnabled(&user); err != nil {
 		return nil, err
 	}
-	return &AuthResponse{
-		UserID:      user.ID.String(),
-		Email:       user.Email,
-		DisplayName: user.DisplayName,
-		JWT:         jwt,
-	}, nil
+
+	var response *AuthResponse
+	if storedJWT != nil {
+		if *storedJWT == "" {
+			log.Error().Str("user_id", userID.String()).Msg("auth.ExchangeOAuthCode: empty legacy jwt")
+			return nil, httpx.Internal("交换 OAuth code 失败")
+		}
+		response = &AuthResponse{
+			UserID:      user.ID.String(),
+			Email:       user.Email,
+			DisplayName: user.DisplayName,
+			JWT:         *storedJWT,
+		}
+	} else {
+		response, err = s.respondWithToken(&user)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	tag, err := tx.Exec(ctx, `
+UPDATE oauth_login_codes
+SET consumed_at = NOW()
+WHERE code_hash = $1
+  AND consumed_at IS NULL
+  AND expires_at > NOW()
+`, hashOAuthCode(code))
+	if err != nil {
+		log.Error().Err(err).Msg("auth.ExchangeOAuthCode: consume")
+		return nil, httpx.Internal("交换 OAuth code 失败")
+	}
+	if tag.RowsAffected() != 1 {
+		log.Error().Int64("rows_affected", tag.RowsAffected()).Msg("auth.ExchangeOAuthCode: consume invariant")
+		return nil, httpx.Internal("交换 OAuth code 失败")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		log.Error().Err(err).Msg("auth.ExchangeOAuthCode: commit")
+		return nil, httpx.Internal("交换 OAuth code 失败")
+	}
+	return response, nil
 }
 
 // GetMe 当前用户信息。

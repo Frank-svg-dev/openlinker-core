@@ -27,9 +27,13 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -367,6 +371,253 @@ func TestOAuthCodeExchangeIsOneTime(t *testing.T) {
 	assert.Equal(t, resp.JWT, exchanged.JWT)
 
 	_, err = svc.ExchangeOAuthCode(ctx, code)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+}
+
+func TestOAuthCodeStorageModeParsingAndSetter(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want OAuthCodeStorageMode
+	}{
+		{raw: "", want: OAuthCodeStorageModeLegacyJWT},
+		{raw: "legacy-jwt", want: OAuthCodeStorageModeLegacyJWT},
+		{raw: "subject-only", want: OAuthCodeStorageModeSubjectOnly},
+	} {
+		got, err := ParseOAuthCodeStorageMode(tc.raw)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, got)
+	}
+
+	const invalid = OAuthCodeStorageMode("secret-looking-invalid-mode")
+	if _, err := ParseOAuthCodeStorageMode(string(invalid)); err == nil || strings.Contains(err.Error(), string(invalid)) {
+		t.Fatalf("ParseOAuthCodeStorageMode invalid error = %v", err)
+	}
+
+	svc := NewService(nil, testServiceSecret, testServiceTTL)
+	assert.Equal(t, OAuthCodeStorageModeLegacyJWT, svc.oauthCodeStorageMode)
+	require.NoError(t, svc.SetOAuthCodeStorageMode(OAuthCodeStorageModeSubjectOnly))
+	assert.Equal(t, OAuthCodeStorageModeSubjectOnly, svc.oauthCodeStorageMode)
+	if err := svc.SetOAuthCodeStorageMode(invalid); err == nil || strings.Contains(err.Error(), string(invalid)) {
+		t.Fatalf("SetOAuthCodeStorageMode invalid error = %v", err)
+	}
+}
+
+func TestOAuthCodeSubjectOnlyWriterAndCompatibilityReader(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	require.NoError(t, svc.SetOAuthCodeStorageMode(OAuthCodeStorageModeSubjectOnly))
+	ctx := context.Background()
+
+	resp, err := svc.FindOrCreateOAuthUser(ctx,
+		"google",
+		"google-subject-code-"+uuid.NewString()[:8],
+		uniqueEmail("oauth-subject-code"),
+		"OAuth Subject Code",
+		"",
+	)
+	require.NoError(t, err)
+
+	code, err := svc.IssueOAuthCode(ctx, resp)
+	require.NoError(t, err)
+	require.Len(t, code, oauthCodeBytes*2)
+
+	var storedJWT *string
+	var createdAt, expiresAt time.Time
+	err = pool.QueryRow(ctx, `
+SELECT jwt, created_at, expires_at
+FROM oauth_login_codes
+WHERE code_hash = $1
+`, hashOAuthCode(code)).Scan(&storedJWT, &createdAt, &expiresAt)
+	require.NoError(t, err)
+	assert.Nil(t, storedJWT, "subject-only writer must not persist a bearer JWT")
+	assert.InDelta(t, oauthCodeTTL.Seconds(), expiresAt.Sub(createdAt).Seconds(), 1)
+
+	exchanged, err := svc.ExchangeOAuthCode(ctx, code)
+	require.NoError(t, err)
+	assert.Equal(t, resp.UserID, exchanged.UserID)
+	assert.Equal(t, resp.Email, exchanged.Email)
+	assert.Equal(t, resp.DisplayName, exchanged.DisplayName)
+	parsedUserID, err := ParseToken(exchanged.JWT, testServiceSecret)
+	require.NoError(t, err)
+	assert.Equal(t, resp.UserID, parsedUserID)
+	parsed, err := jwt.ParseWithClaims(exchanged.JWT, &Claims{}, func(token *jwt.Token) (any, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			t.Fatalf("subject-only exchange signing method = %s, want HS256", token.Method.Alg())
+		}
+		return []byte(testServiceSecret), nil
+	})
+	require.NoError(t, err)
+	claims, ok := parsed.Claims.(*Claims)
+	require.True(t, ok)
+	assert.Equal(t, jwtIssuer, claims.Issuer)
+	assert.Equal(t, resp.UserID, claims.Subject)
+	require.NotNil(t, claims.IssuedAt)
+	require.NotNil(t, claims.ExpiresAt)
+	assert.InDelta(t, testServiceTTL.Seconds(), claims.ExpiresAt.Time.Sub(claims.IssuedAt.Time).Seconds(), 1)
+
+	_, err = svc.ExchangeOAuthCode(ctx, code)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+}
+
+func TestOAuthCodeLegacyWriterRemainsByteCompatible(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	resp, err := svc.FindOrCreateOAuthUser(ctx,
+		"github",
+		"github-legacy-code-"+uuid.NewString()[:8],
+		uniqueEmail("oauth-legacy-code"),
+		"OAuth Legacy Code",
+		"",
+	)
+	require.NoError(t, err)
+	code, err := svc.IssueOAuthCode(ctx, resp)
+	require.NoError(t, err)
+
+	var storedJWT *string
+	require.NoError(t, pool.QueryRow(ctx, `SELECT jwt FROM oauth_login_codes WHERE code_hash = $1`, hashOAuthCode(code)).Scan(&storedJWT))
+	require.NotNil(t, storedJWT)
+	assert.Equal(t, resp.JWT, *storedJWT)
+
+	exchanged, err := svc.ExchangeOAuthCode(ctx, code)
+	require.NoError(t, err)
+	assert.Equal(t, resp.JWT, exchanged.JWT)
+}
+
+func TestOAuthCodeConcurrentExchangeSucceedsExactlyOnce(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	require.NoError(t, svc.SetOAuthCodeStorageMode(OAuthCodeStorageModeSubjectOnly))
+	ctx := context.Background()
+
+	resp, err := svc.FindOrCreateOAuthUser(ctx,
+		"google",
+		"google-concurrent-code-"+uuid.NewString()[:8],
+		uniqueEmail("oauth-concurrent-code"),
+		"OAuth Concurrent Code",
+		"",
+	)
+	require.NoError(t, err)
+	code, err := svc.IssueOAuthCode(ctx, resp)
+	require.NoError(t, err)
+
+	const callers = 16
+	var successes atomic.Int32
+	var failuresMu sync.Mutex
+	var unexpected []error
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, exchangeErr := svc.ExchangeOAuthCode(ctx, code)
+			if exchangeErr == nil {
+				successes.Add(1)
+				return
+			}
+			var he *httpx.HTTPError
+			if !errors.As(exchangeErr, &he) || he.Status != http.StatusUnauthorized {
+				failuresMu.Lock()
+				unexpected = append(unexpected, exchangeErr)
+				failuresMu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	require.Empty(t, unexpected)
+	assert.Equal(t, int32(1), successes.Load())
+}
+
+func TestOAuthCodeUserFailureDoesNotConsumeCode(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		update string
+	}{
+		{name: "disabled", update: `UPDATE users SET disabled_at = NOW() WHERE id = $1`},
+		{name: "deleted", update: `UPDATE users SET deleted_at = NOW() WHERE id = $1`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := setupTestDB(t)
+			svc := newTestService(t, pool)
+			require.NoError(t, svc.SetOAuthCodeStorageMode(OAuthCodeStorageModeSubjectOnly))
+			ctx := context.Background()
+
+			resp, err := svc.FindOrCreateOAuthUser(ctx,
+				"google",
+				"google-user-failure-"+uuid.NewString()[:8],
+				uniqueEmail("oauth-user-failure"),
+				"OAuth User Failure",
+				"",
+			)
+			require.NoError(t, err)
+			code, err := svc.IssueOAuthCode(ctx, resp)
+			require.NoError(t, err)
+			userID := uuid.MustParse(resp.UserID)
+			_, err = pool.Exec(ctx, tc.update, userID)
+			require.NoError(t, err)
+
+			_, err = svc.ExchangeOAuthCode(ctx, code)
+			assertHTTPStatus(t, err, http.StatusUnauthorized)
+
+			var consumedAt *time.Time
+			require.NoError(t, pool.QueryRow(ctx,
+				`SELECT consumed_at FROM oauth_login_codes WHERE code_hash = $1`, hashOAuthCode(code),
+			).Scan(&consumedAt))
+			assert.Nil(t, consumedAt, "a failed user check must roll back code consumption")
+		})
+	}
+}
+
+func TestOAuthCodeExpiredRowIsNotConsumed(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	resp, err := svc.FindOrCreateOAuthUser(ctx,
+		"google", "google-expired-code-"+uuid.NewString()[:8], uniqueEmail("oauth-expired-code"), "Expired", "")
+	require.NoError(t, err)
+	code, err := svc.IssueOAuthCode(ctx, resp)
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, `UPDATE oauth_login_codes SET expires_at = NOW() - INTERVAL '1 second' WHERE code_hash = $1`, hashOAuthCode(code))
+	require.NoError(t, err)
+
+	_, err = svc.ExchangeOAuthCode(ctx, code)
+	assertHTTPStatus(t, err, http.StatusUnauthorized)
+	var consumedAt *time.Time
+	require.NoError(t, pool.QueryRow(ctx, `SELECT consumed_at FROM oauth_login_codes WHERE code_hash = $1`, hashOAuthCode(code)).Scan(&consumedAt))
+	assert.Nil(t, consumedAt)
+}
+
+func TestGetAuthResponseWithTxUsesCallerTransaction(t *testing.T) {
+	pool := setupTestDB(t)
+	svc := newTestService(t, pool)
+	ctx := context.Background()
+
+	registered, err := svc.Register(ctx, &RegisterRequest{
+		Email: uniqueEmail("refresh-with-tx"), Password: "supersecret123", DisplayName: "Before Tx",
+	})
+	require.NoError(t, err)
+	userID := uuid.MustParse(registered.UserID)
+
+	tx, err := pool.Begin(ctx)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `UPDATE users SET display_name = 'Visible In Tx' WHERE id = $1`, userID)
+	require.NoError(t, err)
+
+	refreshed, err := svc.GetAuthResponseWithTx(ctx, tx, userID)
+	require.NoError(t, err)
+	assert.Equal(t, "Visible In Tx", refreshed.DisplayName)
+	parsedUserID, err := ParseToken(refreshed.JWT, testServiceSecret)
+	require.NoError(t, err)
+	assert.Equal(t, userID.String(), parsedUserID)
+	_, err = svc.GetAuthResponseWithTx(ctx, tx, uuid.New())
+	assertHTTPStatus(t, err, http.StatusNotFound)
+
+	_, err = tx.Exec(ctx, `UPDATE users SET disabled_at = NOW() WHERE id = $1`, userID)
+	require.NoError(t, err)
+	_, err = svc.GetAuthResponseWithTx(ctx, tx, userID)
 	assertHTTPStatus(t, err, http.StatusUnauthorized)
 }
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"testing"
 )
 
@@ -39,6 +40,7 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	t.Setenv("OPENLINKER_RELEASE_ID", "20260712-test")
 	t.Setenv("OPENLINKER_GIT_SHA", "0123456789abcdef")
 	t.Setenv("RUNTIME_HA_MODE", "true")
+	unsetEnv(t, "OAUTH_CODE_STORAGE_MODE")
 
 	cfg, err := Load()
 	if err != nil {
@@ -64,6 +66,9 @@ func TestLoadAppliesRequiredEnvAndDefaults(t *testing.T) {
 	}
 	if cfg.OAuthSessionSecret != "oauth-secret" {
 		t.Fatalf("OAuthSessionSecret = %q", cfg.OAuthSessionSecret)
+	}
+	if cfg.OAuthCodeStorageMode != "legacy-jwt" {
+		t.Fatalf("OAuthCodeStorageMode = %q, want legacy-jwt", cfg.OAuthCodeStorageMode)
 	}
 	if cfg.InternalToken != "internal-secret" {
 		t.Fatalf("InternalToken = %q", cfg.InternalToken)
@@ -100,6 +105,7 @@ func TestLoadAppliesSafeDevelopmentReleaseDefaults(t *testing.T) {
 	unsetEnv(t, "OPENLINKER_RELEASE_ID")
 	unsetEnv(t, "OPENLINKER_GIT_SHA")
 	unsetEnv(t, "RUNTIME_HA_MODE")
+	unsetEnv(t, "OAUTH_CODE_STORAGE_MODE")
 
 	cfg, err := Load()
 	if err != nil {
@@ -108,6 +114,39 @@ func TestLoadAppliesSafeDevelopmentReleaseDefaults(t *testing.T) {
 	if cfg.ReleaseVersion != "local" || cfg.ReleaseCommit != "unknown" || cfg.RuntimeHAMode {
 		t.Fatalf("release defaults = %q/%q HA=%v", cfg.ReleaseVersion, cfg.ReleaseCommit, cfg.RuntimeHAMode)
 	}
+}
+
+func TestLoadOAuthCodeStorageMode(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://dev:dev@localhost/openlinker_test")
+	t.Setenv("JWT_SECRET", "test-secret")
+
+	for _, mode := range []string{"legacy-jwt", "subject-only"} {
+		t.Run(mode, func(t *testing.T) {
+			t.Setenv("OAUTH_CODE_STORAGE_MODE", mode)
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load(%s) returned error: %v", mode, err)
+			}
+			if cfg.OAuthCodeStorageMode != mode {
+				t.Fatalf("OAuthCodeStorageMode = %q, want %q", cfg.OAuthCodeStorageMode, mode)
+			}
+		})
+	}
+
+	t.Run("unknown mode fails without echoing value", func(t *testing.T) {
+		const invalid = "subject-only-secret-looking-invalid-value"
+		t.Setenv("OAUTH_CODE_STORAGE_MODE", invalid)
+		_, err := Load()
+		if err == nil {
+			t.Fatal("Load should reject an unknown OAuth code storage mode")
+		}
+		if !strings.Contains(err.Error(), "OAUTH_CODE_STORAGE_MODE") {
+			t.Fatalf("error does not identify OAUTH_CODE_STORAGE_MODE: %v", err)
+		}
+		if strings.Contains(err.Error(), invalid) {
+			t.Fatalf("error echoed the rejected value: %v", err)
+		}
+	})
 }
 
 func TestLoadRequiresDatabaseURLAndJWTSecret(t *testing.T) {
