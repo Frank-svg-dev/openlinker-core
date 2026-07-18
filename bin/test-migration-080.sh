@@ -5,7 +5,7 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MIGRATIONS_DIR="$ROOT_DIR/migrations"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16}"
-CONTAINER_NAME="openlinker-migration-079-${PPID}-$$"
+CONTAINER_NAME="openlinker-migration-080-${PPID}-$$"
 DATABASE_NAME="openlinker"
 
 cleanup() {
@@ -14,7 +14,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 fail() {
-  echo "migration 079 test failed: $*" >&2
+  echo "migration 080 test failed: $*" >&2
   exit 1
 }
 
@@ -49,26 +49,31 @@ expect_up_failure() {
   local expected="$1"
   local output status
   set +e
-  output="$(run_migration "$MIGRATIONS_DIR/079_runtime_attempt_transport_evidence.up.sql" 2>&1)"
+  output="$(run_migration "$MIGRATIONS_DIR/080_runtime_attempt_transport_evidence.up.sql" 2>&1)"
   status=$?
   set -e
   if ((status == 0)); then
-    fail "079 upgrade unexpectedly succeeded; expected: $expected"
+    fail "080 upgrade unexpectedly succeeded; expected: $expected"
   fi
   [[ "$output" == *"$expected"* ]] \
-    || fail "079 upgrade failed for the wrong reason; expected '$expected', got: $output"
+    || fail "080 upgrade failed for the wrong reason; expected '$expected', got: $output"
 }
 
-echo "[079] apply predecessor migrations through 078"
+echo "[080] apply predecessor migrations through 079"
 for migration_path in "$MIGRATIONS_DIR"/[0-9][0-9][0-9]_*.up.sql; do
   migration_name="$(basename "$migration_path")"
   version="${migration_name%%_*}"
-  if ((10#$version <= 78)); then
+  if ((10#$version <= 79)); then
     run_migration "$migration_path" >/dev/null
   fi
 done
 
-echo "[079] fail closed outside hard maintenance"
+if [[ "$(psql_stdin --tuples-only --no-align --command \
+  "SELECT to_regclass('idx_runtime_sessions_credential_lifecycle') IS NOT NULL")" != "t" ]]; then
+  fail "predecessor migration 079 lifecycle index is missing"
+fi
+
+echo "[080] fail closed outside hard maintenance"
 psql_stdin --quiet <<'SQL'
 UPDATE runtime_cluster_control
 SET mode = 'normal'
@@ -82,11 +87,15 @@ SET mode = 'hard_maintenance'
 WHERE singleton_id = 1;
 SQL
 
-echo "[079] upgrade, verify, clean rollback, and re-upgrade"
-run_migration "$MIGRATIONS_DIR/079_runtime_attempt_transport_evidence.up.sql" >/dev/null
-run_migration "$MIGRATIONS_DIR/079_runtime_attempt_transport_evidence_verify.sql" >/dev/null
-run_migration "$MIGRATIONS_DIR/079_runtime_attempt_transport_evidence.down.sql" >/dev/null
-run_migration "$MIGRATIONS_DIR/079_runtime_attempt_transport_evidence.up.sql" >/dev/null
-run_migration "$MIGRATIONS_DIR/079_runtime_attempt_transport_evidence_verify.sql" >/dev/null
+echo "[080] upgrade, verify, clean rollback, and re-upgrade"
+run_migration "$MIGRATIONS_DIR/080_runtime_attempt_transport_evidence.up.sql" >/dev/null
+run_migration "$MIGRATIONS_DIR/080_runtime_attempt_transport_evidence_verify.sql" >/dev/null
+run_migration "$MIGRATIONS_DIR/080_runtime_attempt_transport_evidence.down.sql" >/dev/null
+if [[ "$(psql_stdin --tuples-only --no-align --command \
+  "SELECT to_regclass('idx_runtime_sessions_credential_lifecycle') IS NOT NULL")" != "t" ]]; then
+  fail "migration 080 rollback removed predecessor migration 079 lifecycle index"
+fi
+run_migration "$MIGRATIONS_DIR/080_runtime_attempt_transport_evidence.up.sql" >/dev/null
+run_migration "$MIGRATIONS_DIR/080_runtime_attempt_transport_evidence_verify.sql" >/dev/null
 
-echo "migration 079 test passed"
+echo "migration 080 test passed"

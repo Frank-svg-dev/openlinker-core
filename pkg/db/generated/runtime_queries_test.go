@@ -910,15 +910,15 @@ func TestRuntimeWireCompatibilityMigrationShape(t *testing.T) {
 func TestRuntimeAttemptTransportEvidenceMigrationShape(t *testing.T) {
 	t.Parallel()
 
-	up, err := os.ReadFile("../../../migrations/079_runtime_attempt_transport_evidence.up.sql")
+	up, err := os.ReadFile("../../../migrations/080_runtime_attempt_transport_evidence.up.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	down, err := os.ReadFile("../../../migrations/079_runtime_attempt_transport_evidence.down.sql")
+	down, err := os.ReadFile("../../../migrations/080_runtime_attempt_transport_evidence.down.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	verify, err := os.ReadFile("../../../migrations/079_runtime_attempt_transport_evidence_verify.sql")
+	verify, err := os.ReadFile("../../../migrations/080_runtime_attempt_transport_evidence_verify.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -929,7 +929,7 @@ func TestRuntimeAttemptTransportEvidenceMigrationShape(t *testing.T) {
 		"runtime_session_attachments_attempt_identity_unique",
 		"new Runtime acceptance requires Runtime Attachment evidence",
 		"accepted run attempt Runtime Attachment evidence cannot change",
-		"79,\n    '079_runtime_attempt_transport_evidence'",
+		"80,\n    '080_runtime_attempt_transport_evidence'",
 		"schema_version = 77",
 	} {
 		if !strings.Contains(string(up), fragment) {
@@ -946,7 +946,7 @@ func TestRuntimeAttemptTransportEvidenceMigrationShape(t *testing.T) {
 		}
 	}
 	for _, fragment := range []string{
-		"runtime schema contract 79 is missing or mismatched",
+		"runtime schema contract 80 is missing or mismatched",
 		"Run Attempt Runtime Attachment evidence column is missing",
 		"Run Attempt Runtime Attachment constraints are missing or unvalidated",
 		"Run Attempt Runtime Attachment evidence trigger is missing",

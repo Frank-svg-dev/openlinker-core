@@ -4,13 +4,13 @@ DECLARE
 BEGIN
     IF (
         SELECT COUNT(*) FROM runtime_schema_contracts
-        WHERE schema_version = 79
-          AND migration_name = '079_runtime_attempt_transport_evidence'
+        WHERE schema_version = 80
+          AND migration_name = '080_runtime_attempt_transport_evidence'
           AND runtime_contract_id = 'openlinker.runtime.v2'
           AND runtime_contract_digest = current_digest
           AND is_current
     ) <> 1 OR (SELECT COUNT(*) FROM runtime_schema_contracts WHERE is_current) <> 1 THEN
-        RAISE EXCEPTION 'runtime schema contract 79 is missing or mismatched';
+        RAISE EXCEPTION 'runtime schema contract 80 is missing or mismatched';
     END IF;
 
     IF (
