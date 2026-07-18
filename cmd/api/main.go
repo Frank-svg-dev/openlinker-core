@@ -63,9 +63,6 @@ func parseCoreServingMode(value string) (coreServingMode, error) {
 }
 
 func main() {
-	if len(os.Args) >= 2 && os.Args[1] == "runtime-mtls-edge" {
-		os.Exit(runRuntimeMTLSEdge(os.Args[2:], os.Getenv, os.Stdout, os.Stderr))
-	}
 	if len(os.Args) >= 2 && os.Args[1] == "migrate" {
 		runMigrate(os.Args[2:])
 		return
@@ -591,11 +588,10 @@ func rateLimiterConfigWithConfig(cfg *config.Config, stores ...emw.RateLimiterSt
 	return emw.RateLimiterConfig{
 		Skipper: func(c echo.Context) bool {
 			path := c.Request().URL.Path
-			// Runtime traffic reaches Core through a raw TCP edge, so every
-			// connection has the edge container's source IP. An IP bucket here
-			// would become a cross-tenant global throttle. Runtime is instead
-			// protected by device mTLS, Agent Token authentication, authenticated
-			// principal rate limits, and bounded edge connection admission.
+			// Runtime uses long-lived WebSocket or pull transports, so the shared
+			// request/IP limiter is the wrong admission boundary even when clients
+			// connect directly. Runtime is protected by device mTLS, Agent Token
+			// authentication, principal limits, and its protocol admission limiter.
 			return path == "/healthz" || path == "/healthz/db" || path == "/readyz" ||
 				strings.HasPrefix(path, runtimePathPrefix)
 		},
