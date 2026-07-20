@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,12 +22,9 @@ const (
 	runtimeWSPongWait            = 75 * time.Second
 	runtimeWSPingInterval        = 30 * time.Second
 	runtimeWSPolicyCheckInterval = 500 * time.Millisecond
-	// WakeHub is the normal dispatch path. This ticker is only the bounded
-	// database recovery path for a duplicated or missed Runtime signal.
-	defaultRuntimeWSFallbackInterval = 30 * time.Second
-	runtimeWSHeartbeatInterval       = RuntimeHeartbeatInterval
-	runtimeWSCleanupTimeout          = 5 * time.Second
-	runtimeWSWriteQueue              = 32
+	runtimeWSHeartbeatInterval   = RuntimeHeartbeatInterval
+	runtimeWSCleanupTimeout      = 5 * time.Second
+	runtimeWSWriteQueue          = 32
 )
 
 var runtimeWSUpgrader = websocket.Upgrader{
@@ -245,6 +243,11 @@ type runtimeWSConnection struct {
 	correlationMu sync.Mutex
 	assignments   map[uuid.UUID]runtimeWSAssignmentCorrelation
 	cancellations map[uuid.UUID]runtimeWSCancellationCorrelation
+
+	dispatchPending  atomic.Bool
+	controlPending   atomic.Bool
+	dispatchContinue chan struct{}
+	controlContinue  chan struct{}
 }
 
 type runtimeWSWriteRequest struct {
@@ -273,18 +276,20 @@ func newRuntimeWSConnection(
 ) *runtimeWSConnection {
 	ctx, cancel := context.WithCancel(parent)
 	return &runtimeWSConnection{
-		controller:      controller,
-		socket:          socket,
-		authenticated:   authenticated,
-		ctx:             ctx,
-		cancel:          cancel,
-		writes:          make(chan runtimeWSWriteRequest, runtimeWSWriteQueue),
-		writerDone:      make(chan struct{}),
-		maintenanceDone: make(chan struct{}),
-		assignments:     make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
-		cancellations:   make(map[uuid.UUID]runtimeWSCancellationCorrelation),
-		connectionID:    "ws:" + uuid.NewString(),
-		reportedReason:  reportedReason,
+		controller:       controller,
+		socket:           socket,
+		authenticated:    authenticated,
+		ctx:              ctx,
+		cancel:           cancel,
+		writes:           make(chan runtimeWSWriteRequest, runtimeWSWriteQueue),
+		writerDone:       make(chan struct{}),
+		maintenanceDone:  make(chan struct{}),
+		dispatchContinue: make(chan struct{}, 1),
+		controlContinue:  make(chan struct{}, 1),
+		assignments:      make(map[uuid.UUID]runtimeWSAssignmentCorrelation),
+		cancellations:    make(map[uuid.UUID]runtimeWSCancellationCorrelation),
+		connectionID:     "ws:" + uuid.NewString(),
+		reportedReason:   reportedReason,
 	}
 }
 
@@ -479,9 +484,29 @@ func (c *runtimeWSConnection) handleEnvelope(envelope RuntimeEnvelope) bool {
 		err = runtimeTransportValidationError()
 	}
 	if err == nil {
+		c.scheduleMaintenanceContinuation(envelope.Type)
 		return false
 	}
 	return c.replyErrorAndMaybeClose(envelope, err, false)
+}
+
+func (c *runtimeWSConnection) scheduleMaintenanceContinuation(messageType RuntimeMessageType) {
+	switch messageType {
+	case RuntimeMessageAssignmentAck:
+		if c.dispatchPending.Load() {
+			select {
+			case c.dispatchContinue <- struct{}{}:
+			default:
+			}
+		}
+	case RuntimeMessageRunCancelAck:
+		if c.controlPending.Load() {
+			select {
+			case c.controlContinue <- struct{}{}:
+			default:
+			}
+		}
+	}
 }
 
 func (c *runtimeWSConnection) refreshSession() error {
@@ -711,21 +736,23 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 		}
 	}
 
-	fallbackTicker := time.NewTicker(c.controller.runtimeWebSocketFallbackInterval())
-	defer fallbackTicker.Stop()
 	policyTicker := time.NewTicker(runtimeWSPolicyCheckInterval)
 	defer policyTicker.Stop()
 
-	if !c.refreshMaintenanceSession() {
-		return
+	var dispatchWake, controlWake, nodeDispatchWake <-chan struct{}
+	if c.controller.dependencies.WakeHub != nil {
+		dispatchWake = c.controller.dependencies.WakeHub.WaitDispatch(c.sessionPrincipal.AgentID)
+		controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
+		nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
 	}
-	c.commandAndSend()
-	c.claimAndSend()
+	// Ready is a real lifecycle event: probe once for durable work that existed
+	// before this Session attached, then remain database-silent until a typed
+	// signal or an in-flight protocol transition creates more work.
+	c.controlPending.Store(true)
+	c.commandPendingAndSend()
+	c.dispatchPending.Store(true)
+	c.claimPendingAndSend()
 	for {
-		var wake <-chan struct{}
-		if c.controller.dependencies.WakeHub != nil {
-			wake = c.controller.dependencies.WakeHub.Wait(c.sessionPrincipal.AgentID)
-		}
 		select {
 		case <-c.ctx.Done():
 			return
@@ -736,18 +763,33 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				c.closeForError(admissionErr)
 				return
 			}
-		case <-fallbackTicker.C:
+		case <-dispatchWake:
+			if c.controller.dependencies.WakeHub != nil {
+				dispatchWake = c.controller.dependencies.WakeHub.WaitDispatch(c.sessionPrincipal.AgentID)
+			}
 			if !c.refreshMaintenanceSession() {
 				return
 			}
-			c.commandAndSend()
-			c.claimAndSend()
-		case <-wake:
+			c.dispatchPending.Store(true)
+			c.claimPendingAndSend()
+		case <-controlWake:
+			if c.controller.dependencies.WakeHub != nil {
+				controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
+			}
 			if !c.refreshMaintenanceSession() {
 				return
 			}
-			c.commandAndSend()
-			c.claimAndSend()
+			c.controlPending.Store(true)
+			c.commandPendingAndSend()
+		case <-c.dispatchContinue:
+			c.claimPendingAndSend()
+		case <-c.controlContinue:
+			c.commandPendingAndSend()
+		case <-nodeDispatchWake:
+			if c.controller.dependencies.WakeHub != nil {
+				nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
+			}
+			c.claimPendingAndSend()
 		case <-heartbeatTicker.C:
 			if !c.refreshMaintenanceSession() {
 				return
@@ -772,9 +814,15 @@ func (c *runtimeWSConnection) refreshMaintenanceSession() bool {
 	return true
 }
 
-func (c *runtimeWSConnection) commandAndSend() {
+func (c *runtimeWSConnection) commandPendingAndSend() {
+	if !c.controlPending.Load() {
+		return
+	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
+	if !c.controlPending.Load() {
+		return
+	}
 	command, _, err := c.controller.dependencies.Cancellations.NextCommand(c.ctx, c.sessionPrincipal)
 	if err != nil {
 		mapped := mapRuntimeHTTPError(err)
@@ -784,6 +832,7 @@ func (c *runtimeWSConnection) commandAndSend() {
 		return
 	}
 	if command == nil {
+		c.controlPending.Store(false)
 		return
 	}
 	decoded, err := DecodePendingCommand(*command)
@@ -810,9 +859,15 @@ func (c *runtimeWSConnection) commandAndSend() {
 	}
 }
 
-func (c *runtimeWSConnection) claimAndSend() {
+func (c *runtimeWSConnection) claimPendingAndSend() {
+	if !c.dispatchPending.Load() {
+		return
+	}
 	c.operationMu.Lock()
 	defer c.operationMu.Unlock()
+	if !c.dispatchPending.Load() {
+		return
+	}
 	assignment, err := c.controller.dependencies.Leases.ClaimOffer(c.ctx, c.sessionPrincipal)
 	if err != nil {
 		mapped := mapRuntimeHTTPError(err)
@@ -821,7 +876,11 @@ func (c *runtimeWSConnection) claimAndSend() {
 		}
 		return
 	}
-	if assignment == nil || c.assignmentAlreadySent(assignment.AttemptIdentity) {
+	if assignment == nil {
+		c.dispatchPending.Store(false)
+		return
+	}
+	if c.assignmentAlreadySent(assignment.AttemptIdentity) {
 		return
 	}
 	message, envelope, err := newRuntimeWSTypedMessage(RuntimeMessageRunAssigned, nil, *assignment)

@@ -53,6 +53,32 @@ func TestRuntimeSignalWireShapeIsAClosedSafeAllowlist(t *testing.T) {
 	require.ErrorIs(t, err, ErrRuntimeSignalInvalid)
 }
 
+func TestRuntimeNodeCapacitySignalRequiresOnlyAValidNodeProjection(t *testing.T) {
+	nodeID := uuid.New()
+	signal := RuntimeSignal{
+		SignalID: uuid.New(), Type: runtimeNodeCapacityAvailableSignal,
+		AgentID: uuid.New(), NodeID: &nodeID,
+	}
+	encoded, err := MarshalRuntimeSignal(signal)
+	require.NoError(t, err)
+	require.Contains(t, string(encoded), `"node_id":"`+nodeID.String()+`"`)
+	require.Equal(t, signal, requireRuntimeSignal(t, encoded))
+
+	signal.NodeID = nil
+	require.ErrorIs(t, ValidateRuntimeSignal(signal), ErrRuntimeSignalInvalid)
+	otherType := signal
+	otherType.Type = "run.available"
+	otherType.NodeID = &nodeID
+	require.ErrorIs(t, ValidateRuntimeSignal(otherType), ErrRuntimeSignalInvalid)
+}
+
+func requireRuntimeSignal(t *testing.T, encoded []byte) RuntimeSignal {
+	t.Helper()
+	signal, err := ParseRuntimeSignal(encoded)
+	require.NoError(t, err)
+	return signal
+}
+
 func TestLocalSignalBusBroadcastsAndFiltersTargetInstance(t *testing.T) {
 	instanceID := uuid.New()
 	bus := NewLocalSignalBus(instanceID)
@@ -249,5 +275,5 @@ func TestLocalSignalBusReturnsAllSubscriberErrors(t *testing.T) {
 
 func TestRuntimeSignalStructHasNoUnreviewedWireFields(t *testing.T) {
 	typeOfSignal := reflect.TypeFor[RuntimeSignal]()
-	require.Equal(t, 5, typeOfSignal.NumField())
+	require.Equal(t, 6, typeOfSignal.NumField())
 }

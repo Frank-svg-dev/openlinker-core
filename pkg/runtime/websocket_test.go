@@ -390,11 +390,15 @@ func TestRuntimeWebSocketIdleDoesNotContinuouslyPollDatabase(t *testing.T) {
 	time.Sleep(750 * time.Millisecond)
 	require.Equal(t, claims, fixture.leases.claimCallCount())
 	require.Equal(t, commands, fixture.cancellations.nextCallCount())
+
+	fixture.wakeHub.WakeNodeDispatch(fixture.principal.NodeID)
+	time.Sleep(50 * time.Millisecond)
+	require.Equal(t, claims, fixture.leases.claimCallCount(), "idle connection must ignore unrelated Node capacity")
+	require.Equal(t, commands, fixture.cancellations.nextCallCount())
 }
 
-func TestRuntimeWebSocketFallbackEventuallyPollsDatabase(t *testing.T) {
+func TestRuntimeWebSocketTypedWakesOnlyQueryTheirOwnWork(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
-	fixture.fallbackInterval = 50 * time.Millisecond
 	server, target := fixture.server(t)
 	defer server.Close()
 	conn := dialRuntimeWS(t, target)
@@ -403,11 +407,26 @@ func TestRuntimeWebSocketFallbackEventuallyPollsDatabase(t *testing.T) {
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
 	require.Eventually(t, func() bool {
-		return fixture.leases.claimCallCount() >= 2 && fixture.cancellations.nextCallCount() >= 2
+		return fixture.leases.claimCallCount() >= 1 && fixture.cancellations.nextCallCount() >= 1
 	}, time.Second, 10*time.Millisecond)
+
+	claims := fixture.leases.claimCallCount()
+	commands := fixture.cancellations.nextCallCount()
+	fixture.wakeHub.WakeControl(fixture.principal.AgentID)
+	require.Eventually(t, func() bool {
+		return fixture.cancellations.nextCallCount() == commands+1
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, claims, fixture.leases.claimCallCount())
+
+	commands = fixture.cancellations.nextCallCount()
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() == claims+1
+	}, time.Second, 10*time.Millisecond)
+	require.Equal(t, commands, fixture.cancellations.nextCallCount())
 }
 
-func TestRuntimeWebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
+func TestRuntimeWebSocketDispatchWakeDeliversAssignmentImmediately(t *testing.T) {
 	fixture := newRuntimeWSTestFixture()
 	server, target := fixture.server(t)
 	defer server.Close()
@@ -419,7 +438,7 @@ func TestRuntimeWebSocketWakeDeliversAssignmentBeforePollTick(t *testing.T) {
 	assignment := fixture.assignment()
 	fixture.leases.setAssignment(&assignment)
 	started := time.Now()
-	fixture.wakeHub.Wake(fixture.principal.AgentID)
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(350*time.Millisecond)))
 	assigned := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageRunAssigned, assigned.Type)
@@ -595,6 +614,109 @@ func TestRuntimeWebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T) {
 	replayedConfirmed := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(ackEnvelope, replayedConfirmed))
 	require.Equal(t, 2, fixture.leases.ackCallCount())
+}
+
+func TestRuntimeWebSocketAssignmentAckContinuesKnownDispatchDemand(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	first, second := fixture.assignment(), fixture.assignment()
+	fixture.leases.setAssignments(first, second)
+	fixture.leases.ackResponse = RunAssignmentConfirmedPayload{
+		AttemptIdentity: first.AttemptIdentity,
+		AttemptNo:       1,
+		LeaseExpiresAt:  fixture.now.Add(time.Minute),
+	}
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	firstEnvelope := readRuntimeWSEnvelope(t, conn)
+	firstAssigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](
+		firstEnvelope, RuntimeMessageRunAssigned,
+	)
+	require.NoError(t, err)
+	require.Equal(t, first.AttemptIdentity, firstAssigned.AttemptIdentity)
+
+	ack, err := NewRuntimeTypedMessage(
+		RuntimeMessageAssignmentAck,
+		&firstEnvelope.MessageID,
+		RunAssignmentAckPayload{AttemptIdentity: first.AttemptIdentity},
+	)
+	require.NoError(t, err)
+	require.NoError(t, conn.WriteJSON(ack))
+	require.Equal(t, RuntimeMessageAssignmentConfirmed, readRuntimeWSEnvelope(t, conn).Type)
+	secondEnvelope := readRuntimeWSEnvelope(t, conn)
+	secondAssigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](
+		secondEnvelope, RuntimeMessageRunAssigned,
+	)
+	require.NoError(t, err)
+	require.Equal(t, second.AttemptIdentity, secondAssigned.AttemptIdentity)
+	require.Equal(t, 2, fixture.leases.claimCallCount())
+}
+
+func TestRuntimeWebSocketCapacitySignalContinuesDemandAfterResultRelease(t *testing.T) {
+	fixture := newRuntimeWSTestFixture()
+	first, second := fixture.assignment(), fixture.assignment()
+	fixture.leases.setAssignments(first, second)
+	fixture.leases.ackResponse = RunAssignmentConfirmedPayload{
+		AttemptIdentity: first.AttemptIdentity,
+		AttemptNo:       1,
+		LeaseExpiresAt:  fixture.now.Add(time.Minute),
+	}
+	fixture.finalizer.ack = RuntimeResultAck{
+		ResultID:       uuid.New(),
+		Classification: RuntimeResultClassificationSuccess,
+		RunStatus:      string(RuntimeRunSuccess),
+		DispatchState:  string(RuntimeDispatchTerminal),
+	}
+	server, target := fixture.server(t)
+	defer server.Close()
+	conn := dialRuntimeWS(t, target)
+	defer conn.Close()
+
+	writeRuntimeWSHello(t, conn, fixture.hello)
+	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	firstEnvelope := readRuntimeWSEnvelope(t, conn)
+	fixture.leases.setPostAckClaimError(newRuntimeLeaseError(RuntimeLeaseErrorNodeAtCapacity, nil))
+	ack, err := NewRuntimeTypedMessage(
+		RuntimeMessageAssignmentAck,
+		&firstEnvelope.MessageID,
+		RunAssignmentAckPayload{AttemptIdentity: first.AttemptIdentity},
+	)
+	require.NoError(t, err)
+	require.NoError(t, conn.WriteJSON(ack))
+	require.Equal(t, RuntimeMessageAssignmentConfirmed, readRuntimeWSEnvelope(t, conn).Type)
+	require.Eventually(t, func() bool {
+		return fixture.leases.claimCallCount() >= 2
+	}, time.Second, 10*time.Millisecond)
+	fixture.leases.setPostAckClaimError(nil)
+
+	result, err := NewRuntimeTypedMessage(
+		RuntimeMessageRunResult,
+		nil,
+		RunResultPayload{
+			AttemptIdentity: first.AttemptIdentity,
+			ResultID:        fixture.finalizer.ack.ResultID,
+			Status:          "success",
+			Output:          map[string]any{"answer": "ok"},
+			DurationMS:      25,
+		},
+	)
+	require.NoError(t, err)
+	require.NoError(t, conn.WriteJSON(result))
+	require.Equal(t, RuntimeMessageRunResultAck, readRuntimeWSEnvelope(t, conn).Type)
+	time.Sleep(20 * time.Millisecond)
+	require.Equal(t, 2, fixture.leases.claimCallCount(), "Result transport ACK must not probe dispatch")
+	fixture.wakeHub.WakeNodeDispatch(fixture.principal.NodeID)
+	secondEnvelope := readRuntimeWSEnvelope(t, conn)
+	secondAssigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](
+		secondEnvelope, RuntimeMessageRunAssigned,
+	)
+	require.NoError(t, err)
+	require.Equal(t, second.AttemptIdentity, secondAssigned.AttemptIdentity)
+	require.Equal(t, 3, fixture.leases.claimCallCount())
 }
 
 func TestRuntimeWebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.T) {
@@ -910,22 +1032,21 @@ func TestRuntimeWebSocketTerminalCancelAckReleasesCorrelation(t *testing.T) {
 }
 
 type runtimeWSTestFixture struct {
-	now              time.Time
-	authenticated    AuthenticatedRuntimePrincipal
-	hello            RuntimeHelloPayload
-	principal        RuntimeSessionPrincipal
-	operations       *runtimeWSOperations
-	tokens           *runtimeWSTokenValidatorFake
-	devices          *runtimeWSDeviceAuthenticatorFake
-	sessions         *runtimeWSSessionServiceFake
-	leases           *runtimeWSLeaseServiceFake
-	events           *runtimeWSEventStoreFake
-	finalizer        *runtimeWSFinalizerFake
-	resume           RuntimeResumeAPI
-	cancellations    *runtimeWSCancellationServiceFake
-	wakeHub          *RuntimeWakeHub
-	transportPolicy  RuntimeTransportPolicyProvider
-	fallbackInterval time.Duration
+	now             time.Time
+	authenticated   AuthenticatedRuntimePrincipal
+	hello           RuntimeHelloPayload
+	principal       RuntimeSessionPrincipal
+	operations      *runtimeWSOperations
+	tokens          *runtimeWSTokenValidatorFake
+	devices         *runtimeWSDeviceAuthenticatorFake
+	sessions        *runtimeWSSessionServiceFake
+	leases          *runtimeWSLeaseServiceFake
+	events          *runtimeWSEventStoreFake
+	finalizer       *runtimeWSFinalizerFake
+	resume          RuntimeResumeAPI
+	cancellations   *runtimeWSCancellationServiceFake
+	wakeHub         *RuntimeWakeHub
+	transportPolicy RuntimeTransportPolicyProvider
 }
 
 func newRuntimeWSTestFixture() *runtimeWSTestFixture {
@@ -1013,7 +1134,7 @@ func newRuntimeWSTestFixture() *runtimeWSTestFixture {
 }
 
 func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
-	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
+	return NewRuntimeHTTPController(RuntimeHTTPDependencies{
 		TokenValidator:      f.tokens,
 		DeviceAuthenticator: f.devices,
 		TransportPolicy:     f.transportPolicy,
@@ -1025,10 +1146,6 @@ func (f *runtimeWSTestFixture) controller() *RuntimeHTTPController {
 		Cancellations:       f.cancellations,
 		WakeHub:             f.wakeHub,
 	})
-	if f.fallbackInterval > 0 {
-		controller.webSocketFallbackInterval = f.fallbackInterval
-	}
-	return controller
 }
 
 func (f *runtimeWSTestFixture) server(t *testing.T) (*httptest.Server, string) {
@@ -1279,33 +1396,44 @@ func (f *runtimeWSSessionServiceFake) closedStatus() string {
 }
 
 type runtimeWSLeaseServiceFake struct {
-	mu             sync.Mutex
-	operations     *runtimeWSOperations
-	assignment     *RunAssignedPayload
-	claimErr       error
-	ackResponse    RunAssignmentConfirmedPayload
-	ackErr         error
-	rejectResponse RunAssignmentRejectedPayload
-	rejectErr      error
-	renewResponse  RunLeaseRenewedPayload
-	renewErr       error
-	releaseErr     error
-	releaseCode    string
-	claimCalls     int
-	ackCalls       int
-	rejectCalls    int
-	renewCalls     int
+	mu              sync.Mutex
+	operations      *runtimeWSOperations
+	assignment      *RunAssignedPayload
+	assignmentQueue []RunAssignedPayload
+	claimErr        error
+	postAckClaimErr error
+	ackResponse     RunAssignmentConfirmedPayload
+	ackErr          error
+	rejectResponse  RunAssignmentRejectedPayload
+	rejectErr       error
+	renewResponse   RunLeaseRenewedPayload
+	renewErr        error
+	releaseErr      error
+	releaseCode     string
+	claimCalls      int
+	ackCalls        int
+	rejectCalls     int
+	renewCalls      int
 }
 
 func (f *runtimeWSLeaseServiceFake) ClaimOffer(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.claimCalls++
+	if f.assignment == nil && len(f.assignmentQueue) > 0 {
+		next := f.assignmentQueue[0]
+		f.assignmentQueue = f.assignmentQueue[1:]
+		f.assignment = &next
+	}
+	err := f.claimErr
+	if f.ackCalls > 0 && f.postAckClaimErr != nil {
+		err = f.postAckClaimErr
+	}
 	if f.assignment == nil {
-		return nil, f.claimErr
+		return nil, err
 	}
 	copy := *f.assignment
-	return &copy, f.claimErr
+	return &copy, err
 }
 
 func (f *runtimeWSLeaseServiceFake) claimCallCount() int {
@@ -1357,6 +1485,25 @@ func (f *runtimeWSLeaseServiceFake) ReleaseUnackedOffer(_ context.Context, _ Run
 func (f *runtimeWSLeaseServiceFake) setAssignment(assignment *RunAssignedPayload) {
 	f.mu.Lock()
 	f.assignment = assignment
+	f.mu.Unlock()
+}
+
+func (f *runtimeWSLeaseServiceFake) setAssignments(assignments ...RunAssignedPayload) {
+	f.mu.Lock()
+	f.assignment = nil
+	f.assignmentQueue = append([]RunAssignedPayload(nil), assignments...)
+	f.mu.Unlock()
+}
+
+func (f *runtimeWSLeaseServiceFake) setClaimError(err error) {
+	f.mu.Lock()
+	f.claimErr = err
+	f.mu.Unlock()
+}
+
+func (f *runtimeWSLeaseServiceFake) setPostAckClaimError(err error) {
+	f.mu.Lock()
+	f.postAckClaimErr = err
 	f.mu.Unlock()
 }
 

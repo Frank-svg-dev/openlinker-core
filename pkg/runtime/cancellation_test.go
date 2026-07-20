@@ -130,8 +130,12 @@ func TestRuntimeCancellationStoppedAckReleasesCapacityExactlyOnce(t *testing.T) 
 	require.Equal(t, []string{
 		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt",
 		"lock_cancellation", "advance_cancellation", "finish_attempt", "capacity_cas",
-		"release_session", "release_node", "mirror_cancellation",
+		"release_session", "release_node", "create_capacity_signal", "mirror_cancellation",
 	}, fixture.tx.calls)
+	require.Len(t, fixture.tx.signals, 1)
+	require.Equal(t, runtimeNodeCapacityAvailableSignal, fixture.tx.signals[0].EventType)
+	require.Equal(t, fixture.principal.AgentID, fixture.tx.signals[0].AgentID)
+	require.Equal(t, &fixture.tx.attempt.RunID, fixture.tx.signals[0].RunID)
 
 	fixture.tx.calls = nil
 	fixture.tx.cancellation.State = string(RuntimeCancelStopped)
@@ -208,8 +212,9 @@ func TestRuntimeCancellationDeadlineReaperMarksUnconfirmedAndReleasesOnce(t *tes
 	require.Equal(t, []string{
 		"find_due", "lock_reap_session", "lock_reap_node", "lock_due_run",
 		"lock_attempt", "lock_cancellation", "advance_cancellation",
-		"finish_attempt", "capacity_cas", "release_session", "release_node", "mirror_cancellation",
+		"finish_attempt", "capacity_cas", "release_session", "release_node", "create_capacity_signal", "mirror_cancellation",
 	}, fixture.tx.calls)
+	require.Len(t, fixture.tx.signals, 1)
 
 	fixture.tx.calls = nil
 	replayed, err := fixture.coordinator.ReapExpiredCancellation(context.Background())
@@ -254,8 +259,9 @@ func TestRuntimeCancellationDeadlineReaperPreservesNegativeTerminalEvidenceAndRe
 			require.Equal(t, []string{
 				"find_due", "lock_reap_session", "lock_reap_node", "lock_due_run",
 				"lock_attempt", "lock_cancellation", "finish_attempt", "capacity_cas",
-				"release_session", "release_node", "mirror_cancellation",
+				"release_session", "release_node", "create_capacity_signal", "mirror_cancellation",
 			}, fixture.tx.calls)
+			require.Len(t, fixture.tx.signals, 1)
 
 			fixture.tx.calls = nil
 			replayed, err := fixture.coordinator.ReapExpiredCancellation(context.Background())
@@ -409,6 +415,7 @@ type runtimeCancellationTransactionFake struct {
 	finishCalls       int
 	capacityCASCalls  int
 	finishedErrorCode string
+	signals           []db.CreateRuntimeSignalParams
 }
 
 func (f *runtimeCancellationTransactionFake) FindNextDueRuntimeCoreCancellation(
@@ -627,4 +634,10 @@ func (f *runtimeCancellationTransactionFake) ReleaseRuntimeNodeSlot(_ context.Co
 	f.call("release_node")
 	f.nodeInflight--
 	return db.RuntimeNode{Inflight: f.nodeInflight}, nil
+}
+
+func (f *runtimeCancellationTransactionFake) CreateRuntimeSignal(_ context.Context, params db.CreateRuntimeSignalParams) (db.RuntimeSignalOutbox, error) {
+	f.call("create_capacity_signal")
+	f.signals = append(f.signals, params)
+	return db.RuntimeSignalOutbox{ID: uuid.New()}, nil
 }

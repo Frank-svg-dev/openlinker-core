@@ -825,8 +825,12 @@ func finishRuntimeCancellationAttempt(
 	if _, err = tx.ReleaseRuntimeSessionSlot(ctx, capacity.RuntimeSessionID); err != nil {
 		return err
 	}
-	_, err = tx.ReleaseRuntimeNodeSlot(ctx, capacity.NodeID)
-	return err
+	if _, err = tx.ReleaseRuntimeNodeSlot(ctx, capacity.NodeID); err != nil {
+		return err
+	}
+	return createRuntimeNodeCapacityAvailableSignal(
+		ctx, tx, attempt.AgentID, capacity.NodeID, attempt.RunID,
+	)
 }
 
 func (t *postgresRuntimeCancellationTransaction) PersistCancellationTerminal(
@@ -1153,6 +1157,7 @@ type runtimeCancellationTransaction interface {
 	MarkRunAttemptCapacityReleased(context.Context, db.MarkRunAttemptCapacityReleasedParams) (db.MarkRunAttemptCapacityReleasedRow, error)
 	ReleaseRuntimeSessionSlot(context.Context, uuid.UUID) (db.RuntimeSession, error)
 	ReleaseRuntimeNodeSlot(context.Context, uuid.UUID) (db.RuntimeNode, error)
+	CreateRuntimeSignal(context.Context, db.CreateRuntimeSignalParams) (db.RuntimeSignalOutbox, error)
 	GetRunByID(context.Context, uuid.UUID) (db.Run, error)
 	PersistCancellationTerminal(context.Context, db.LockRunForResultFinalizationRow, db.RunCancellation, *db.RunAttempt) (db.Run, error)
 }
@@ -1252,6 +1257,10 @@ func (t *postgresRuntimeCancellationTransaction) ReleaseRuntimeSessionSlot(ctx c
 }
 func (t *postgresRuntimeCancellationTransaction) ReleaseRuntimeNodeSlot(ctx context.Context, id uuid.UUID) (db.RuntimeNode, error) {
 	return t.queries.ReleaseRuntimeNodeSlot(ctx, id)
+}
+
+func (t *postgresRuntimeCancellationTransaction) CreateRuntimeSignal(ctx context.Context, params db.CreateRuntimeSignalParams) (db.RuntimeSignalOutbox, error) {
+	return t.queries.CreateRuntimeSignal(ctx, params)
 }
 func (t *postgresRuntimeCancellationTransaction) GetRunByID(ctx context.Context, id uuid.UUID) (db.Run, error) {
 	return t.queries.GetRunByID(ctx, id)

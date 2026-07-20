@@ -33,17 +33,69 @@ func TestRuntimeWakeHubBroadcastsAndRearms(t *testing.T) {
 	}
 }
 
-func TestRuntimeSignalSubscriberReconnectsAndWakesAfterTransportFailure(t *testing.T) {
-	instanceID, agentID := uuid.New(), uuid.New()
-	bus := &runtimeSignalSubscriberFake{
-		failures: 1,
-		signal: RuntimeSignal{
-			SignalID: uuid.New(), Type: "run.available", AgentID: agentID,
-			TargetInstanceID: &instanceID,
-		},
-	}
+func TestRuntimeWakeHubSeparatesDispatchAndControl(t *testing.T) {
 	hub := NewRuntimeWakeHub()
-	wake := hub.Wait(agentID)
+	agentID := uuid.New()
+	dispatch := hub.WaitDispatch(agentID)
+	control := hub.WaitControl(agentID)
+
+	hub.WakeDispatch(agentID)
+	select {
+	case <-dispatch:
+	case <-time.After(time.Second):
+		t.Fatal("dispatch wake did not reach its waiter")
+	}
+	select {
+	case <-control:
+		t.Fatal("dispatch wake reached the control waiter")
+	default:
+	}
+
+	dispatch = hub.WaitDispatch(agentID)
+	hub.WakeControl(agentID)
+	select {
+	case <-control:
+	case <-time.After(time.Second):
+		t.Fatal("control wake did not reach its waiter")
+	}
+	select {
+	case <-dispatch:
+		t.Fatal("control wake reached the dispatch waiter")
+	default:
+	}
+}
+
+func TestRuntimeWakeHubScopesCapacityReleaseToNode(t *testing.T) {
+	hub := NewRuntimeWakeHub()
+	agentID, nodeID, otherNodeID := uuid.New(), uuid.New(), uuid.New()
+	agentDispatch := hub.WaitDispatch(agentID)
+	nodeDispatch := hub.WaitNodeDispatch(nodeID)
+	otherNodeDispatch := hub.WaitNodeDispatch(otherNodeID)
+
+	hub.WakeNodeDispatch(nodeID)
+	select {
+	case <-nodeDispatch:
+	case <-time.After(time.Second):
+		t.Fatal("Node capacity wake did not reach its waiter")
+	}
+	select {
+	case <-agentDispatch:
+		t.Fatal("Node capacity wake changed Agent demand")
+	default:
+	}
+	select {
+	case <-otherNodeDispatch:
+		t.Fatal("Node capacity wake reached another Node")
+	default:
+	}
+}
+
+func TestRuntimeSignalSubscriberReconnectBroadcastsRecoveryWake(t *testing.T) {
+	instanceID, agentID := uuid.New(), uuid.New()
+	bus := &runtimeSignalSubscriberFake{failures: 1}
+	hub := NewRuntimeWakeHub()
+	dispatch := hub.WaitDispatch(agentID)
+	control := hub.WaitControl(agentID)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -52,9 +104,14 @@ func TestRuntimeSignalSubscriberReconnectsAndWakesAfterTransportFailure(t *testi
 	}()
 
 	select {
-	case <-wake:
+	case <-dispatch:
 	case <-time.After(2 * time.Second):
-		t.Fatal("subscriber did not reconnect and deliver the wake hint")
+		t.Fatal("subscriber reconnect did not recover dispatch waiters")
+	}
+	select {
+	case <-control:
+	case <-time.After(time.Second):
+		t.Fatal("subscriber reconnect did not recover control waiters")
 	}
 	require.GreaterOrEqual(t, bus.subscribeCalls(), 2)
 	cancel()
@@ -75,7 +132,7 @@ func TestRuntimeSignalSubscriberRejectsAnotherCoreTarget(t *testing.T) {
 		delivered: make(chan struct{}),
 	}
 	hub := NewRuntimeWakeHub()
-	wake := hub.Wait(agentID)
+	wake := hub.WaitControl(agentID)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -92,6 +149,80 @@ func TestRuntimeSignalSubscriberRejectsAnotherCoreTarget(t *testing.T) {
 	case <-wake:
 		t.Fatal("signal targeted at another Core woke the local waiter")
 	case <-time.After(30 * time.Millisecond):
+	}
+	cancel()
+	<-done
+}
+
+func TestRuntimeAvailableSignalOnlyWakesDispatch(t *testing.T) {
+	instanceID, agentID := uuid.New(), uuid.New()
+	bus := &runtimeSignalSubscriberFake{
+		signal: RuntimeSignal{
+			SignalID: uuid.New(), Type: "run.available", AgentID: agentID,
+			TargetInstanceID: &instanceID,
+		},
+		delivered: make(chan struct{}),
+	}
+	hub := NewRuntimeWakeHub()
+	dispatchWake := hub.WaitDispatch(agentID)
+	controlWake := hub.WaitControl(agentID)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		StartRuntimeSignalSubscriber(ctx, bus, instanceID, hub, nil)
+	}()
+
+	select {
+	case <-bus.delivered:
+	case <-time.After(time.Second):
+		t.Fatal("fake subscription was not reached")
+	}
+	select {
+	case <-dispatchWake:
+	case <-time.After(time.Second):
+		t.Fatal("run.available did not wake dispatch")
+	}
+	select {
+	case <-controlWake:
+		t.Fatal("run.available woke control")
+	default:
+	}
+	cancel()
+	<-done
+}
+
+func TestRuntimeNodeCapacitySignalOnlyWakesItsNode(t *testing.T) {
+	instanceID, agentID, nodeID := uuid.New(), uuid.New(), uuid.New()
+	bus := &runtimeSignalSubscriberFake{
+		signal: RuntimeSignal{
+			SignalID: uuid.New(), Type: runtimeNodeCapacityAvailableSignal,
+			AgentID: agentID, NodeID: &nodeID, TargetInstanceID: &instanceID,
+		},
+		delivered: make(chan struct{}),
+	}
+	hub := NewRuntimeWakeHub()
+	nodeWake := hub.WaitNodeDispatch(nodeID)
+	agentWake := hub.WaitDispatch(agentID)
+	controlWake := hub.WaitControl(agentID)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		StartRuntimeSignalSubscriber(ctx, bus, instanceID, hub, nil)
+	}()
+
+	select {
+	case <-nodeWake:
+	case <-time.After(time.Second):
+		t.Fatal("node.capacity.available did not wake its Node")
+	}
+	select {
+	case <-agentWake:
+		t.Fatal("node.capacity.available created Agent demand")
+	case <-controlWake:
+		t.Fatal("node.capacity.available woke control")
+	default:
 	}
 	cancel()
 	<-done
@@ -123,7 +254,8 @@ func TestRuntimeCredentialRevocationSignalWakesTargetCore(t *testing.T) {
 		TargetInstanceID: &instanceID,
 	}}
 	hub := NewRuntimeWakeHub()
-	wake := hub.Wait(agentID)
+	controlWake := hub.WaitControl(agentID)
+	dispatchWake := hub.WaitDispatch(agentID)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -132,9 +264,14 @@ func TestRuntimeCredentialRevocationSignalWakesTargetCore(t *testing.T) {
 	}()
 
 	select {
-	case <-wake:
+	case <-controlWake:
 	case <-time.After(time.Second):
 		t.Fatal("credential revocation did not wake the target Core")
+	}
+	select {
+	case <-dispatchWake:
+		t.Fatal("credential revocation woke the dispatch waiter")
+	default:
 	}
 	cancel()
 	<-done

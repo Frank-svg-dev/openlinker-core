@@ -78,11 +78,11 @@ func TestRuntimeLeaseExpiredOfferIsReleasedBeforeNextCandidate(t *testing.T) {
 	require.Equal(t, 1, fixture.tx.finishCalls)
 	require.Equal(t, 1, fixture.tx.capacityReleaseCASCalls)
 	require.Equal(t, 1, fixture.tx.resetCalls)
-	require.Equal(t, 1, fixture.tx.signalCalls)
+	require.Equal(t, 2, fixture.tx.signalCalls)
 	require.Equal(t, []string{
 		"cluster_gate", "lock_session", "lock_node", "lock_credential", "lock_attachment", "existing_offer",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
-		"reset_run", "create_signal", "lock_candidate", "claim_session_slot", "claim_node_slot",
+		"create_signal", "reset_run", "create_signal", "lock_candidate", "claim_session_slot", "claim_node_slot",
 		"create_offer", "mirror_offer",
 	}, fixture.tx.calls)
 }
@@ -210,11 +210,11 @@ func TestRuntimeLeaseRejectIsIdempotentAndReleasesCapacityOnce(t *testing.T) {
 	require.Equal(t, 1, fixture.tx.finishCalls)
 	require.Equal(t, 1, fixture.tx.resetCalls)
 	require.Equal(t, 1, fixture.tx.capacityReleaseCASCalls)
-	require.Equal(t, 1, fixture.tx.signalCalls)
+	require.Equal(t, 2, fixture.tx.signalCalls)
 	require.Equal(t, []string{
 		"lock_session", "lock_node", "lock_credential", "lock_attachment", "lock_run", "lock_attempt",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
-		"reset_run", "create_signal",
+		"create_signal", "reset_run", "create_signal",
 	}, fixture.tx.calls)
 
 	finishedAt := fixture.databaseNow
@@ -232,7 +232,7 @@ func TestRuntimeLeaseRejectIsIdempotentAndReleasesCapacityOnce(t *testing.T) {
 	require.Equal(t, 1, fixture.tx.finishCalls)
 	require.Equal(t, 1, fixture.tx.resetCalls)
 	require.Equal(t, 1, fixture.tx.capacityReleaseCASCalls)
-	require.Equal(t, 1, fixture.tx.signalCalls)
+	require.Equal(t, 2, fixture.tx.signalCalls)
 	require.NotContains(t, fixture.tx.calls, "release_session_slot")
 }
 
@@ -302,7 +302,7 @@ func TestRuntimeLeaseSessionCloseReleasesOnlyUnacceptedOfferAfterOfflineCommit(t
 	require.Equal(t, []string{
 		"lock_offer_release_session", "lock_node", "lock_credential", "lock_offer_release_attachment", "existing_offer",
 		"finish_offer", "mark_capacity_released", "release_session_slot", "release_node_slot",
-		"reset_run", "create_signal",
+		"create_signal", "reset_run", "create_signal",
 	}, fixture.tx.calls)
 }
 
