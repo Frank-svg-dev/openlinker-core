@@ -23,19 +23,22 @@ type runningRuntimeWorker struct {
 }
 
 type connectionCapacityStage struct {
-	Phase             string    `json:"phase"`
-	Target            int       `json:"target"`
-	StartedAt         time.Time `json:"started_at"`
-	ReadyAt           time.Time `json:"ready_at,omitempty"`
-	EndedAt           time.Time `json:"ended_at"`
-	Ready             int64     `json:"ready"`
-	ConnectedMinimum  int64     `json:"connected_minimum"`
-	ConnectedEnd      int64     `json:"connected_end"`
-	WorkerErrorsDelta int64     `json:"worker_errors_delta"`
-	HealthSamples     int       `json:"health_samples"`
-	HealthFailures    int       `json:"health_failures"`
-	Accepted          bool      `json:"accepted"`
-	Error             string    `json:"error,omitempty"`
+	Phase             string          `json:"phase"`
+	Target            int             `json:"target"`
+	StartedAt         time.Time       `json:"started_at"`
+	ReadyAt           time.Time       `json:"ready_at,omitempty"`
+	EndedAt           time.Time       `json:"ended_at"`
+	Ready             int64           `json:"ready"`
+	ConnectedMinimum  int64           `json:"connected_minimum"`
+	ConnectedEnd      int64           `json:"connected_end"`
+	WorkerErrorsDelta int64           `json:"worker_errors_delta"`
+	HealthSamples     int             `json:"health_samples"`
+	HealthFailures    int             `json:"health_failures"`
+	DBConnect         *dbCounterDelta `json:"db_connect,omitempty"`
+	DBHold            *dbCounterDelta `json:"db_hold,omitempty"`
+	DBError           string          `json:"db_error,omitempty"`
+	Accepted          bool            `json:"accepted"`
+	Error             string          `json:"error,omitempty"`
 }
 
 type connectionCapacityReport struct {
@@ -100,6 +103,7 @@ func runConnectionCapacityStages(
 	tracker *runTracker,
 	metrics *metrics,
 	wg *sync.WaitGroup,
+	dbCounters *dbCounterReader,
 ) (*connectionCapacityReport, error) {
 	report := &connectionCapacityReport{
 		Enabled: true, RequestedConnections: len(specs), StepSize: cfg.ConnectionStepSize,
@@ -112,6 +116,10 @@ func runConnectionCapacityStages(
 		stage := connectionCapacityStage{
 			Phase: "staircase", Target: target, StartedAt: time.Now().UTC(),
 			ConnectedMinimum: metrics.c.workersConnected.Load(),
+		}
+		connectStart, snapshotErr := captureDBCounterSnapshot(ctx, dbCounters)
+		if snapshotErr != nil {
+			appendCapacityDBError(&stage, snapshotErr)
 		}
 		workerErrorsBefore := metrics.c.workerErrors.Load()
 		batch := make([]runningRuntimeWorker, 0, target-batchStart)
@@ -136,7 +144,26 @@ func runConnectionCapacityStages(
 		}
 		if stageErr == nil {
 			stage.ReadyAt = time.Now().UTC()
+			holdStart, holdStartErr := captureDBCounterSnapshot(ctx, dbCounters)
+			if holdStartErr != nil {
+				appendCapacityDBError(&stage, holdStartErr)
+			}
+			setCapacityDBDelta(&stage, &stage.DBConnect, connectStart, holdStart)
 			stageErr = observeConnectionCapacityStage(ctx, cfg.ConnectionStepHold, target, coreAPI, metrics, &stage)
+			holdEnd, holdEndErr := captureDBCounterSnapshot(ctx, dbCounters)
+			if holdEndErr != nil {
+				appendCapacityDBError(&stage, holdEndErr)
+			}
+			setCapacityDBDelta(&stage, &stage.DBHold, holdStart, holdEnd)
+			if stageErr == nil {
+				stageErr = enforceDBIdleCommitRate(cfg, stage)
+			}
+		} else {
+			connectEnd, connectEndErr := captureDBCounterSnapshot(ctx, dbCounters)
+			if connectEndErr != nil {
+				appendCapacityDBError(&stage, connectEndErr)
+			}
+			setCapacityDBDelta(&stage, &stage.DBConnect, connectStart, connectEnd)
 		}
 		stage.Ready = metrics.c.workersReady.Load()
 		stage.ConnectedEnd = metrics.c.workersConnected.Load()
@@ -168,10 +195,11 @@ func runConnectionCapacityStages(
 
 func confirmConnectionCapacity(
 	ctx context.Context,
-	duration time.Duration,
+	cfg config,
 	coreAPI *apiClient,
 	metrics *metrics,
 	report *connectionCapacityReport,
+	dbCounters *dbCounterReader,
 ) error {
 	if report == nil || report.CandidateConnections <= 0 {
 		return fmt.Errorf("no candidate connection capacity is available for confirmation")
@@ -181,10 +209,22 @@ func confirmConnectionCapacity(
 		ConnectedMinimum: metrics.c.workersConnected.Load(),
 	}
 	stage.ReadyAt = stage.StartedAt
+	holdStart, snapshotErr := captureDBCounterSnapshot(ctx, dbCounters)
+	if snapshotErr != nil {
+		appendCapacityDBError(&stage, snapshotErr)
+	}
 	workerErrorsBefore := metrics.c.workerErrors.Load()
 	err := observeConnectionCapacityStage(
-		ctx, duration, report.CandidateConnections, coreAPI, metrics, &stage,
+		ctx, cfg.HoldAfter, report.CandidateConnections, coreAPI, metrics, &stage,
 	)
+	holdEnd, holdEndErr := captureDBCounterSnapshot(ctx, dbCounters)
+	if holdEndErr != nil {
+		appendCapacityDBError(&stage, holdEndErr)
+	}
+	setCapacityDBDelta(&stage, &stage.DBHold, holdStart, holdEnd)
+	if err == nil {
+		err = enforceDBIdleCommitRate(cfg, stage)
+	}
 	stage.Ready = metrics.c.workersReady.Load()
 	stage.ConnectedEnd = metrics.c.workersConnected.Load()
 	stage.WorkerErrorsDelta = metrics.c.workerErrors.Load() - workerErrorsBefore
@@ -207,9 +247,13 @@ func confirmConnectionCapacity(
 }
 
 func printConnectionCapacityStage(stage connectionCapacityStage) {
+	dbCommitRate := 0.0
+	if stage.DBHold != nil {
+		dbCommitRate = stage.DBHold.AdjustedXactCommitPerSec
+	}
 	fmt.Fprintf(
 		os.Stderr,
-		"runtime-loadtest capacity phase=%s target=%d ready=%d connected=%d min_connected=%d health_failures=%d worker_errors=%d accepted=%t error=%q\n",
+		"runtime-loadtest capacity phase=%s target=%d ready=%d connected=%d min_connected=%d health_failures=%d worker_errors=%d db_commit_rate=%.2f accepted=%t error=%q\n",
 		stage.Phase,
 		stage.Target,
 		stage.Ready,
@@ -217,9 +261,73 @@ func printConnectionCapacityStage(stage connectionCapacityStage) {
 		stage.ConnectedMinimum,
 		stage.HealthFailures,
 		stage.WorkerErrorsDelta,
+		dbCommitRate,
 		stage.Accepted,
 		stage.Error,
 	)
+}
+
+func captureDBCounterSnapshot(ctx context.Context, reader *dbCounterReader) (*dbCounterSnapshot, error) {
+	if reader == nil {
+		return nil, nil
+	}
+	snapshot, err := reader.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &snapshot, nil
+}
+
+func setCapacityDBDelta(
+	stage *connectionCapacityStage,
+	target **dbCounterDelta,
+	start, end *dbCounterSnapshot,
+) {
+	if stage == nil || target == nil || start == nil || end == nil {
+		return
+	}
+	delta, err := calculateDBCounterDelta(*start, *end)
+	*target = &delta
+	if err != nil {
+		appendCapacityDBError(stage, err)
+	}
+}
+
+func appendCapacityDBError(stage *connectionCapacityStage, err error) {
+	if stage == nil || err == nil {
+		return
+	}
+	if stage.DBError == "" {
+		stage.DBError = err.Error()
+		return
+	}
+	stage.DBError += "; " + err.Error()
+}
+
+func enforceDBIdleCommitRate(cfg config, stage connectionCapacityStage) error {
+	if cfg.DBStrictIdleCommitRate <= 0 {
+		return nil
+	}
+	if stage.DBError != "" {
+		return fmt.Errorf("strict database idle slope unavailable: %s", stage.DBError)
+	}
+	if stage.DBHold == nil {
+		return fmt.Errorf("strict database idle slope has no hold sample")
+	}
+	if stage.DBHold.StatsResetDetected {
+		return fmt.Errorf("strict database idle slope crossed a PostgreSQL statistics reset")
+	}
+	if len(stage.DBHold.MissingTables) > 0 {
+		return fmt.Errorf("strict database idle slope is missing table statistics: %s", strings.Join(stage.DBHold.MissingTables, ","))
+	}
+	if stage.DBHold.AdjustedXactCommitPerSec > cfg.DBStrictIdleCommitRate {
+		return fmt.Errorf(
+			"strict database idle slope exceeded: commits_per_second=%.2f limit=%.2f",
+			stage.DBHold.AdjustedXactCommitPerSec,
+			cfg.DBStrictIdleCommitRate,
+		)
+	}
+	return nil
 }
 
 func observeConnectionCapacityStage(

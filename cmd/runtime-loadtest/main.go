@@ -30,59 +30,61 @@ import (
 )
 
 type config struct {
-	APIRoot               string
-	AuthAPIRoot           string
-	RuntimeURL            string
-	RuntimeURLSecondary   string
-	DatabaseURL           string
-	Transport             string
-	Scenarios             []string
-	NodeID                string
-	NodeVersion           string
-	NodeCapacity          int
-	MTLSCertFile          string
-	MTLSKeyFile           string
-	MTLSCAFile            string
-	MTLSServerName        string
-	StateDir              string
-	Users                 int
-	Agents                int
-	WorkersPerAgent       int
-	Runs                  int
-	RunConcurrency        int
-	SetupConcurrency      int
-	SetupUserConcurrency  int
-	SetupAgentConcurrency int
-	EventsPerRun          int
-	ResultDelay           time.Duration
-	SubmitDuration        time.Duration
-	HistoryPerAgent       int
-	ContextMode           bool
-	AccountRunID          string
-	Timeout               time.Duration
-	ReadyTimeout          time.Duration
-	RequestTimeout        time.Duration
-	PullWait              time.Duration
-	CommandWait           time.Duration
-	HeartbeatInterval     time.Duration
-	WSProbeInterval       time.Duration
-	ConnectStagger        time.Duration
-	ConnectionCapacity    bool
-	ConnectionStepSize    int
-	ConnectionStepHold    time.Duration
-	SwitchAfter           time.Duration
-	SwitchBackAfter       time.Duration
-	CancelCount           int
-	CancelConcurrency     int
-	CancelDelay           time.Duration
-	DropACKResponses      []string
-	DuplicateAssignments  int
-	StaleFenceProbes      int
-	RedisOutageObserve    time.Duration
-	HoldAfter             time.Duration
-	Output                string
-	APIInsecureTLS        bool
-	FailOnIncomplete      bool
+	APIRoot                  string
+	AuthAPIRoot              string
+	RuntimeURL               string
+	RuntimeURLSecondary      string
+	DatabaseURL              string
+	DBActivitySampleInterval time.Duration
+	DBStrictIdleCommitRate   float64
+	Transport                string
+	Scenarios                []string
+	NodeID                   string
+	NodeVersion              string
+	NodeCapacity             int
+	MTLSCertFile             string
+	MTLSKeyFile              string
+	MTLSCAFile               string
+	MTLSServerName           string
+	StateDir                 string
+	Users                    int
+	Agents                   int
+	WorkersPerAgent          int
+	Runs                     int
+	RunConcurrency           int
+	SetupConcurrency         int
+	SetupUserConcurrency     int
+	SetupAgentConcurrency    int
+	EventsPerRun             int
+	ResultDelay              time.Duration
+	SubmitDuration           time.Duration
+	HistoryPerAgent          int
+	ContextMode              bool
+	AccountRunID             string
+	Timeout                  time.Duration
+	ReadyTimeout             time.Duration
+	RequestTimeout           time.Duration
+	PullWait                 time.Duration
+	CommandWait              time.Duration
+	HeartbeatInterval        time.Duration
+	WSProbeInterval          time.Duration
+	ConnectStagger           time.Duration
+	ConnectionCapacity       bool
+	ConnectionStepSize       int
+	ConnectionStepHold       time.Duration
+	SwitchAfter              time.Duration
+	SwitchBackAfter          time.Duration
+	CancelCount              int
+	CancelConcurrency        int
+	CancelDelay              time.Duration
+	DropACKResponses         []string
+	DuplicateAssignments     int
+	StaleFenceProbes         int
+	RedisOutageObserve       time.Duration
+	HoldAfter                time.Duration
+	Output                   string
+	APIInsecureTLS           bool
+	FailOnIncomplete         bool
 }
 
 type apiClient struct {
@@ -733,8 +735,12 @@ func main() {
 	}
 
 	var dbSampler *dbActivitySampler
-	if cfg.DatabaseURL != "" {
-		dbSampler = startDBActivitySampler(ctx, cfg.DatabaseURL, time.Second)
+	if cfg.DatabaseURL != "" && cfg.DBActivitySampleInterval > 0 {
+		dbSampler = startDBActivitySampler(ctx, cfg.DatabaseURL, cfg.DBActivitySampleInterval)
+	}
+	var dbCounters *dbCounterReader
+	if cfg.DatabaseURL != "" && cfg.ConnectionCapacity {
+		dbCounters = newDBCounterReader(ctx, cfg.DatabaseURL)
 	}
 
 	workerCtx, stopWorkers := context.WithCancel(ctx)
@@ -744,7 +750,7 @@ func main() {
 	var capacityErr error
 	if cfg.ConnectionCapacity {
 		m.capacity, capacityErr = runConnectionCapacityStages(
-			workerCtx, cfg, coreAPI, specs, tracker, m, &workerWG,
+			workerCtx, cfg, coreAPI, specs, tracker, m, &workerWG, dbCounters,
 		)
 	} else {
 		for workerOrdinal, spec := range specs {
@@ -827,7 +833,7 @@ func main() {
 		holdStart = time.Now()
 		phases.holdStart = holdStart
 		if m.capacity != nil {
-			holdErr = confirmConnectionCapacity(ctx, cfg.HoldAfter, coreAPI, m, m.capacity)
+			holdErr = confirmConnectionCapacity(ctx, cfg, coreAPI, m, m.capacity, dbCounters)
 		} else {
 			holdErr = holdContext(ctx, cfg.HoldAfter)
 		}
@@ -841,6 +847,9 @@ func main() {
 	stopWorkers()
 	workerWG.Wait()
 	m.endedAt = time.Now()
+	if dbCounters != nil {
+		dbCounters.Close()
+	}
 
 	report := buildReport(cfg, runID, accountRunID, accounts, agents, tracker, m, phases, waitErr, holdErr)
 	if dbSampler != nil {
@@ -875,6 +884,8 @@ func parseFlags() config {
 	flag.StringVar(&cfg.RuntimeURL, "runtime-url", os.Getenv("OPENLINKER_RUNTIME_URL"), "required dedicated Runtime mTLS origin (https)")
 	flag.StringVar(&cfg.RuntimeURLSecondary, "runtime-url-secondary", os.Getenv("OPENLINKER_RUNTIME_URL_SECONDARY"), "second Runtime mTLS origin for Core A→B resume")
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
+	flag.DurationVar(&cfg.DBActivitySampleInterval, "db-activity-sample-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_DB_ACTIVITY_SAMPLE_INTERVAL", time.Second), "Postgres activity sampling interval; 0 disables periodic observer traffic")
+	flag.Float64Var(&cfg.DBStrictIdleCommitRate, "db-strict-idle-commit-rate", floatEnv("OPENLINKER_RUNTIME_LOADTEST_DB_STRICT_IDLE_COMMIT_RATE", 0), "fail a capacity hold when adjusted PostgreSQL commits/second exceed this value; 0 disables")
 	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime transport: ws, pull, or auto")
 	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime scenarios; see cmd/runtime-loadtest/README.md")
 	flag.StringVar(&cfg.NodeID, "node-id", os.Getenv("OPENLINKER_NODE_ID"), "required enrolled Runtime Node UUID from the client certificate")
@@ -963,6 +974,20 @@ func (c *config) validate() error {
 	}
 	if c.HoldAfter < 0 || c.SubmitDuration < 0 || c.ConnectStagger < 0 {
 		return errors.New("hold/submit/connect durations cannot be negative")
+	}
+	if c.DBActivitySampleInterval < 0 || c.DBStrictIdleCommitRate < 0 {
+		return errors.New("database sample interval and strict commit rate cannot be negative")
+	}
+	if c.DBStrictIdleCommitRate > 0 {
+		if strings.TrimSpace(c.DatabaseURL) == "" {
+			return errors.New("db-strict-idle-commit-rate requires database-url")
+		}
+		if !c.ConnectionCapacity {
+			return errors.New("db-strict-idle-commit-rate requires connection-capacity")
+		}
+		if c.DBActivitySampleInterval != 0 {
+			return errors.New("db-strict-idle-commit-rate requires db-activity-sample-interval=0 to avoid observer traffic")
+		}
 	}
 	if c.ConnectionStepSize < 0 || c.ConnectionStepHold < 0 {
 		return errors.New("connection capacity step size/hold cannot be negative")
@@ -2280,6 +2305,18 @@ func intEnv(key string, fallback int) int {
 		return fallback
 	}
 	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func floatEnv(key string, fallback float64) float64 {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil {
 		return fallback
 	}

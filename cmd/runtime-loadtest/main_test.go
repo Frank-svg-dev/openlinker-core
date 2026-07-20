@@ -277,6 +277,17 @@ func TestConfigValidateDefaultsSlowConnectionCapacityProfile(t *testing.T) {
 	if cfg.HoldAfter != 5*time.Minute {
 		t.Fatalf("final hold = %s, want 5m", cfg.HoldAfter)
 	}
+
+	cfg.DatabaseURL = "postgres://example.invalid/openlinker"
+	cfg.DBStrictIdleCommitRate = 2
+	cfg.DBActivitySampleInterval = time.Second
+	if err := cfg.validate(); err == nil {
+		t.Fatal("strict database slope accepted periodic observer traffic")
+	}
+	cfg.DBActivitySampleInterval = 0
+	if err := cfg.validate(); err != nil {
+		t.Fatalf("strict database slope validate error = %v", err)
+	}
 }
 
 func TestRecommendedConnectionCapacityKeepsTwentyPercentHeadroom(t *testing.T) {

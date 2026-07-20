@@ -180,3 +180,18 @@ go run ./cmd/runtime-loadtest \
 JSON 中的 `connection_capacity_report` 会记录每个成功或失败的阶段、首个失败目标、
 通过 5 分钟确认的稳定值，以及预留 20% 运行余量后的建议值。如果一直达到配置目标而
 没有出现失败，这个数字只代表容量下限，不能证明主机无法接受更多连接。
+
+设置 `-database-url` 后，每个容量阶段还会分别输出 `db_connect` 和 `db_hold`
+计数增量。连接建立的一次性 attach 成本不会混入稳定保持斜率；报告覆盖 Runtime、
+outbox 和指标表的事务、扫描与写入增量。报告只扣除起始计数快照自身产生的一次事务，
+不会隐藏健康检查或服务端流量。
+
+现有每秒 `pg_stat_activity` 采样适合诊断锁等待，但采样本身会产生观测事务。严格检查
+空闲斜率时必须关闭它：
+
+```bash
+go run ./cmd/runtime-loadtest +  -database-url "$DATABASE_URL" +  -db-activity-sample-interval 0 +  -db-strict-idle-commit-rate 2 +  -connection-capacity +  ...其余 Runtime 参数...
+```
+
+严格提交率默认关闭。保持阶段发生 PostgreSQL 统计重置、目标表统计不可见，或修正后的
+每秒提交数超过指定上限时，压测器会失败。
