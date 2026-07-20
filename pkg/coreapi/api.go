@@ -72,9 +72,10 @@ type Services struct {
 	Delivery          *delivery.Service
 	UserToken         *usertoken.Service
 	UserStatus        auth.UserStatusChecker
-	// EventWake is a shadow-only advisory listener in the current release. It
-	// does not replace any worker, wait loop, readiness check, or database fact.
-	EventWake *eventwake.Infrastructure
+	// EventWake is advisory infrastructure. PostgreSQL remains authoritative;
+	// selected wait paths use it only to decide when to re-read database facts.
+	EventWake  *eventwake.Infrastructure
+	RunUpdates *runtime.RunUpdateHub
 }
 
 // RegisterRuntimeAttachOnly mounts the deliberately narrow Core surface used
@@ -145,6 +146,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	userDashHandler := userdash.NewHandler(userdash.NewService(pool))
 	userDashHandler.RegisterCoreAPI(api, hybridMw)
 	eventWake := configureEventWake(rootCtx, pool)
+	runUpdates := runtime.NewRunUpdateHub(eventWake)
 
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
@@ -183,7 +185,11 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 
 	runtimeSvc := runtime.NewService(pool, cfg)
 	runtimeHandler := runtime.NewHandler(runtimeSvc, cfg)
-	configureRuntime(rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID, opts.RuntimeSignalBus)
+	runtimeHandler.SetRunUpdateSource(runUpdates)
+	configureRuntime(
+		rootCtx, runtimeHandler, runtimeSvc, pool, cfg, opts.CoreInstanceID,
+		opts.RuntimeSignalBus, eventWake,
+	)
 	runtimeHandler.RegisterProtected(api, hybridMw, hybridMw)
 	runtimeHandler.RegisterAgentRuntime(api)
 	if opts.AdminMiddleware != nil {
@@ -223,6 +229,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	a2aSvc.SetTaskCallbackManager(webhookSvc)
 	a2aHandler := a2a.NewHandler(a2aSvc)
 	a2aHandler.SetAgentCardProvider(agentMarketSvc)
+	a2aHandler.SetRunUpdateSource(runUpdates)
 	a2aHandler.Register(api, jwtMiddleware, hybridMw)
 	a2aHandler.RegisterAgentRuntimeProxy(
 		api,
@@ -231,6 +238,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	configureA2AGRPCAgentCard(cfg, &Services{AgentMarket: agentMarketSvc})
 
 	workflowSvc := workflow.NewService(pool, runtimeSvc)
+	workflowSvc.SetRunUpdateSource(runUpdates)
 	workflowHandler := workflow.NewHandler(workflowSvc)
 	workflowHandler.RegisterProtected(api, hybridMw)
 	externalExecutionSvc := externalexecution.NewService(
@@ -281,7 +289,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	runtimeSvc.SetRunEffectHandlers(webhookSvc, deliverySvc)
 	if pool != nil {
 		go delivery.StartWorker(rootCtx, deliverySvc)
-		go runtime.StartRunEffectWorker(rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{})
+		go runtime.StartRunEffectWorkerWithWake(
+			rootCtx, runtimeSvc, runtime.RunEffectWorkerConfig{}, eventWake,
+		)
 	}
 
 	return &Services{
@@ -304,6 +314,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		UserToken:         userTokenSvc,
 		UserStatus:        userStatusChecker,
 		EventWake:         eventWake,
+		RunUpdates:        runUpdates,
 	}
 }
 
@@ -432,6 +443,7 @@ func configureRuntime(
 	cfg *config.Config,
 	coreInstanceID uuid.UUID,
 	signalBus runtime.RuntimeSignalBus,
+	eventWake eventwake.TopicSource,
 ) {
 	if handler == nil || runtimeService == nil || pool == nil || cfg == nil {
 		return
@@ -520,10 +532,11 @@ func configureRuntime(
 	)
 	if signalBus != nil {
 		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)
-		go runtime.StartRuntimeSignalOutboxWorker(
+		go runtime.StartRuntimeSignalOutboxWorkerWithWake(
 			rootCtx,
 			runtime.NewRuntimeSignalOutboxWorker(db.New(pool), signalBus),
 			runtime.RuntimeSignalOutboxWorkerConfig{},
+			eventWake,
 		)
 	}
 }

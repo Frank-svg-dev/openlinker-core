@@ -446,6 +446,33 @@ func TestRuntimeOutboxLedgerAndDLQQueries(t *testing.T) {
 	}
 	requireSQLName(t, dbtx.querySQL, "ClaimRunEffects")
 
+	nextDue := now.Add(2 * time.Minute)
+	dbtx.row = fakeRow{values: []any{&nextDue, now}}
+	nextSignal, err := q.NextRuntimeSignalDue(context.Background())
+	if err != nil || nextSignal.NextDueAt == nil || !nextSignal.NextDueAt.Equal(nextDue) ||
+		!nextSignal.DatabaseNow.Equal(now) {
+		t.Fatalf("NextRuntimeSignalDue = %#v, %v", nextSignal, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "NextRuntimeSignalDue")
+	for _, fragment := range []string{"MIN(candidate.next_due_at)", "ORDER BY available_at", "ORDER BY lease_expires_at", "UNION ALL", "clock_timestamp()"} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("NextRuntimeSignalDue missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+
+	dbtx.row = fakeRow{values: []any{&nextDue, now}}
+	nextEffect, err := q.NextRunEffectDue(context.Background())
+	if err != nil || nextEffect.NextDueAt == nil || !nextEffect.NextDueAt.Equal(nextDue) ||
+		!nextEffect.DatabaseNow.Equal(now) {
+		t.Fatalf("NextRunEffectDue = %#v, %v", nextEffect, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "NextRunEffectDue")
+	for _, fragment := range []string{"MIN(candidate.next_due_at)", "attempt_count < max_attempts", "ORDER BY lease_expires_at", "UNION ALL", "clock_timestamp()"} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("NextRunEffectDue missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
+	}
+
 	dbtx.row = fakeRow{values: effectValues}
 	createdEffect, err := q.CreateRunEffect(context.Background(), CreateRunEffectParams{
 		ID: effectID, RunID: runID, TerminalEventID: eventID,

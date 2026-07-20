@@ -15,6 +15,14 @@ type Infrastructure struct {
 	router   *Router
 }
 
+// TopicSource is the deliberately small worker-facing surface. Notifications
+// are advisory: Health controls cutover/fallback, and PostgreSQL claims remain
+// the only authoritative ownership transition.
+type TopicSource interface {
+	Health() ListenerHealth
+	SubscribeTopic(string) (*Subscription, error)
+}
+
 func NewPostgresInfrastructure(
 	pool *pgxpool.Pool,
 	channels []string,
@@ -70,3 +78,12 @@ func (i *Infrastructure) Subscribe(topic, resourceID string) (*Subscription, err
 	}
 	return i.router.Subscribe(topic, resourceID)
 }
+
+func (i *Infrastructure) SubscribeTopic(topic string) (*Subscription, error) {
+	if i == nil {
+		return nil, ErrUnknownTopic
+	}
+	return i.router.SubscribeTopic(topic)
+}
+
+var _ TopicSource = (*Infrastructure)(nil)

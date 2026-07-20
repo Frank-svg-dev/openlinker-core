@@ -13,10 +13,11 @@ var ErrUnknownTopic = errors.New("event wake topic is not configured")
 // records only bounded counters and timestamps for shadow comparison; it never
 // stores business payloads or reads PostgreSQL.
 type Router struct {
-	mu    sync.Mutex
-	hubs  map[string]*Hub
-	stats map[string]TopicStats
-	now   func() time.Time
+	mu        sync.Mutex
+	hubs      map[string]*Hub
+	topicHubs map[string]*Hub
+	stats     map[string]TopicStats
+	now       func() time.Time
 }
 
 type TopicStats struct {
@@ -33,9 +34,10 @@ func NewRouter(topics []string) (*Router, error) {
 		return nil, errors.New("event wake router topics must contain between 1 and 64 entries")
 	}
 	router := &Router{
-		hubs:  make(map[string]*Hub, len(topics)),
-		stats: make(map[string]TopicStats, len(topics)),
-		now:   time.Now,
+		hubs:      make(map[string]*Hub, len(topics)),
+		topicHubs: make(map[string]*Hub, len(topics)),
+		stats:     make(map[string]TopicStats, len(topics)),
+		now:       time.Now,
 	}
 	for _, topic := range topics {
 		if !topicNamePattern.MatchString(topic) {
@@ -45,6 +47,7 @@ func NewRouter(topics []string) (*Router, error) {
 			return nil, errors.New("event wake router topic is duplicated")
 		}
 		router.hubs[topic] = NewHub()
+		router.topicHubs[topic] = NewHub()
 		router.stats[topic] = TopicStats{}
 	}
 	return router, nil
@@ -59,6 +62,7 @@ func (r *Router) Dispatch(_ context.Context, envelope Envelope) {
 	}
 	r.mu.Lock()
 	hub := r.hubs[envelope.Topic]
+	topicHub := r.topicHubs[envelope.Topic]
 	if hub == nil {
 		r.mu.Unlock()
 		return
@@ -79,6 +83,7 @@ func (r *Router) Dispatch(_ context.Context, envelope Envelope) {
 	r.stats[envelope.Topic] = stats
 	r.mu.Unlock()
 	hub.Publish(envelope.ResourceID)
+	topicHub.Publish(envelope.Topic)
 }
 
 // Recover broadcasts to every local waiter after a LISTEN (re)connect. Since
@@ -88,17 +93,34 @@ func (r *Router) Recover(_ uint64) {
 		return
 	}
 	r.mu.Lock()
-	hubs := make([]*Hub, 0, len(r.hubs))
+	hubs := make([]*Hub, 0, len(r.hubs)+len(r.topicHubs))
 	for topic, hub := range r.hubs {
 		stats := r.stats[topic]
 		stats.RecoveryWakes++
 		r.stats[topic] = stats
 		hubs = append(hubs, hub)
+		hubs = append(hubs, r.topicHubs[topic])
 	}
 	r.mu.Unlock()
 	for _, hub := range hubs {
 		hub.PublishAll()
 	}
+}
+
+// SubscribeTopic coalesces every resource notification for one work type.
+// It is intended for process-level workers; resource waiters must continue to
+// use Subscribe so unrelated Runs do not wake one another.
+func (r *Router) SubscribeTopic(topic string) (*Subscription, error) {
+	if r == nil {
+		return nil, ErrUnknownTopic
+	}
+	r.mu.Lock()
+	hub := r.topicHubs[topic]
+	r.mu.Unlock()
+	if hub == nil {
+		return nil, ErrUnknownTopic
+	}
+	return hub.Subscribe(topic), nil
 }
 
 func (r *Router) Subscribe(topic, resourceID string) (*Subscription, error) {

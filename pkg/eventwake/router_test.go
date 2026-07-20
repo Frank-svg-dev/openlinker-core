@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestRouterDispatchesByTopicAndResourceWithoutCrossWake(t *testing.T) {
@@ -75,6 +77,36 @@ func TestRouterRecoveryBroadcastsAndStatsAreCopies(t *testing.T) {
 	if router.Stats()["run.changed"].RecoveryWakes != 1 {
 		t.Fatalf("router stats alias internal state: %#v", router.Stats())
 	}
+}
+
+func TestRouterTopicSubscriptionCoalescesAllResourceWakes(t *testing.T) {
+	router, err := NewRouter([]string{"work.run_effect.available", "run.changed"})
+	require.NoError(t, err)
+	worker, err := router.SubscribeTopic("work.run_effect.available")
+	require.NoError(t, err)
+	defer worker.Close()
+	other, err := router.SubscribeTopic("run.changed")
+	require.NoError(t, err)
+	defer other.Close()
+
+	producedAt := time.Now().UTC()
+	router.Dispatch(context.Background(), Envelope{
+		Version: EnvelopeVersion, Topic: "work.run_effect.available",
+		ResourceID: "effect-1", Generation: 1, ProducedAt: producedAt,
+	})
+	router.Dispatch(context.Background(), Envelope{
+		Version: EnvelopeVersion, Topic: "work.run_effect.available",
+		ResourceID: "effect-2", Generation: 2, ProducedAt: producedAt,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	generation, err := worker.Wait(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(2), generation)
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer waitCancel()
+	_, err = other.Wait(waitCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
 
 func TestRouterRejectsUnknownTopicAndInvalidResource(t *testing.T) {
