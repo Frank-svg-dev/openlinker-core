@@ -104,11 +104,26 @@ func TestMetricService_AggregateOnce_Idempotent(t *testing.T) {
 
 	svc := agent.NewMetricService(pool)
 	require.NoError(t, svc.AggregateOnce(ctx))
+	first, err := svc.GetSnapshots(ctx, agentID)
+	require.NoError(t, err)
+	var secondObservations []coreruntime.WorkerObservation
+	svc.SetWorkerObserver(coreruntime.WorkerObserverFunc(func(observation coreruntime.WorkerObservation) {
+		secondObservations = append(secondObservations, observation)
+	}))
 	require.NoError(t, svc.AggregateOnce(ctx))
 
 	resp, err := svc.GetSnapshots(ctx, agentID)
 	require.NoError(t, err)
 	require.Len(t, resp.Items, 3, "二次聚合也只会 upsert，不会复制行")
+	require.Equal(t, first.Items, resp.Items, "数值未变化时不应只为刷新时间戳重写快照")
+	require.Equal(t, []coreruntime.WorkerObservation{
+		{Category: "agent.metric.aggregate_query", Reason: "24h"},
+		{Category: "agent.metric.upsert_rows", Reason: "24h", BatchSize: 0},
+		{Category: "agent.metric.aggregate_query", Reason: "7d"},
+		{Category: "agent.metric.upsert_rows", Reason: "7d", BatchSize: 0},
+		{Category: "agent.metric.aggregate_query", Reason: "30d"},
+		{Category: "agent.metric.upsert_rows", Reason: "30d", BatchSize: 0},
+	}, secondObservations)
 }
 
 func TestStartMetricWorkerAggregatesAndSweepsExpiredApprovals(t *testing.T) {

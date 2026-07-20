@@ -1980,6 +1980,12 @@ func TestGeneratedListQueriesPropagateQueryErrors(t *testing.T) {
 			_, err := q.AggregateAgentRunsForWindow(ctx, "24 hours")
 			return err
 		}},
+		{name: "RefreshAgentMetricSnapshotsForWindow", run: func() error {
+			_, err := q.RefreshAgentMetricSnapshotsForWindow(ctx, RefreshAgentMetricSnapshotsForWindowParams{
+				TimeWindow: "24h", Interval: "24 hours",
+			})
+			return err
+		}},
 		{name: "ListAgentTokensByCreator", run: func() error {
 			_, err := q.ListAgentTokensByCreator(ctx, ListAgentTokensByCreatorParams{CreatorUserID: id, Limit: 10, SortBy: "created_at", SortDir: "desc"})
 			return err
@@ -3288,6 +3294,27 @@ func TestAvailabilityMetricApprovalRequirementQueriesScanRowsAndArgs(t *testing.
 	requireSQLName(t, dbtx.querySQL, "AggregateAgentRunsForWindow")
 	if !aggregateRows.closed || len(aggregates) != 1 || aggregates[0].FailureCount != 2 {
 		t.Fatalf("AggregateAgentRunsForWindow scan = %#v closed=%v", aggregates, aggregateRows.closed)
+	}
+
+	dbtx.row = fakeRow{values: []any{int32(7)}}
+	refreshed, err := q.RefreshAgentMetricSnapshotsForWindow(
+		context.Background(),
+		RefreshAgentMetricSnapshotsForWindowParams{TimeWindow: "24h", Interval: "24 hours"},
+	)
+	if err != nil || refreshed != 7 {
+		t.Fatalf("RefreshAgentMetricSnapshotsForWindow = %d, %v", refreshed, err)
+	}
+	requireSQLName(t, dbtx.queryRowSQL, "RefreshAgentMetricSnapshotsForWindow")
+	if !reflect.DeepEqual(dbtx.queryRowArgs, []any{"24h", "24 hours"}) {
+		t.Fatalf("RefreshAgentMetricSnapshotsForWindow args = %#v", dbtx.queryRowArgs)
+	}
+	for _, fragment := range []string{
+		"INSERT INTO agent_metric_snapshots", "IS DISTINCT FROM", "RETURNING 1",
+		"COUNT(*)::int AS refreshed_count",
+	} {
+		if !strings.Contains(dbtx.queryRowSQL, fragment) {
+			t.Fatalf("RefreshAgentMetricSnapshotsForWindow missing %q: %s", fragment, dbtx.queryRowSQL)
+		}
 	}
 
 	dbtx.row = fakeRow{values: approvalValues}

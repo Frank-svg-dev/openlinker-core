@@ -91,32 +91,20 @@ func (s *MetricService) AggregateOnce(ctx context.Context) error {
 				Category: "agent.metric.aggregate_query", Reason: w.label,
 			})
 		}
-		rows, err := s.queries.AggregateAgentRunsForWindow(ctx, w.interval)
+		refreshed, err := s.queries.RefreshAgentMetricSnapshotsForWindow(
+			ctx,
+			db.RefreshAgentMetricSnapshotsForWindowParams{
+				TimeWindow: w.label,
+				Interval:   w.interval,
+			},
+		)
 		if err != nil {
 			return err
 		}
 		if s.observer != nil {
 			s.observer.ObserveWorker(coreruntime.WorkerObservation{
-				Category: "agent.metric.upsert_rows", Reason: w.label, BatchSize: len(rows),
+				Category: "agent.metric.upsert_rows", Reason: w.label, BatchSize: int(refreshed),
 			})
-		}
-		for _, r := range rows {
-			rate := int32(0)
-			if r.CallCount > 0 {
-				rate = int32(float64(r.SuccessCount) / float64(r.CallCount) * 10000)
-			}
-			if err := s.queries.UpsertAgentMetricSnapshot(ctx, db.UpsertAgentMetricSnapshotParams{
-				AgentID:         r.AgentID,
-				TimeWindow:      w.label,
-				CallCount:       r.CallCount,
-				SuccessCount:    r.SuccessCount,
-				FailureCount:    r.FailureCount,
-				SuccessRateBps:  rate,
-				MedianLatencyMs: r.MedianLatencyMs,
-				P95LatencyMs:    r.P95LatencyMs,
-			}); err != nil {
-				return err
-			}
 		}
 	}
 	return nil
