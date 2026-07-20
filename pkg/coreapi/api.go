@@ -252,7 +252,9 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	)
 	if opts.ExternalExecutionAuthorizer != nil {
 		externalexecution.NewHandler(externalExecutionSvc, opts.ExternalExecutionAuthorizer).Register(e)
-		go externalexecution.StartCancellationMaintenanceWorker(rootCtx, externalExecutionSvc, time.Second, 100)
+		go externalexecution.StartCancellationMaintenanceWorkerWithWake(
+			rootCtx, externalExecutionSvc, time.Second, 100, eventWake,
+		)
 	}
 	if cfg.WorkflowRunWorkerEnabled {
 		go workflow.StartRunWorker(rootCtx, workflowSvc, workflow.RunWorkerConfig{
@@ -327,9 +329,10 @@ func configureEventWake(rootCtx context.Context, pool *pgxpool.Pool) *eventwake.
 	}
 	infrastructure, err := eventwake.NewPostgresInfrastructure(
 		pool,
-		[]string{"openlinker_run_v1", "openlinker_work_v1"},
+		[]string{"openlinker_run_v1", "openlinker_work_v1", "openlinker_external_v1"},
 		[]string{
 			"run.changed",
+			"external_execution.changed",
 			"work.runtime_signal.available",
 			"work.run_effect.available",
 		},
