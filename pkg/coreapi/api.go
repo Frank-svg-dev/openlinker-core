@@ -25,6 +25,7 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/delivery"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/discovery"
+	"github.com/OpenLinker-ai/openlinker-core/pkg/eventwake"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/externalexecution"
 	corellm "github.com/OpenLinker-ai/openlinker-core/pkg/llm"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/mcp"
@@ -71,6 +72,9 @@ type Services struct {
 	Delivery          *delivery.Service
 	UserToken         *usertoken.Service
 	UserStatus        auth.UserStatusChecker
+	// EventWake is a shadow-only advisory listener in the current release. It
+	// does not replace any worker, wait loop, readiness check, or database fact.
+	EventWake *eventwake.Infrastructure
 }
 
 // RegisterRuntimeAttachOnly mounts the deliberately narrow Core surface used
@@ -140,6 +144,7 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 	}
 	userDashHandler := userdash.NewHandler(userdash.NewService(pool))
 	userDashHandler.RegisterCoreAPI(api, hybridMw)
+	eventWake := configureEventWake(rootCtx, pool)
 
 	agentMarketSvc := agent.NewMarketService(pool)
 	agentMarketHandler := agent.NewMarketHandler(agentMarketSvc)
@@ -298,7 +303,33 @@ func Register(rootCtx context.Context, e *echo.Echo, pool *pgxpool.Pool, cfg *co
 		Delivery:          deliverySvc,
 		UserToken:         userTokenSvc,
 		UserStatus:        userStatusChecker,
+		EventWake:         eventWake,
 	}
+}
+
+func configureEventWake(rootCtx context.Context, pool *pgxpool.Pool) *eventwake.Infrastructure {
+	if pool == nil {
+		return nil
+	}
+	infrastructure, err := eventwake.NewPostgresInfrastructure(
+		pool,
+		[]string{"openlinker_run_v1", "openlinker_work_v1"},
+		[]string{
+			"run.changed",
+			"work.runtime_signal.available",
+			"work.run_effect.available",
+		},
+	)
+	if err != nil {
+		log.Error().Str("reason", "event_wake_configuration_invalid").Msg("event wake shadow listener is disabled")
+		return nil
+	}
+	go func() {
+		if err := infrastructure.Run(rootCtx); err != nil {
+			log.Error().Str("reason", "event_wake_listener_stopped").Msg("event wake shadow listener stopped")
+		}
+	}()
+	return infrastructure
 }
 
 func newAuthService(pool *pgxpool.Pool, cfg *config.Config) *auth.Service {
