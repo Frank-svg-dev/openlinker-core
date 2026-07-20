@@ -523,7 +523,7 @@ func configureRuntime(
 		AdmissionLimiter:    runtime.NewRuntimeAdmissionLimiter(runtime.RuntimeAdmissionLimitConfig{}),
 		CoreInstanceID:      coreInstanceID,
 	})
-	go runtime.StartRuntimeMaintenanceWorker(
+	go runtime.StartRuntimeMaintenanceWorkerWithWake(
 		rootCtx,
 		runtime.NewRuntimeDeadlineReconciler(pool, nil),
 		cancellations,
@@ -533,6 +533,7 @@ func configureRuntime(
 			sessionLeases,
 		),
 		runtime.RuntimeMaintenanceWorkerConfig{},
+		eventWake,
 	)
 	if signalBus != nil {
 		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)
