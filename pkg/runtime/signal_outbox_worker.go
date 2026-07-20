@@ -233,6 +233,13 @@ func runtimeSignalFromOutbox(outbox db.RuntimeSignalOutbox) (RuntimeSignal, erro
 			}
 			signal.TargetInstanceID = &target
 		}
+		if encodedNode, ok := fields["node_id"]; ok && !bytes.Equal(bytes.TrimSpace(encodedNode), []byte("null")) {
+			var nodeID uuid.UUID
+			if err := json.Unmarshal(encodedNode, &nodeID); err != nil || nodeID == uuid.Nil {
+				return RuntimeSignal{}, fmt.Errorf("%w: invalid node_id", ErrRuntimeSignalInvalid)
+			}
+			signal.NodeID = &nodeID
+		}
 	}
 	if err := ValidateRuntimeSignal(signal); err != nil {
 		return RuntimeSignal{}, err

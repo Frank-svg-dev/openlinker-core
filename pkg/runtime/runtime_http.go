@@ -102,9 +102,8 @@ type RuntimeHTTPDependencies struct {
 // RuntimeHTTPController is the strict HTTP transport adapter for the durable
 // Runtime state machine.
 type RuntimeHTTPController struct {
-	dependencies              RuntimeHTTPDependencies
-	webSockets                *runtimeWSRegistry
-	webSocketFallbackInterval time.Duration
+	dependencies RuntimeHTTPDependencies
+	webSockets   *runtimeWSRegistry
 }
 
 // runtimePreviousReadyPayload is the strict pre-attachment-generation Ready
@@ -120,17 +119,9 @@ type runtimePreviousReadyPayload struct {
 
 func NewRuntimeHTTPController(dependencies RuntimeHTTPDependencies) *RuntimeHTTPController {
 	return &RuntimeHTTPController{
-		dependencies:              dependencies,
-		webSockets:                newRuntimeWSRegistry(),
-		webSocketFallbackInterval: defaultRuntimeWSFallbackInterval,
+		dependencies: dependencies,
+		webSockets:   newRuntimeWSRegistry(),
 	}
-}
-
-func (h *RuntimeHTTPController) runtimeWebSocketFallbackInterval() time.Duration {
-	if h == nil || h.webSocketFallbackInterval <= 0 {
-		return defaultRuntimeWSFallbackInterval
-	}
-	return h.webSocketFallbackInterval
 }
 
 func newRuntimeHTTPControllerForService(service runtimeService) *RuntimeHTTPController {
@@ -863,9 +854,10 @@ func (h *RuntimeHTTPController) claimWithWait(
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 	for {
-		var wake <-chan struct{}
+		var dispatchWake, nodeDispatchWake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
-			wake = h.dependencies.WakeHub.Wait(principal.AgentID)
+			dispatchWake = h.dependencies.WakeHub.WaitDispatch(principal.AgentID)
+			nodeDispatchWake = h.dependencies.WakeHub.WaitNodeDispatch(principal.NodeID)
 		}
 		assignment, err := h.dependencies.Leases.ClaimOffer(ctx, principal)
 		if err != nil || assignment != nil || wait == 0 {
@@ -876,7 +868,8 @@ func (h *RuntimeHTTPController) claimWithWait(
 			return nil, ctx.Err()
 		case <-deadline.C:
 			return nil, nil
-		case <-wake:
+		case <-dispatchWake:
+		case <-nodeDispatchWake:
 		}
 	}
 }
@@ -893,7 +886,7 @@ func (h *RuntimeHTTPController) pollCommandsWithWait(
 	for {
 		var wake <-chan struct{}
 		if h.dependencies.WakeHub != nil {
-			wake = h.dependencies.WakeHub.Wait(principal.AgentID)
+			wake = h.dependencies.WakeHub.WaitControl(principal.AgentID)
 		}
 		response, err := h.dependencies.Cancellations.PollCommands(ctx, principal)
 		if err != nil || len(response.Commands) > 0 || wait == 0 {

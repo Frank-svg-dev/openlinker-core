@@ -28,6 +28,7 @@ type RuntimeSignal struct {
 	Type             string     `json:"type"`
 	AgentID          uuid.UUID  `json:"agent_id"`
 	RunID            *uuid.UUID `json:"run_id,omitempty"`
+	NodeID           *uuid.UUID `json:"node_id,omitempty"`
 	TargetInstanceID *uuid.UUID `json:"target_instance_id,omitempty"`
 }
 
@@ -59,6 +60,16 @@ func ValidateRuntimeSignal(signal RuntimeSignal) error {
 	}
 	if signal.RunID != nil && *signal.RunID == uuid.Nil {
 		return fmt.Errorf("%w: run_id is invalid", ErrRuntimeSignalInvalid)
+	}
+	if signal.NodeID != nil && *signal.NodeID == uuid.Nil {
+		return fmt.Errorf("%w: node_id is invalid", ErrRuntimeSignalInvalid)
+	}
+	if signal.Type == runtimeNodeCapacityAvailableSignal {
+		if signal.NodeID == nil {
+			return fmt.Errorf("%w: node_id is required", ErrRuntimeSignalInvalid)
+		}
+	} else if signal.NodeID != nil {
+		return fmt.Errorf("%w: node_id is not allowed for this type", ErrRuntimeSignalInvalid)
 	}
 	if signal.TargetInstanceID != nil && *signal.TargetInstanceID == uuid.Nil {
 		return fmt.Errorf("%w: target_instance_id is invalid", ErrRuntimeSignalInvalid)

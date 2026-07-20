@@ -883,6 +883,11 @@ func (s *RuntimeLeaseService) finishAndReleaseOffer(
 		}
 		return err
 	}
+	if err := createRuntimeNodeCapacityAvailableSignal(
+		ctx, tx, principal.AgentID, capacity.NodeID, evidence.RunID,
+	); err != nil {
+		return err
+	}
 	if _, err := tx.ResetRunAfterUnacceptedOffer(ctx, db.ResetRunAfterUnacceptedOfferParams{
 		RunID: evidence.RunID, AttemptID: evidence.AttemptID, LeaseID: evidence.LeaseID, FencingToken: evidence.FencingToken,
 	}); err != nil {

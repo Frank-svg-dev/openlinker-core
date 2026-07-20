@@ -142,41 +142,54 @@ func TestRuntimeHTTPTransportPolicyAdmissionPreservesAuthenticationPrecedence(t 
 }
 
 func TestRuntimePullClaimWakeDoesNotWaitForDatabasePollTick(t *testing.T) {
-	agentID := uuid.New()
-	principal := RuntimeSessionPrincipal{AgentID: agentID}
-	wakeHub := NewRuntimeWakeHub()
-	firstPoll := make(chan struct{})
-	assignment := &RunAssignedPayload{}
-	var calls int
-	leases := &runtimeLeaseServiceFake{
-		claim: func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
-			calls++
-			if calls == 1 {
-				close(firstPoll)
-				return nil, nil
+	for _, testCase := range []struct {
+		name string
+		wake func(*RuntimeWakeHub, RuntimeSessionPrincipal)
+	}{
+		{name: "Agent dispatch", wake: func(hub *RuntimeWakeHub, principal RuntimeSessionPrincipal) {
+			hub.WakeDispatch(principal.AgentID)
+		}},
+		{name: "Node capacity", wake: func(hub *RuntimeWakeHub, principal RuntimeSessionPrincipal) {
+			hub.WakeNodeDispatch(principal.NodeID)
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			principal := RuntimeSessionPrincipal{AgentID: uuid.New(), NodeID: uuid.New()}
+			wakeHub := NewRuntimeWakeHub()
+			firstPoll := make(chan struct{})
+			assignment := &RunAssignedPayload{}
+			var calls int
+			leases := &runtimeLeaseServiceFake{
+				claim: func(context.Context, RuntimeSessionPrincipal) (*RunAssignedPayload, error) {
+					calls++
+					if calls == 1 {
+						close(firstPoll)
+						return nil, nil
+					}
+					return assignment, nil
+				},
 			}
-			return assignment, nil
-		},
+			controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
+				Leases: leases, WakeHub: wakeHub,
+			})
+			type result struct {
+				assignment *RunAssignedPayload
+				err        error
+			}
+			done := make(chan result, 1)
+			go func() {
+				got, err := controller.claimWithWait(context.Background(), principal, time.Second)
+				done <- result{assignment: got, err: err}
+			}()
+			<-firstPoll
+			started := time.Now()
+			testCase.wake(wakeHub, principal)
+			got := <-done
+			require.NoError(t, got.err)
+			require.Same(t, assignment, got.assignment)
+			require.Less(t, time.Since(started), 190*time.Millisecond)
+		})
 	}
-	controller := NewRuntimeHTTPController(RuntimeHTTPDependencies{
-		Leases: leases, WakeHub: wakeHub,
-	})
-	type result struct {
-		assignment *RunAssignedPayload
-		err        error
-	}
-	done := make(chan result, 1)
-	go func() {
-		got, err := controller.claimWithWait(context.Background(), principal, time.Second)
-		done <- result{assignment: got, err: err}
-	}()
-	<-firstPoll
-	started := time.Now()
-	wakeHub.Wake(agentID)
-	got := <-done
-	require.NoError(t, got.err)
-	require.Same(t, assignment, got.assignment)
-	require.Less(t, time.Since(started), 190*time.Millisecond)
 }
 
 func TestRuntimePullClaimWaitDoesNotContinuouslyPollDatabase(t *testing.T) {

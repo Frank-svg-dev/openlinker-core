@@ -830,7 +830,9 @@ func releaseRuntimeAttemptCapacity(ctx context.Context, queries *db.Queries, att
 	if _, err := queries.ReleaseRuntimeNodeSlot(ctx, capacity.NodeID); err != nil {
 		return err
 	}
-	return nil
+	return createRuntimeNodeCapacityAvailableSignal(
+		ctx, queries, attempt.AgentID, capacity.NodeID, attempt.RunID,
+	)
 }
 
 func runtimeResultActiveAttemptMatches(run runtimeResultRun, identity RuntimeAttemptIdentity, attempt db.RunAttempt) bool {

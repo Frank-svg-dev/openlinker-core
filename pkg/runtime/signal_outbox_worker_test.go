@@ -88,6 +88,25 @@ func TestRuntimeSignalOutboxWorkerExtractsOnlyTargetFromPayload(t *testing.T) {
 	require.NotContains(t, string(encoded), "token")
 }
 
+func TestRuntimeSignalOutboxWorkerProjectsNodeCapacityIdentity(t *testing.T) {
+	nodeID := uuid.New()
+	row := testRuntimeSignalOutbox(`{"node_id":"` + nodeID.String() + `","input":"classified"}`)
+	row.EventType = runtimeNodeCapacityAvailableSignal
+	store := &runtimeSignalOutboxStoreFake{claimed: []db.RuntimeSignalOutbox{row}}
+	bus := &runtimeSignalBusFake{}
+
+	result, err := NewRuntimeSignalOutboxWorker(store, bus).ProcessOnce(
+		context.Background(), RuntimeSignalOutboxWorkerConfig{},
+	)
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Published)
+	require.Equal(t, &nodeID, bus.published[0].NodeID)
+	encoded, err := MarshalRuntimeSignal(bus.published[0])
+	require.NoError(t, err)
+	require.NotContains(t, string(encoded), "classified")
+	require.NotContains(t, string(encoded), "input")
+}
+
 func TestRuntimeSignalOutboxWorkerInvalidTargetRetriesWithoutBroadcast(t *testing.T) {
 	row := testRuntimeSignalOutbox(`{"target_instance_id":"not-a-uuid","input":"classified"}`)
 	store := &runtimeSignalOutboxStoreFake{claimed: []db.RuntimeSignalOutbox{row}}
