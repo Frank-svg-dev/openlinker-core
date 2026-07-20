@@ -373,8 +373,8 @@ Important rules:
   Runtime Worker channel.
 - `message/send` creates a real Core run. Synchronous endpoints may complete
   immediately; runtime connectors normally return a working task first.
-- `runtime` is the marketplace connection mode. WebSocket and long polling are
-  transport choices inside the Runtime Worker, never separate seller-facing modes.
+- `runtime` is the Agent connection mode. WebSocket and long polling are
+  transport choices inside the Runtime Worker, never separate Agent connection modes.
 - WebSocket is outbound from Runtime Worker to Core. Long polling is its fallback; both
   keep PostgreSQL as truth and share the same Session, lease, ACK and resume state.
 

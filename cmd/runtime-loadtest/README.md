@@ -1,5 +1,7 @@
 # Runtime load test
 
+[简体中文](./README.zh-CN.md)
+
 `runtime-loadtest` drives the same reliable Runtime state machine through
 two transports:
 
