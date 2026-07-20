@@ -106,8 +106,14 @@ func TestRuntimeMaintenanceWorkerStopsWithContext(t *testing.T) {
 	sessions := &runtimeMaintenanceSessionFake{}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	observed := make(chan WorkerObservation, 4)
 	go func() {
-		StartRuntimeMaintenanceWorker(ctx, reconciler, cancellations, sessions, RuntimeMaintenanceWorkerConfig{Interval: time.Millisecond})
+		StartRuntimeMaintenanceWorker(ctx, reconciler, cancellations, sessions, RuntimeMaintenanceWorkerConfig{
+			Interval: time.Millisecond,
+			Observer: WorkerObserverFunc(func(observation WorkerObservation) {
+				observed <- observation
+			}),
+		})
 		close(done)
 	}()
 
@@ -116,6 +122,14 @@ func TestRuntimeMaintenanceWorkerStopsWithContext(t *testing.T) {
 		defer reconciler.mu.Unlock()
 		return reconciler.calls > 0
 	}, time.Second, time.Millisecond)
+	select {
+	case observation := <-observed:
+		require.Equal(t, WorkerObservation{
+			Category: "runtime.maintenance.scan", Reason: "startup", BatchSize: defaultRuntimeMaintenanceBatchSize,
+		}, observation)
+	case <-time.After(time.Second):
+		t.Fatal("Runtime maintenance observer was not called")
+	}
 	cancel()
 	select {
 	case <-done:

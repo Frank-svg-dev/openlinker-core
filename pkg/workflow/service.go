@@ -25,9 +25,10 @@ import (
 
 // Service persists workflows and executes Agent nodes through the runtime service.
 type Service struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
-	runtime workflowRuntime
+	queries  *db.Queries
+	pool     *pgxpool.Pool
+	runtime  workflowRuntime
+	observer runtime.WorkerObserver
 }
 
 type workflowRuntime interface {
@@ -71,6 +72,13 @@ func normalizeRunStatus(status string) string {
 
 func NewService(pool *pgxpool.Pool, runtimeSvc *runtime.Service) *Service {
 	return &Service{queries: db.New(pool), pool: pool, runtime: runtimeSvc}
+}
+
+// SetWorkerObserver installs payload-free test instrumentation only.
+func (s *Service) SetWorkerObserver(observer runtime.WorkerObserver) {
+	if s != nil {
+		s.observer = observer
+	}
 }
 
 func (s *Service) CreateWorkflow(ctx context.Context, userID uuid.UUID, req *CreateWorkflowRequest) (*WorkflowResponse, error) {
@@ -1376,6 +1384,11 @@ func (s *Service) waitForRuntimeRunCompletion(ctx context.Context, userID, runID
 		return nil, fmt.Errorf("workflow node runID 为空")
 	}
 	for i := 0; i < workflowNodeRunPollMaxLoops; i += 1 {
+		if s.observer != nil {
+			s.observer.ObserveWorker(runtime.WorkerObservation{
+				Category: "workflow.child_run.query", Reason: "poll", BatchSize: 1,
+			})
+		}
 		childRun, err := s.runtime.GetRun(ctx, userID, runID)
 		if err != nil {
 			return nil, err

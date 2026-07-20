@@ -10,16 +10,25 @@ import (
 
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 	"github.com/OpenLinker-ai/openlinker-core/pkg/httpx"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // MetricService Agent 指标快照读 + worker 共享层（docs/29 §3.4）。
 type MetricService struct {
-	queries *db.Queries
-	pool    *pgxpool.Pool
+	queries  *db.Queries
+	pool     *pgxpool.Pool
+	observer coreruntime.WorkerObserver
 }
 
 func NewMetricService(pool *pgxpool.Pool) *MetricService {
 	return &MetricService{queries: db.New(pool), pool: pool}
+}
+
+// SetWorkerObserver installs payload-free test instrumentation only.
+func (s *MetricService) SetWorkerObserver(observer coreruntime.WorkerObserver) {
+	if s != nil {
+		s.observer = observer
+	}
 }
 
 // MetricSnapshot 单个窗口的指标。
@@ -77,9 +86,19 @@ var metricWindows = []metricWindow{
 // AggregateOnce 跑一次完整聚合（worker 与测试都用这个入口）。
 func (s *MetricService) AggregateOnce(ctx context.Context) error {
 	for _, w := range metricWindows {
+		if s.observer != nil {
+			s.observer.ObserveWorker(coreruntime.WorkerObservation{
+				Category: "agent.metric.aggregate_query", Reason: w.label,
+			})
+		}
 		rows, err := s.queries.AggregateAgentRunsForWindow(ctx, w.interval)
 		if err != nil {
 			return err
+		}
+		if s.observer != nil {
+			s.observer.ObserveWorker(coreruntime.WorkerObservation{
+				Category: "agent.metric.upsert_rows", Reason: w.label, BatchSize: len(rows),
+			})
 		}
 		for _, r := range rows {
 			rate := int32(0)

@@ -35,6 +35,7 @@ type RuntimeMaintenanceWorkerConfig struct {
 	CancellationBatchSize int
 	SessionBatchSize      int
 	MaxCatchUpBatches     int
+	Observer              WorkerObserver
 }
 
 type RuntimeMaintenanceResult struct {
@@ -162,7 +163,8 @@ func StartRuntimeMaintenanceWorker(
 	cfg RuntimeMaintenanceWorkerConfig,
 ) {
 	cfg = normalizeRuntimeMaintenanceWorkerConfig(cfg)
-	run := func() {
+	run := func(reason string) {
+		observeWorker(cfg.Observer, "runtime.maintenance.scan", reason, cfg.ReconcileBatchSize)
 		result, err := RunRuntimeMaintenanceOnce(ctx, reconciler, cancellations, sessions, cfg)
 		if err != nil && ctx.Err() == nil {
 			log.Error().Err(err).Msg("Runtime maintenance pass failed")
@@ -180,7 +182,7 @@ func StartRuntimeMaintenanceWorker(
 		}
 	}
 
-	run()
+	run("startup")
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -188,7 +190,7 @@ func StartRuntimeMaintenanceWorker(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run()
+			run("ticker")
 		}
 	}
 }

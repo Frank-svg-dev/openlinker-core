@@ -176,6 +176,7 @@ type RunEffectWorkerConfig struct {
 	Interval      time.Duration
 	LeaseDuration time.Duration
 	BatchSize     int32
+	Observer      WorkerObserver
 }
 
 func normalizeRunEffectWorkerConfig(cfg RunEffectWorkerConfig) RunEffectWorkerConfig {
@@ -547,6 +548,7 @@ func runEffectWorkerTick(
 	worker *RunEffectWorker,
 	cfg RunEffectWorkerConfig,
 ) {
+	observeWorker(cfg.Observer, "runtime.run_effect.claim", "tick", int(cfg.BatchSize))
 	processed, err := worker.ProcessOnce(ctx, cfg)
 	if err != nil {
 		log.Warn().Err(err).Msg("runtime: run effect worker tick failed")

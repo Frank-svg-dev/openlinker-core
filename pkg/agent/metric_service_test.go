@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/OpenLinker-ai/openlinker-core/pkg/agent"
+	coreruntime "github.com/OpenLinker-ai/openlinker-core/pkg/runtime"
 )
 
 // 覆盖 Phase 2 缺口 2：metric snapshots（docs/29 §3.4）。
@@ -21,7 +22,19 @@ func TestMetricService_AggregateOnce_NoRuns(t *testing.T) {
 	ctx := context.Background()
 
 	svc := agent.NewMetricService(pool)
+	var observations []coreruntime.WorkerObservation
+	svc.SetWorkerObserver(coreruntime.WorkerObserverFunc(func(observation coreruntime.WorkerObservation) {
+		observations = append(observations, observation)
+	}))
 	require.NoError(t, svc.AggregateOnce(ctx))
+	require.Equal(t, []coreruntime.WorkerObservation{
+		{Category: "agent.metric.aggregate_query", Reason: "24h"},
+		{Category: "agent.metric.upsert_rows", Reason: "24h", BatchSize: 1},
+		{Category: "agent.metric.aggregate_query", Reason: "7d"},
+		{Category: "agent.metric.upsert_rows", Reason: "7d", BatchSize: 1},
+		{Category: "agent.metric.aggregate_query", Reason: "30d"},
+		{Category: "agent.metric.upsert_rows", Reason: "30d", BatchSize: 1},
+	}, observations)
 
 	resp, err := svc.GetSnapshots(ctx, agentID)
 	require.NoError(t, err)

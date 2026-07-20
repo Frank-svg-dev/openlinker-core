@@ -29,6 +29,7 @@ type Handler struct {
 	validator *validator.Validate
 	cfg       *config.Config
 	runtime   *RuntimeHTTPController
+	observer  WorkerObserver
 }
 
 type runtimeService interface {
@@ -53,6 +54,14 @@ func NewHandler(svc runtimeService, cfg ...*config.Config) *Handler {
 		h.cfg = cfg[0]
 	}
 	return h
+}
+
+// SetWorkerObserver installs payload-free test instrumentation. It does not
+// change response, retry, timeout, or query behavior.
+func (h *Handler) SetWorkerObserver(observer WorkerObserver) {
+	if h != nil {
+		h.observer = observer
+	}
 }
 
 // RegisterProtected 注册需要鉴权的端点，分别接收 /run 与 /runs/:id 的 middleware。
@@ -389,6 +398,7 @@ func (h *Handler) sendRunCreationResponse(c echo.Context, userID uuid.UUID, resp
 			case <-deadline.C:
 				break waitLoop
 			case <-ticker.C:
+				observeWorker(h.observer, "runtime.prefer_wait.run_query", "ticker", 1)
 				current, getErr := h.svc.GetRun(c.Request().Context(), userID, runID)
 				if getErr != nil {
 					return getErr
@@ -560,6 +570,7 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 		return httpx.BadRequest("after_sequence / Last-Event-ID 不是合法整数")
 	}
 
+	observeWorker(h.observer, "runtime.sse.run_events_query", "initial", 1)
 	page, err := h.svc.ListRunEventsPage(c.Request().Context(), uid, runID, afterSequence, defaultRunEventsLimit)
 	if err != nil {
 		return err
@@ -614,6 +625,7 @@ func (h *Handler) StreamRunEvents(c echo.Context) error {
 			}
 			flusher.Flush()
 		case <-pollTicker.C:
+			observeWorker(h.observer, "runtime.sse.run_events_query", "ticker", 1)
 			page, err = h.svc.ListRunEventsPage(ctx, uid, runID, afterSequence, defaultRunEventsLimit)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

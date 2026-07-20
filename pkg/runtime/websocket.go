@@ -513,6 +513,7 @@ func (c *runtimeWSConnection) refreshSession() error {
 	if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
 		return admissionErr
 	}
+	observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_principal_query", "maintenance", 1)
 	principal, err := c.controller.dependencies.Sessions.ResolveSessionPrincipal(
 		c.ctx, c.authenticated, c.sessionPrincipal.RuntimeSessionID,
 	)
@@ -724,6 +725,7 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				if !c.refreshMaintenanceSession() {
 					return
 				}
+				observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "attach_only", 1)
 				state, err := c.controller.dependencies.Sessions.HeartbeatSession(
 					c.ctx, c.authenticated, c.sessionRequest,
 				)
@@ -757,6 +759,7 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 		case <-c.ctx.Done():
 			return
 		case <-policyTicker.C:
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.policy_check", "ticker", 1)
 			// Policy providers are in-memory. Preserve fast policy cutover without
 			// reintroducing the former per-connection PostgreSQL poll.
 			if admissionErr := c.controller.runtimeTransportAdmission(RuntimeTransportWebSocket, true); admissionErr != nil {
@@ -794,6 +797,7 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 			if !c.refreshMaintenanceSession() {
 				return
 			}
+			observeWorker(c.controller.dependencies.Observer, "runtime.websocket.session_heartbeat", "ticker", 1)
 			state, err := c.controller.dependencies.Sessions.HeartbeatSession(
 				c.ctx, c.authenticated, c.sessionRequest,
 			)

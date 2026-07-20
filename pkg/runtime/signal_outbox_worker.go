@@ -31,6 +31,7 @@ type RuntimeSignalOutboxWorkerConfig struct {
 	MaxCatchUpBatches int
 	RetryBase         time.Duration
 	RetryMaximum      time.Duration
+	Observer          WorkerObserver
 }
 
 type RuntimeSignalOutboxBatchResult struct {
@@ -180,8 +181,9 @@ func StartRuntimeSignalOutboxWorker(
 	cfg RuntimeSignalOutboxWorkerConfig,
 ) {
 	cfg = normalizeRuntimeSignalOutboxWorkerConfig(cfg)
-	run := func() {
+	run := func(reason string) {
 		for batch := 0; batch < cfg.MaxCatchUpBatches; batch++ {
+			observeWorker(cfg.Observer, "runtime.signal_outbox.claim", reason, int(cfg.BatchSize))
 			result, err := worker.ProcessOnce(ctx, cfg)
 			if err != nil {
 				if ctx.Err() == nil {
@@ -201,7 +203,7 @@ func StartRuntimeSignalOutboxWorker(
 		}
 	}
 
-	run()
+	run("startup")
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -209,7 +211,7 @@ func StartRuntimeSignalOutboxWorker(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			run()
+			run("ticker")
 		}
 	}
 }
