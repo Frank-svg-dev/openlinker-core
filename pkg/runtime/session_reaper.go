@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -13,7 +14,10 @@ import (
 	db "github.com/OpenLinker-ai/openlinker-core/pkg/db/generated"
 )
 
-const maxRuntimeSessionReapBatch = 1000
+const (
+	maxRuntimeSessionReapBatch            = 1000
+	runtimeSessionDatabaseReconcilePeriod = time.Minute
+)
 
 var (
 	ErrRuntimeSessionReaperNotConfigured = errors.New("runtime session reaper is not configured")
@@ -41,6 +45,10 @@ type RuntimeSessionReaper struct {
 	repository   runtimeSessionReaperRepository
 	heartbeatTTL time.Duration
 	leases       runtimeSessionLeaseEvidence
+
+	databaseReconcileMu     sync.Mutex
+	databaseReconcileActive bool
+	nextDatabaseReconcileAt time.Time
 }
 
 func NewRuntimeSessionReaper(pool *pgxpool.Pool, heartbeatTTL time.Duration) *RuntimeSessionReaper {
@@ -60,9 +68,10 @@ func NewRuntimeSessionReaperWithLeases(
 		return &RuntimeSessionReaper{heartbeatTTL: heartbeatTTL, leases: leases}
 	}
 	return &RuntimeSessionReaper{
-		repository:   &postgresRuntimeSessionRepository{pool: pool, queries: db.New(pool)},
-		heartbeatTTL: heartbeatTTL,
-		leases:       leases,
+		repository:              &postgresRuntimeSessionRepository{pool: pool, queries: db.New(pool)},
+		heartbeatTTL:            heartbeatTTL,
+		leases:                  leases,
+		nextDatabaseReconcileAt: time.Now().Add(runtimeSessionDatabaseReconcilePeriod),
 	}
 }
 
@@ -75,7 +84,10 @@ func newRuntimeSessionReaperWithLeases(
 	heartbeatTTL time.Duration,
 	leases runtimeSessionLeaseEvidence,
 ) *RuntimeSessionReaper {
-	return &RuntimeSessionReaper{repository: repository, heartbeatTTL: heartbeatTTL, leases: leases}
+	return &RuntimeSessionReaper{
+		repository: repository, heartbeatTTL: heartbeatTTL, leases: leases,
+		nextDatabaseReconcileAt: time.Now().Add(runtimeSessionDatabaseReconcilePeriod),
+	}
 }
 
 func (r *RuntimeSessionReaper) ReapStaleSessions(ctx context.Context, limit int) (int, error) {
@@ -83,11 +95,26 @@ func (r *RuntimeSessionReaper) ReapStaleSessions(ctx context.Context, limit int)
 		return 0, ErrRuntimeSessionReaperNotConfigured
 	}
 	if r.leases != nil {
-		return r.reapExpiredLeaseSessions(ctx, min(limit, maxRuntimeSessionLeaseBatch))
+		reaped, err := r.reapExpiredLeaseSessions(ctx, min(limit, maxRuntimeSessionLeaseBatch))
+		if err != nil || !r.leases.AbsenceReady() || !r.beginDatabaseReconcile(time.Now()) {
+			return reaped, err
+		}
+		reconciled, _, reconcileErr := r.reapStaleDatabaseSessions(ctx, limit)
+		// Continue immediately only when the whole bounded batch was actually
+		// closed. A full candidate page can consist entirely of live Redis
+		// leases whose intentionally stale database heartbeat must not turn the
+		// one-minute recovery scan back into a one-second poll.
+		r.finishDatabaseReconcile(time.Now(), reconciled >= limit, reconcileErr)
+		return reaped + reconciled, reconcileErr
 	}
+	reaped, _, err := r.reapStaleDatabaseSessions(ctx, limit)
+	return reaped, err
+}
+
+func (r *RuntimeSessionReaper) reapStaleDatabaseSessions(ctx context.Context, limit int) (int, int, error) {
 	candidates, err := r.repository.ListStaleRuntimeSessionCandidates(ctx, r.heartbeatTTL, limit)
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	reaped := 0
@@ -106,7 +133,34 @@ func (r *RuntimeSessionReaper) ReapStaleSessions(ctx context.Context, limit int)
 			reaped++
 		}
 	}
-	return reaped, errors.Join(errs...)
+	return reaped, len(candidates), errors.Join(errs...)
+}
+
+func (r *RuntimeSessionReaper) beginDatabaseReconcile(now time.Time) bool {
+	r.databaseReconcileMu.Lock()
+	defer r.databaseReconcileMu.Unlock()
+	if r.databaseReconcileActive {
+		return false
+	}
+	if !r.nextDatabaseReconcileAt.IsZero() && now.Before(r.nextDatabaseReconcileAt) {
+		return false
+	}
+	r.databaseReconcileActive = true
+	return true
+}
+
+func (r *RuntimeSessionReaper) finishDatabaseReconcile(now time.Time, full bool, err error) {
+	r.databaseReconcileMu.Lock()
+	defer r.databaseReconcileMu.Unlock()
+	r.databaseReconcileActive = false
+	switch {
+	case err != nil:
+		r.nextDatabaseReconcileAt = now.Add(time.Second)
+	case full:
+		r.nextDatabaseReconcileAt = time.Time{}
+	default:
+		r.nextDatabaseReconcileAt = now.Add(runtimeSessionDatabaseReconcilePeriod)
+	}
 }
 
 func (r *RuntimeSessionReaper) reapExpiredLeaseSessions(ctx context.Context, limit int) (int, error) {

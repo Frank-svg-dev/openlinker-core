@@ -47,6 +47,10 @@ type connectionCapacityReport struct {
 	StepSize               int                       `json:"step_size"`
 	StepHoldMS             float64                   `json:"step_hold_ms"`
 	ConnectStaggerMS       float64                   `json:"connect_stagger_ms"`
+	HealthSampleIntervalMS float64                   `json:"health_sample_interval_ms"`
+	DBStatsSettleMS        float64                   `json:"db_stats_settle_ms"`
+	DBStrictIdleRate       float64                   `json:"db_strict_idle_commit_rate,omitempty"`
+	DBStrictIdleMinMS      float64                   `json:"db_strict_idle_min_duration_ms,omitempty"`
 	CandidateConnections   int                       `json:"candidate_connections"`
 	StableConnections      int                       `json:"measured_stable_connections"`
 	FirstRejectedTarget    int                       `json:"first_rejected_target,omitempty"`
@@ -108,6 +112,8 @@ func runConnectionCapacityStages(
 	report := &connectionCapacityReport{
 		Enabled: true, RequestedConnections: len(specs), StepSize: cfg.ConnectionStepSize,
 		StepHoldMS: ms(cfg.ConnectionStepHold), ConnectStaggerMS: ms(cfg.ConnectStagger),
+		HealthSampleIntervalMS: ms(cfg.CapacityHealthInterval), DBStatsSettleMS: ms(cfg.DBStatsSettle),
+		DBStrictIdleRate: cfg.DBStrictIdleCommitRate, DBStrictIdleMinMS: ms(cfg.DBStrictIdleMinDuration),
 		Stages: make([]connectionCapacityStage, 0, (len(specs)+cfg.ConnectionStepSize-1)/cfg.ConnectionStepSize),
 	}
 	stable := 0
@@ -144,12 +150,23 @@ func runConnectionCapacityStages(
 		}
 		if stageErr == nil {
 			stage.ReadyAt = time.Now().UTC()
+			if cfg.DBStatsSettle > 0 {
+				stageErr = observeConnectionCapacityStage(
+					ctx, cfg.DBStatsSettle, cfg.CapacityHealthInterval,
+					target, coreAPI, metrics, &stage,
+				)
+			}
+		}
+		if stageErr == nil {
 			holdStart, holdStartErr := captureDBCounterSnapshot(ctx, dbCounters)
 			if holdStartErr != nil {
 				appendCapacityDBError(&stage, holdStartErr)
 			}
 			setCapacityDBDelta(&stage, &stage.DBConnect, connectStart, holdStart)
-			stageErr = observeConnectionCapacityStage(ctx, cfg.ConnectionStepHold, target, coreAPI, metrics, &stage)
+			stageErr = observeConnectionCapacityStage(
+				ctx, cfg.ConnectionStepHold, cfg.CapacityHealthInterval,
+				target, coreAPI, metrics, &stage,
+			)
 			holdEnd, holdEndErr := captureDBCounterSnapshot(ctx, dbCounters)
 			if holdEndErr != nil {
 				appendCapacityDBError(&stage, holdEndErr)
@@ -209,19 +226,29 @@ func confirmConnectionCapacity(
 		ConnectedMinimum: metrics.c.workersConnected.Load(),
 	}
 	stage.ReadyAt = stage.StartedAt
-	holdStart, snapshotErr := captureDBCounterSnapshot(ctx, dbCounters)
-	if snapshotErr != nil {
-		appendCapacityDBError(&stage, snapshotErr)
-	}
 	workerErrorsBefore := metrics.c.workerErrors.Load()
-	err := observeConnectionCapacityStage(
-		ctx, cfg.HoldAfter, report.CandidateConnections, coreAPI, metrics, &stage,
-	)
-	holdEnd, holdEndErr := captureDBCounterSnapshot(ctx, dbCounters)
-	if holdEndErr != nil {
-		appendCapacityDBError(&stage, holdEndErr)
+	var err error
+	if cfg.DBStatsSettle > 0 {
+		err = observeConnectionCapacityStage(
+			ctx, cfg.DBStatsSettle, cfg.CapacityHealthInterval,
+			report.CandidateConnections, coreAPI, metrics, &stage,
+		)
 	}
-	setCapacityDBDelta(&stage, &stage.DBHold, holdStart, holdEnd)
+	if err == nil {
+		holdStart, snapshotErr := captureDBCounterSnapshot(ctx, dbCounters)
+		if snapshotErr != nil {
+			appendCapacityDBError(&stage, snapshotErr)
+		}
+		err = observeConnectionCapacityStage(
+			ctx, cfg.HoldAfter, cfg.CapacityHealthInterval,
+			report.CandidateConnections, coreAPI, metrics, &stage,
+		)
+		holdEnd, holdEndErr := captureDBCounterSnapshot(ctx, dbCounters)
+		if holdEndErr != nil {
+			appendCapacityDBError(&stage, holdEndErr)
+		}
+		setCapacityDBDelta(&stage, &stage.DBHold, holdStart, holdEnd)
+	}
 	if err == nil {
 		err = enforceDBIdleCommitRate(cfg, stage)
 	}
@@ -314,6 +341,9 @@ func enforceDBIdleCommitRate(cfg config, stage connectionCapacityStage) error {
 	if stage.DBHold == nil {
 		return fmt.Errorf("strict database idle slope has no hold sample")
 	}
+	if cfg.DBStrictIdleMinDuration > 0 && stage.DBHold.DurationMS < ms(cfg.DBStrictIdleMinDuration) {
+		return nil
+	}
 	if stage.DBHold.StatsResetDetected {
 		return fmt.Errorf("strict database idle slope crossed a PostgreSQL statistics reset")
 	}
@@ -333,6 +363,7 @@ func enforceDBIdleCommitRate(cfg config, stage connectionCapacityStage) error {
 func observeConnectionCapacityStage(
 	ctx context.Context,
 	duration time.Duration,
+	interval time.Duration,
 	target int,
 	coreAPI *apiClient,
 	metrics *metrics,
@@ -341,7 +372,9 @@ func observeConnectionCapacityStage(
 	if duration <= 0 {
 		duration = time.Second
 	}
-	interval := time.Second
+	if interval <= 0 {
+		interval = time.Second
+	}
 	if duration < 3*interval {
 		interval = duration / 3
 		if interval < 10*time.Millisecond {
@@ -474,5 +507,6 @@ func minimumConnectionCapacityTimeout(cfg config) time.Duration {
 	}
 	connectDuration := time.Duration(max(total-1, 0)) * cfg.ConnectStagger
 	return connectDuration + time.Duration(stages)*cfg.ConnectionStepHold +
+		time.Duration(stages+1)*cfg.DBStatsSettle +
 		cfg.HoldAfter + cfg.ReadyTimeout + 2*time.Minute
 }

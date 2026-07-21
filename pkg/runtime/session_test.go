@@ -917,6 +917,7 @@ type sessionRepositoryFake struct {
 	staleListErr        error
 	staleTTL            time.Duration
 	staleLimit          int
+	staleListCalls      int
 	reapCandidateNow    time.Time
 	reapCandidateErr    error
 	reapCandidateCalls  int
@@ -933,6 +934,7 @@ func (r *sessionRepositoryFake) ListStaleRuntimeSessionCandidates(_ context.Cont
 	defer r.staleMu.Unlock()
 	r.staleTTL = ttl
 	r.staleLimit = limit
+	r.staleListCalls++
 	return append([]db.RuntimeSession(nil), r.staleCandidates...), r.staleListErr
 }
 

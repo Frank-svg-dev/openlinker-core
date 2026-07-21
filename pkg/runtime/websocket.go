@@ -521,6 +521,13 @@ func (c *runtimeWSConnection) scheduleMaintenanceContinuation(messageType Runtim
 			default:
 			}
 		}
+	case RuntimeMessageResume:
+		if c.controlPending.Load() {
+			select {
+			case c.controlContinue <- struct{}{}:
+			default:
+			}
+		}
 	}
 }
 
@@ -703,6 +710,10 @@ func (c *runtimeWSConnection) handleResume(envelope RuntimeEnvelope) error {
 			return err
 		}
 	}
+	// Only a Session that actually resumes durable Attempts can own a pending
+	// cancellation command. Fresh idle Sessions stay database-silent and rely
+	// on the typed run.cancel wake for future work.
+	c.controlPending.Store(true)
 	return nil
 }
 
@@ -754,17 +765,16 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 
 	var dispatchWake, controlWake, nodeDispatchWake <-chan struct{}
 	if c.controller.dependencies.WakeHub != nil {
-		dispatchWake = c.controller.dependencies.WakeHub.WaitDispatch(c.sessionPrincipal.AgentID)
+		dispatchWake, _ = c.controller.dependencies.WakeHub.RegisterWebSocketDispatch(
+			c.sessionPrincipal.AgentID,
+		)
+		defer c.controller.dependencies.WakeHub.UnregisterWebSocketDispatch(c.sessionPrincipal.AgentID)
 		controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
 		nodeDispatchWake = c.controller.dependencies.WakeHub.WaitNodeDispatch(c.sessionPrincipal.NodeID)
 	}
-	// Ready is a real lifecycle event: probe once for durable work that existed
-	// before this Session attached, then remain database-silent until a typed
-	// signal or an in-flight protocol transition creates more work.
-	c.controlPending.Store(true)
-	c.commandPendingAndSend()
-	c.dispatchPending.Store(true)
-	c.claimPendingAndSend()
+	// Ready completes attachment without a per-Session database probe. New work
+	// arrives through a typed dispatch token; work that predates attachment is
+	// recovered by the bounded process-level PostgreSQL reconciliation pass.
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -778,20 +788,11 @@ func (c *runtimeWSConnection) maintenanceLoop() {
 				return
 			}
 		case <-dispatchWake:
-			if c.controller.dependencies.WakeHub != nil {
-				dispatchWake = c.controller.dependencies.WakeHub.WaitDispatch(c.sessionPrincipal.AgentID)
-			}
-			if !c.refreshMaintenanceSession() {
-				return
-			}
 			c.dispatchPending.Store(true)
 			c.claimPendingAndSend()
 		case <-controlWake:
 			if c.controller.dependencies.WakeHub != nil {
 				controlWake = c.controller.dependencies.WakeHub.WaitControl(c.sessionPrincipal.AgentID)
-			}
-			if !c.refreshMaintenanceSession() {
-				return
 			}
 			c.controlPending.Store(true)
 			c.commandPendingAndSend()

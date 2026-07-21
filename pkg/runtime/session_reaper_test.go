@@ -113,6 +113,65 @@ func TestRuntimeSessionReaperDefersRedisAbsenceWhileDatabaseHeartbeatIsFresh(t *
 	require.InDelta(t, float64(time.Minute), float64(leases.scheduled[0]), float64(time.Millisecond))
 }
 
+func TestRuntimeSessionReaperReconcilesDatabaseAfterRedisExpiryIndexLoss(t *testing.T) {
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	candidate := tx.session
+	repository := &sessionRepositoryFake{tx: tx, staleCandidates: []db.RuntimeSession{candidate}}
+	leases := &runtimeSessionLeaseEvidenceFake{absenceReady: true}
+	reaper := newRuntimeSessionReaperWithLeases(repository, 2*time.Minute, leases)
+	reaper.nextDatabaseReconcileAt = time.Time{}
+
+	reaped, err := reaper.ReapStaleSessions(context.Background(), 32)
+	require.NoError(t, err)
+	require.Equal(t, 1, reaped)
+	require.Equal(t, 1, repository.staleListCalls)
+	require.Equal(t, 1, leases.lookups)
+	require.Equal(t, "offline", tx.session.Status)
+
+	_, err = reaper.ReapStaleSessions(context.Background(), 32)
+	require.NoError(t, err)
+	require.Equal(t, 1, repository.staleListCalls, "database reconciliation must remain process-level and low-frequency")
+}
+
+func TestRuntimeSessionReaperDoesNotReconcileDatabaseBeforeRedisAbsenceWarmup(t *testing.T) {
+	fixture := newSessionFixture()
+	repository := &sessionRepositoryFake{
+		tx:              newSessionTransactionFake(fixture),
+		staleCandidates: []db.RuntimeSession{newSessionTransactionFake(fixture).session},
+	}
+	reaper := newRuntimeSessionReaperWithLeases(
+		repository, 2*time.Minute, &runtimeSessionLeaseEvidenceFake{absenceReady: false},
+	)
+	reaper.nextDatabaseReconcileAt = time.Time{}
+
+	reaped, err := reaper.ReapStaleSessions(context.Background(), 32)
+	require.NoError(t, err)
+	require.Zero(t, reaped)
+	require.Zero(t, repository.staleListCalls)
+}
+
+func TestRuntimeSessionReaperDoesNotHotLoopOnFullPageOfLiveRedisLeases(t *testing.T) {
+	fixture := newSessionFixture()
+	tx := newSessionTransactionFake(fixture)
+	repository := &sessionRepositoryFake{tx: tx, staleCandidates: []db.RuntimeSession{tx.session}}
+	reaper := newRuntimeSessionReaperWithLeases(
+		repository,
+		2*time.Minute,
+		&runtimeSessionLeaseEvidenceFake{found: true, absenceReady: true},
+	)
+	reaper.nextDatabaseReconcileAt = time.Time{}
+
+	reaped, err := reaper.ReapStaleSessions(context.Background(), 1)
+	require.NoError(t, err)
+	require.Zero(t, reaped)
+	require.Equal(t, 1, repository.staleListCalls)
+
+	_, err = reaper.ReapStaleSessions(context.Background(), 1)
+	require.NoError(t, err)
+	require.Equal(t, 1, repository.staleListCalls, "live lease pages must wait for the next minute reconciliation")
+}
+
 func TestRuntimeSessionReaperSkipsHeartbeatAdvancedAfterDiscovery(t *testing.T) {
 	fixture := newSessionFixture()
 	tx := newSessionTransactionFake(fixture)

@@ -136,3 +136,17 @@ func TestEnforceDBIdleCommitRate(t *testing.T) {
 		t.Fatal("database counter error was accepted")
 	}
 }
+
+func TestEnforceDBIdleCommitRateHonorsMinimumObservationDuration(t *testing.T) {
+	cfg := config{DBStrictIdleCommitRate: 2, DBStrictIdleMinDuration: 10 * time.Minute}
+	stage := connectionCapacityStage{DBHold: &dbCounterDelta{
+		DurationMS: 120_000, AdjustedXactCommitPerSec: 2.02, Tables: []dbTableCounterDelta{},
+	}}
+	if err := enforceDBIdleCommitRate(cfg, stage); err != nil {
+		t.Fatalf("short diagnostic hold was treated as the sustained gate: %v", err)
+	}
+	stage.DBHold.DurationMS = 600_000
+	if err := enforceDBIdleCommitRate(cfg, stage); err == nil {
+		t.Fatal("eligible sustained hold above the limit was accepted")
+	}
+}

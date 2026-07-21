@@ -37,6 +37,7 @@ type config struct {
 	DatabaseURL              string
 	DBActivitySampleInterval time.Duration
 	DBStrictIdleCommitRate   float64
+	DBStrictIdleMinDuration  time.Duration
 	Transport                string
 	Scenarios                []string
 	NodeID                   string
@@ -72,6 +73,8 @@ type config struct {
 	ConnectionCapacity       bool
 	ConnectionStepSize       int
 	ConnectionStepHold       time.Duration
+	CapacityHealthInterval   time.Duration
+	DBStatsSettle            time.Duration
 	SwitchAfter              time.Duration
 	SwitchBackAfter          time.Duration
 	CancelCount              int
@@ -886,6 +889,7 @@ func parseFlags() config {
 	flag.StringVar(&cfg.DatabaseURL, "database-url", os.Getenv("DATABASE_URL"), "optional Postgres URL for DB-side counts and query-plan evidence")
 	flag.DurationVar(&cfg.DBActivitySampleInterval, "db-activity-sample-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_DB_ACTIVITY_SAMPLE_INTERVAL", time.Second), "Postgres activity sampling interval; 0 disables periodic observer traffic")
 	flag.Float64Var(&cfg.DBStrictIdleCommitRate, "db-strict-idle-commit-rate", floatEnv("OPENLINKER_RUNTIME_LOADTEST_DB_STRICT_IDLE_COMMIT_RATE", 0), "fail a capacity hold when adjusted PostgreSQL commits/second exceed this value; 0 disables")
+	flag.DurationVar(&cfg.DBStrictIdleMinDuration, "db-strict-idle-min-duration", durationEnv("OPENLINKER_RUNTIME_LOADTEST_DB_STRICT_IDLE_MIN_DURATION", 0), "minimum hold duration eligible for the strict idle commit-rate gate; 0 checks every hold")
 	flag.StringVar(&cfg.Transport, "transport", envDefault("OPENLINKER_RUNTIME_LOADTEST_TRANSPORT", transportAuto), "Runtime transport: ws, pull, or auto")
 	flag.StringVar(&scenarios, "scenarios", envDefault("OPENLINKER_RUNTIME_LOADTEST_SCENARIOS", "baseline"), "comma-separated Runtime scenarios; see cmd/runtime-loadtest/README.md")
 	flag.StringVar(&cfg.NodeID, "node-id", os.Getenv("OPENLINKER_NODE_ID"), "required enrolled Runtime Node UUID from the client certificate")
@@ -921,6 +925,8 @@ func parseFlags() config {
 	flag.BoolVar(&cfg.ConnectionCapacity, "connection-capacity", boolEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_CAPACITY", false), "slow stair-step authenticated WebSocket capacity probe")
 	flag.IntVar(&cfg.ConnectionStepSize, "connection-step-size", intEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_STEP_SIZE", 0), "workers added per capacity stage; default 25")
 	flag.DurationVar(&cfg.ConnectionStepHold, "connection-step-hold", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_STEP_HOLD", 0), "observation hold per capacity stage; default 30s")
+	flag.DurationVar(&cfg.CapacityHealthInterval, "connection-health-sample-interval", durationEnv("OPENLINKER_RUNTIME_LOADTEST_CONNECTION_HEALTH_SAMPLE_INTERVAL", 0), "Core health/readiness sample interval during capacity holds; default 1s")
+	flag.DurationVar(&cfg.DBStatsSettle, "db-stats-settle", durationEnv("OPENLINKER_RUNTIME_LOADTEST_DB_STATS_SETTLE", 0), "connection quiescence before the steady database hold snapshot")
 	flag.DurationVar(&cfg.SwitchAfter, "switch-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_AFTER", 5*time.Second), "planned first transport/Core switch after worker start")
 	flag.DurationVar(&cfg.SwitchBackAfter, "switch-back-after", durationEnv("OPENLINKER_RUNTIME_LOADTEST_SWITCH_BACK_AFTER", 10*time.Second), "planned Pull→WebSocket switch after worker start")
 	flag.IntVar(&cfg.CancelCount, "cancel-count", intEnv("OPENLINKER_RUNTIME_LOADTEST_CANCEL_COUNT", 0), "number of measured Runs to cancel; cancel-race defaults to 1000")
@@ -975,8 +981,11 @@ func (c *config) validate() error {
 	if c.HoldAfter < 0 || c.SubmitDuration < 0 || c.ConnectStagger < 0 {
 		return errors.New("hold/submit/connect durations cannot be negative")
 	}
-	if c.DBActivitySampleInterval < 0 || c.DBStrictIdleCommitRate < 0 {
-		return errors.New("database sample interval and strict commit rate cannot be negative")
+	if c.DBActivitySampleInterval < 0 || c.DBStrictIdleCommitRate < 0 || c.DBStrictIdleMinDuration < 0 {
+		return errors.New("database sample interval, strict commit rate, and strict minimum duration cannot be negative")
+	}
+	if c.DBStrictIdleMinDuration > 0 && c.DBStrictIdleCommitRate == 0 {
+		return errors.New("db-strict-idle-min-duration requires db-strict-idle-commit-rate")
 	}
 	if c.DBStrictIdleCommitRate > 0 {
 		if strings.TrimSpace(c.DatabaseURL) == "" {
@@ -989,8 +998,9 @@ func (c *config) validate() error {
 			return errors.New("db-strict-idle-commit-rate requires db-activity-sample-interval=0 to avoid observer traffic")
 		}
 	}
-	if c.ConnectionStepSize < 0 || c.ConnectionStepHold < 0 {
-		return errors.New("connection capacity step size/hold cannot be negative")
+	if c.ConnectionStepSize < 0 || c.ConnectionStepHold < 0 ||
+		c.CapacityHealthInterval < 0 || c.DBStatsSettle < 0 {
+		return errors.New("connection capacity step size/hold, health sample interval, and database settle duration cannot be negative")
 	}
 	if c.ConnectionCapacity {
 		if c.Transport != transportWS {
@@ -1001,6 +1011,9 @@ func (c *config) validate() error {
 		}
 		if c.ConnectionStepHold == 0 {
 			c.ConnectionStepHold = 30 * time.Second
+		}
+		if c.CapacityHealthInterval == 0 {
+			c.CapacityHealthInterval = time.Second
 		}
 		if c.ConnectStagger == 0 {
 			c.ConnectStagger = 500 * time.Millisecond
@@ -1683,58 +1696,62 @@ func buildReport(cfg config, runID, accountRunID string, accounts []account, age
 		runtimeOrigins = append(runtimeOrigins, cfg.RuntimeURLSecondary)
 	}
 	report := map[string]any{
-		"ok":                      waitErr == nil && holdErr == nil && failed == 0 && completed == cfg.Runs && safetyOK,
-		"run_id":                  runID,
-		"account_run_id":          accountRunID,
-		"api_root":                cfg.APIRoot,
-		"auth_api_root":           cfg.AuthAPIRoot,
-		"runtime_origins":         runtimeOrigins,
-		"transport":               cfg.Transport,
-		"scenarios":               cfg.Scenarios,
-		"node_id":                 cfg.NodeID,
-		"node_version":            cfg.NodeVersion,
-		"node_capacity":           cfg.NodeCapacity,
-		"state_dir":               cfg.StateDir,
-		"users":                   len(accounts),
-		"agents":                  len(agents),
-		"workers_per_agent":       cfg.WorkersPerAgent,
-		"runtime_connections":     len(agents) * cfg.WorkersPerAgent,
-		"setup_concurrency":       cfg.SetupConcurrency,
-		"setup_user_concurrency":  cfg.SetupUserConcurrency,
-		"setup_agent_concurrency": cfg.SetupAgentConcurrency,
-		"history_per_agent":       cfg.HistoryPerAgent,
-		"events_per_run":          cfg.EventsPerRun,
-		"result_delay_ms":         ms(cfg.ResultDelay),
-		"submit_duration_ms":      ms(cfg.SubmitDuration),
-		"ready_timeout_ms":        ms(cfg.ReadyTimeout),
-		"pull_wait_ms":            ms(cfg.PullWait),
-		"command_wait_ms":         ms(cfg.CommandWait),
-		"heartbeat_interval_ms":   ms(cfg.HeartbeatInterval),
-		"ws_probe_interval_ms":    ms(cfg.WSProbeInterval),
-		"connect_stagger_ms":      ms(cfg.ConnectStagger),
-		"connection_capacity":     cfg.ConnectionCapacity,
-		"connection_step_size":    cfg.ConnectionStepSize,
-		"connection_step_hold_ms": ms(cfg.ConnectionStepHold),
-		"hold_after_ms":           ms(cfg.HoldAfter),
-		"hold_actual_ms":          holdActual,
-		"a2a_context":             cfg.ContextMode,
-		"measured_runs_target":    cfg.Runs,
-		"submitted":               submitted,
-		"assigned":                assigned,
-		"completed":               completed,
-		"succeeded":               succeeded,
-		"canceled":                canceled,
-		"failed":                  failed,
-		"throughput_rps":          float64(completed) / totalWindow,
-		"measured_seconds":        totalWindow,
-		"create_run_ms":           summaryStats(allCreateDur),
-		"assign_delay_ms":         summaryStats(assignDur),
-		"result_ack_ms":           summaryStats(resultAckDur),
-		"completion_ms":           summaryStats(completeDur),
-		"measured_timeline":       measuredTimeline(measured, phases.measuredStart, phases.measuredEnd),
-		"runtime":                 runtimeReport,
-		"http_ms_by_op":           httpByOp,
-		"http_status_by_op":       statusByOp,
+		"ok":                                   waitErr == nil && holdErr == nil && failed == 0 && completed == cfg.Runs && safetyOK,
+		"run_id":                               runID,
+		"account_run_id":                       accountRunID,
+		"api_root":                             cfg.APIRoot,
+		"auth_api_root":                        cfg.AuthAPIRoot,
+		"runtime_origins":                      runtimeOrigins,
+		"transport":                            cfg.Transport,
+		"scenarios":                            cfg.Scenarios,
+		"node_id":                              cfg.NodeID,
+		"node_version":                         cfg.NodeVersion,
+		"node_capacity":                        cfg.NodeCapacity,
+		"state_dir":                            cfg.StateDir,
+		"users":                                len(accounts),
+		"agents":                               len(agents),
+		"workers_per_agent":                    cfg.WorkersPerAgent,
+		"runtime_connections":                  len(agents) * cfg.WorkersPerAgent,
+		"setup_concurrency":                    cfg.SetupConcurrency,
+		"setup_user_concurrency":               cfg.SetupUserConcurrency,
+		"setup_agent_concurrency":              cfg.SetupAgentConcurrency,
+		"history_per_agent":                    cfg.HistoryPerAgent,
+		"events_per_run":                       cfg.EventsPerRun,
+		"result_delay_ms":                      ms(cfg.ResultDelay),
+		"submit_duration_ms":                   ms(cfg.SubmitDuration),
+		"ready_timeout_ms":                     ms(cfg.ReadyTimeout),
+		"pull_wait_ms":                         ms(cfg.PullWait),
+		"command_wait_ms":                      ms(cfg.CommandWait),
+		"heartbeat_interval_ms":                ms(cfg.HeartbeatInterval),
+		"ws_probe_interval_ms":                 ms(cfg.WSProbeInterval),
+		"connect_stagger_ms":                   ms(cfg.ConnectStagger),
+		"connection_capacity":                  cfg.ConnectionCapacity,
+		"connection_step_size":                 cfg.ConnectionStepSize,
+		"connection_step_hold_ms":              ms(cfg.ConnectionStepHold),
+		"connection_health_sample_interval_ms": ms(cfg.CapacityHealthInterval),
+		"db_stats_settle_ms":                   ms(cfg.DBStatsSettle),
+		"db_strict_idle_commit_rate":           cfg.DBStrictIdleCommitRate,
+		"db_strict_idle_min_duration_ms":       ms(cfg.DBStrictIdleMinDuration),
+		"hold_after_ms":                        ms(cfg.HoldAfter),
+		"hold_actual_ms":                       holdActual,
+		"a2a_context":                          cfg.ContextMode,
+		"measured_runs_target":                 cfg.Runs,
+		"submitted":                            submitted,
+		"assigned":                             assigned,
+		"completed":                            completed,
+		"succeeded":                            succeeded,
+		"canceled":                             canceled,
+		"failed":                               failed,
+		"throughput_rps":                       float64(completed) / totalWindow,
+		"measured_seconds":                     totalWindow,
+		"create_run_ms":                        summaryStats(allCreateDur),
+		"assign_delay_ms":                      summaryStats(assignDur),
+		"result_ack_ms":                        summaryStats(resultAckDur),
+		"completion_ms":                        summaryStats(completeDur),
+		"measured_timeline":                    measuredTimeline(measured, phases.measuredStart, phases.measuredEnd),
+		"runtime":                              runtimeReport,
+		"http_ms_by_op":                        httpByOp,
+		"http_status_by_op":                    statusByOp,
 		"worker_counts": map[string]int64{
 			"ready":              m.c.workersReady.Load(),
 			"connected_at_end":   m.connectedEnd,

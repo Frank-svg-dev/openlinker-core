@@ -445,7 +445,11 @@ func TestRuntimeWebSocketMaintenanceStopsBeforeUsingReplacementAttachment(t *tes
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
 	fixture.sessions.replaceAttachment()
-	fixture.wakeHub.Wake(fixture.principal.AgentID)
+	// ClaimOffer is the authoritative transaction that validates the Session,
+	// attachment and fencing token before assigning durable work. Model the
+	// conflict there instead of depending on a redundant pre-claim refresh.
+	fixture.leases.setClaimError(newRuntimeSessionError(RuntimeSessionErrorNotAttached, nil))
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 
 	requireRuntimeWSCloseCode(t, conn, RuntimeWSCloseSessionConflict)
 	require.Eventually(t, func() bool {
@@ -464,9 +468,8 @@ func TestRuntimeWebSocketIdleDoesNotContinuouslyPollDatabase(t *testing.T) {
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	require.Eventually(t, func() bool {
-		return fixture.leases.claimCallCount() >= 1 && fixture.cancellations.nextCallCount() >= 1
-	}, time.Second, 10*time.Millisecond)
+	require.Zero(t, fixture.leases.claimCallCount(), "Ready must not probe dispatch per connection")
+	require.Zero(t, fixture.cancellations.nextCallCount(), "fresh Session cannot own a cancellation command")
 
 	claims := fixture.leases.claimCallCount()
 	commands := fixture.cancellations.nextCallCount()
@@ -489,9 +492,8 @@ func TestRuntimeWebSocketTypedWakesOnlyQueryTheirOwnWork(t *testing.T) {
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
-	require.Eventually(t, func() bool {
-		return fixture.leases.claimCallCount() >= 1 && fixture.cancellations.nextCallCount() >= 1
-	}, time.Second, 10*time.Millisecond)
+	require.Zero(t, fixture.leases.claimCallCount())
+	require.Zero(t, fixture.cancellations.nextCallCount())
 
 	claims := fixture.leases.claimCallCount()
 	commands := fixture.cancellations.nextCallCount()
@@ -665,6 +667,7 @@ func TestRuntimeWebSocketAssignmentRequiresExplicitCorrelatedAck(t *testing.T) {
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	ready := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageReady, ready.Type)
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageRunAssigned, assignedEnvelope.Type)
 	require.Nil(t, assignedEnvelope.ReplyToMessageID)
@@ -715,6 +718,7 @@ func TestRuntimeWebSocketAssignmentAckContinuesKnownDispatchDemand(t *testing.T)
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	firstEnvelope := readRuntimeWSEnvelope(t, conn)
 	firstAssigned, err := DecodeRuntimeMessagePayload[RunAssignedPayload](
 		firstEnvelope, RuntimeMessageRunAssigned,
@@ -761,6 +765,7 @@ func TestRuntimeWebSocketCapacitySignalContinuesDemandAfterResultRelease(t *test
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	firstEnvelope := readRuntimeWSEnvelope(t, conn)
 	fixture.leases.setPostAckClaimError(newRuntimeLeaseError(RuntimeLeaseErrorNodeAtCapacity, nil))
 	ack, err := NewRuntimeTypedMessage(
@@ -831,6 +836,7 @@ func TestRuntimeWebSocketRejectRenewEventAndResultPersistBeforeAck(t *testing.T)
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	require.Equal(t, RuntimeMessageReady, readRuntimeWSEnvelope(t, conn).Type)
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 
 	rejectMessage, err := NewRuntimeTypedMessage(
@@ -923,6 +929,7 @@ func TestRuntimeWebSocketRejectsWrongAssignmentCorrelationBeforeLeaseMutation(t 
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	readRuntimeWSEnvelope(t, conn) // ready
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	readRuntimeWSEnvelope(t, conn) // assigned
 	wrongReply := uuid.New()
 	ack, err := NewRuntimeTypedMessage(
@@ -952,6 +959,7 @@ func TestRuntimeWebSocketBusinessErrorIsCorrelatedAndConnectionStaysOpen(t *test
 
 	writeRuntimeWSHello(t, conn, fixture.hello)
 	readRuntimeWSEnvelope(t, conn) // ready
+	fixture.wakeHub.WakeDispatch(fixture.principal.AgentID)
 	assignedEnvelope := readRuntimeWSEnvelope(t, conn)
 	ackMessage, err := NewRuntimeTypedMessage(
 		RuntimeMessageAssignmentAck,
@@ -1054,6 +1062,7 @@ func TestRuntimeWebSocketCancelCommandRequiresCorrelatedDurableAck(t *testing.T)
 	hello := writeRuntimeWSHello(t, conn, fixture.hello)
 	ready := readRuntimeWSEnvelope(t, conn)
 	require.NoError(t, ValidateRuntimeReplyCorrelation(hello, ready))
+	fixture.wakeHub.WakeControl(fixture.principal.AgentID)
 
 	command := readRuntimeWSEnvelope(t, conn)
 	require.Equal(t, RuntimeMessageRunCancel, command.Type)

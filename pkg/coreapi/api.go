@@ -538,6 +538,11 @@ func configureRuntime(
 		runtime.RuntimeMaintenanceWorkerConfig{},
 		eventWake,
 	)
+	go runtime.StartRuntimeDispatchWakeReconciler(
+		rootCtx,
+		runtime.NewRuntimeDispatchWakeReconciler(pool, wakeHub),
+		runtime.RuntimeDispatchWakeReconcilerConfig{},
+	)
 	if signalBus != nil {
 		go runtime.StartRuntimeSignalSubscriber(rootCtx, signalBus, coreInstanceID, wakeHub, runtimeService)
 		go runtime.StartRuntimeSignalOutboxWorkerWithWake(
